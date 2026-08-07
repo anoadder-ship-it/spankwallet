@@ -133,3 +133,19 @@ timelock, owner-veto via cancel_recovery. Watcher-notificatie: optioneel e-maila
 lokaal opgeslagen, geen custodiale macht, nog te implementeren. Fase 2: fee-gated PDA-
 inbox, met erkenning dat directe SPL-transfers de gate kunnen omzeilen. Fase 3: USB
 2-of-2 hardware-split, optionele post-quantum signing voor high-value transacties.
+
+## 10. WebAuthn-fix geimplementeerd (na sectie 6 hierboven)
+
+verify_passkey_signature is bijgewerkt: verifieert nu echt dat het ondertekende bericht
+authenticatorData plus SHA-256(clientDataJSON) is, en dat het challenge-veld in
+clientDataJSON overeenkomt met build_expected_challenge. Nieuwe helpers in
+instructions.rs: sha256_32, base64url_decode, extract_webauthn_challenge.
+
+execute, hunt en cancel_recovery hebben nu een extra client_data_json: Vec<u8> argument.
+De client (browser-extension) moet de WebAuthn-challenge instellen op
+build_expected_challenge(wallet, domain, payload), base64url-encoded, voordat
+navigator.credentials.get() wordt aangeroepen.
+
+Gecommit en gepusht (commit 8ce4d39). Alle 8 bestaande tests blijven groen (raken deze
+instructies niet aan). Nog te doen: een test die deze flow met een echte of gesimuleerde
+WebAuthn-handtekening valideert - dat is de browser-testpagina, de eerstvolgende stap.

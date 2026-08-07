@@ -1,0 +1,31 @@
+[package]
+name = "spankwallet"
+version = "0.1.0"
+description = "SpankWallet — non-custodial Solana passkey smart wallet, phase 1"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "spankwallet"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+default = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(feature, values("custom-heap"))',
+    'cfg(feature, values("custom-panic"))',
+    'cfg(feature, values("anchor-debug"))',
+] }
+
+[dependencies]
+anchor-lang = "1.1.2"
+anchor-spl = "1.1.2"
+solana-instructions-sysvar = "3.0.1"
+solana-keccak-hasher = "3.1.0"
+solana-sha256-hasher = "3.1.0"

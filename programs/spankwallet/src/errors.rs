@@ -1,0 +1,31 @@
+use anchor_lang::prelude::*;
+
+#[error_code]
+pub enum SpankWalletError {
+    #[msg("wallet_seed_hash komt niet overeen met SHA-256(seed_key)")]
+    InvalidWalletSeedHash,
+
+    #[msg("secp256r1 precompile-verificatie ontbreekt of komt niet overeen met owner_passkey")]
+    InvalidPasskeySignature,
+
+    #[msg("Er loopt al een recovery-verzoek voor deze wallet")]
+    RecoveryAlreadyInProgress,
+
+    #[msg("Er loopt geen recovery-verzoek om te annuleren of af te ronden")]
+    NoRecoveryInProgress,
+
+    #[msg("Recovery-tijdslot is nog niet verstreken")]
+    RecoveryTimelockNotElapsed,
+
+    #[msg("Ed25519-handtekening van backup_authority ontbreekt of is ongeldig")]
+    InvalidBackupAuthoritySignature,
+
+    #[msg("Deze mint staat niet in de door de client opgegeven hunt-lijst als spam")]
+    MintNotInHuntList,
+
+    #[msg("Fee-inbox (deposit_authority) is nog niet actief — fase 2 functionaliteit")]
+    DepositGateNotActive,
+
+    #[msg("Onvoldoende fee betaald voor gated deposit")]
+    InsufficientDepositFee,
+}

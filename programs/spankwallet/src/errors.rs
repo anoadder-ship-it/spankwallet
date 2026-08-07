@@ -5,6 +5,15 @@ pub enum SpankWalletError {
     #[msg("wallet_seed_hash komt niet overeen met SHA-256(seed_key)")]
     InvalidWalletSeedHash,
 
+    #[msg("Het WebAuthn-challenge-veld ontbreekt in clientDataJSON")]
+    MissingWebAuthnChallenge,
+
+    #[msg("Het WebAuthn-challenge komt niet overeen met de verwachte, domain-gebonden hash")]
+    WebAuthnChallengeMismatch,
+
+    #[msg("De secp256r1-precompile ondertekende niet authenticatorData || SHA-256(clientDataJSON)")]
+    WebAuthnMessageHashMismatch,
+
     #[msg("secp256r1 precompile-verificatie ontbreekt of komt niet overeen met owner_passkey")]
     InvalidPasskeySignature,
 
@@ -23,7 +32,7 @@ pub enum SpankWalletError {
     #[msg("Deze mint staat niet in de door de client opgegeven hunt-lijst als spam")]
     MintNotInHuntList,
 
-    #[msg("Fee-inbox (deposit_authority) is nog niet actief — fase 2 functionaliteit")]
+    #[msg("Fee-inbox (deposit_authority) is nog niet actief - fase 2 functionaliteit")]
     DepositGateNotActive,
 
     #[msg("Onvoldoende fee betaald voor gated deposit")]

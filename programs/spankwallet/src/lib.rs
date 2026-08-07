@@ -7,9 +7,7 @@ mod state;
 use instructions::*;
 use state::PASSKEY_PUBKEY_LEN;
 
-// Placeholder — vervangen door de echte program-ID die `anchor keys list`
-// genereert na de eerste lokale build. Ook bijwerken in Anchor.toml.
-declare_id!("FGq7SbsLqjakC5W76mfPCXMiBYxkU7RLTbpackA34g3v");
+declare_id!("6YSKCPbagQABo9jqSoLiDpTtDKcjovxXLP88fDoLm8Dy");
 
 #[program]
 pub mod spankwallet {
@@ -31,12 +29,16 @@ pub mod spankwallet {
         )
     }
 
-    pub fn execute(ctx: Context<Execute>, cpi_instruction_data: Vec<u8>) -> Result<()> {
-        instructions::execute(ctx, cpi_instruction_data)
+    pub fn execute(
+        ctx: Context<Execute>,
+        cpi_instruction_data: Vec<u8>,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::execute(ctx, cpi_instruction_data, client_data_json)
     }
 
-    pub fn hunt(ctx: Context<Hunt>) -> Result<()> {
-        instructions::hunt(ctx)
+    pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
+        instructions::hunt(ctx, client_data_json)
     }
 
     pub fn initiate_recovery(
@@ -46,8 +48,11 @@ pub mod spankwallet {
         instructions::initiate_recovery(ctx, new_owner_passkey)
     }
 
-    pub fn cancel_recovery(ctx: Context<CancelRecovery>) -> Result<()> {
-        instructions::cancel_recovery(ctx)
+    pub fn cancel_recovery(
+        ctx: Context<CancelRecovery>,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::cancel_recovery(ctx, client_data_json)
     }
 
     pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {

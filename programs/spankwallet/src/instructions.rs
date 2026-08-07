@@ -8,14 +8,8 @@ use solana_keccak_hasher::hashv;
 use crate::errors::SpankWalletError;
 use crate::state::*;
 
-/// Officieel adres van het secp256r1-precompile-programma, sinds SIMD-0075.
 pub const SECP256R1_PROGRAM_ID: Pubkey = pubkey!("Secp256r1SigVerify1111111111111111111111111");
 
-/// Hasht een 33-byte gecomprimeerde secp256r1-sleutel naar exact 32 bytes,
-/// voor gebruik als PDA-seed. Solana's PDA-seeds hebben een harde limiet van
-/// 32 bytes per los seed-component (MAX_SEED_LEN) — de ruwe 33-byte sleutel
-/// zelf overschrijdt die limiet met 1 byte en kan dus NOOIT direct als seed
-/// dienen. Ontdekt als kritieke bug bij de eerste TS-clienttest (zie README).
 fn hash_seed_key(seed_key: &[u8; PASSKEY_PUBKEY_LEN]) -> [u8; 32] {
     let digest = solana_sha256_hasher::hash(seed_key.as_ref());
     let mut out = [0u8; 32];
@@ -23,9 +17,72 @@ fn hash_seed_key(seed_key: &[u8; PASSKEY_PUBKEY_LEN]) -> [u8; 32] {
     out
 }
 
-// ---------------------------------------------------------------------------
+fn sha256_32(data: &[u8]) -> [u8; 32] {
+    let digest = solana_sha256_hasher::hash(data);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_ref());
+    out
+}
+
+fn base64url_decode(input: &[u8]) -> Result<Vec<u8>> {
+    fn val(c: u8) -> Result<u8> {
+        match c {
+            b'A'..=b'Z' => Ok(c - b'A'),
+            b'a'..=b'z' => Ok(c - b'a' + 26),
+            b'0'..=b'9' => Ok(c - b'0' + 52),
+            b'-' => Ok(62),
+            b'_' => Ok(63),
+            _ => Err(SpankWalletError::WebAuthnChallengeMismatch.into()),
+        }
+    }
+
+    let mut out = Vec::with_capacity(input.len() * 3 / 4 + 3);
+    let mut chunk = [0u8; 4];
+    let mut chunk_len = 0usize;
+
+    for &byte in input {
+        chunk[chunk_len] = val(byte)?;
+        chunk_len += 1;
+        if chunk_len == 4 {
+            out.push((chunk[0] << 2) | (chunk[1] >> 4));
+            out.push((chunk[1] << 4) | (chunk[2] >> 2));
+            out.push((chunk[2] << 6) | chunk[3]);
+            chunk_len = 0;
+        }
+    }
+
+    match chunk_len {
+        0 => {}
+        2 => out.push((chunk[0] << 2) | (chunk[1] >> 4)),
+        3 => {
+            out.push((chunk[0] << 2) | (chunk[1] >> 4));
+            out.push((chunk[1] << 4) | (chunk[2] >> 2));
+        }
+        _ => return Err(SpankWalletError::WebAuthnChallengeMismatch.into()),
+    }
+
+    Ok(out)
+}
+
+fn extract_webauthn_challenge(client_data_json: &[u8]) -> Result<Vec<u8>> {
+    const NEEDLE: &[u8] = b"\"challenge\":\"";
+
+    let start = client_data_json
+        .windows(NEEDLE.len())
+        .position(|w| w == NEEDLE)
+        .ok_or(SpankWalletError::MissingWebAuthnChallenge)?
+        + NEEDLE.len();
+
+    let end = client_data_json[start..]
+        .iter()
+        .position(|&b| b == b'"')
+        .ok_or(SpankWalletError::MissingWebAuthnChallenge)?
+        + start;
+
+    base64url_decode(&client_data_json[start..end])
+}
+
 // init_wallet
-// ---------------------------------------------------------------------------
 
 #[derive(Accounts)]
 #[instruction(seed_key: [u8; PASSKEY_PUBKEY_LEN], wallet_seed_hash: [u8; 32])]
@@ -34,13 +91,6 @@ pub struct InitWallet<'info> {
         init,
         payer = payer,
         space = WalletAccount::LEN,
-        // Bewust GEEN functie-aanroep hier (bv. hash_seed_key(&seed_key)) —
-        // Anchor's aparte idl-build compilatiepas (voor TS-typegeneratie) kan
-        // berekende seeds die instructie-argumenten gebruiken niet statisch
-        // analyseren en verliest daarbij de scope van seed_key volledig
-        // (E0425, ontdekt bij de eerste `anchor test`-run, zie README).
-        // wallet_seed_hash is daarom een eigen, direct instructie-argument;
-        // de handler-body verifieert on-chain dat hij echt bij seed_key hoort.
         seeds = [b"wallet", wallet_seed_hash.as_ref()],
         bump
     )]
@@ -55,9 +105,6 @@ pub struct InitWallet<'info> {
     )]
     pub vault: Account<'info, VaultAccount>,
 
-    /// Betaalt de account-creatie. In de extension is dit doorgaans hetzelfde
-    /// keypair dat ook de eerste SOL-storting doet — geen relayer/paymaster
-    /// nodig in fase 1 (zie ontwerpdocument §2, punt 1: geen hosted derde partij).
     #[account(mut)]
     pub payer: Signer<'info>,
 
@@ -71,12 +118,6 @@ pub fn init_wallet(
     backup_authority: Pubkey,
     recovery_timelock_seconds: Option<i64>,
 ) -> Result<()> {
-    // Consistentiecheck: de client berekent wallet_seed_hash zelf (nodig voor
-    // de seeds-macro-beperking hierboven), maar het programma vertrouwt dat
-    // niet blindelings — een verkeerde hash zou de gebruiker later zijn eigen
-    // wallet niet meer laten terugvinden. Geen cross-user beveiligingsrisico
-    // (iedereen kiest zijn eigen seed_key/hash-paar), maar wel gebruikersfout
-    // die we hier hard afvangen.
     require!(
         wallet_seed_hash == hash_seed_key(&seed_key),
         SpankWalletError::InvalidWalletSeedHash
@@ -87,7 +128,7 @@ pub fn init_wallet(
 
     wallet.seed_key = seed_key;
     wallet.wallet_seed_hash = wallet_seed_hash;
-    wallet.owner_passkey = seed_key; // bij aanmaak identiek; owner_passkey muteert later bij recovery, seed_key nooit
+    wallet.owner_passkey = seed_key;
     wallet.bump = ctx.bumps.wallet;
     wallet.vault_bump = ctx.bumps.vault;
     wallet.created_at = clock.unix_timestamp;
@@ -95,7 +136,7 @@ pub fn init_wallet(
     wallet.recovery_state = None;
     wallet.recovery_timelock_seconds =
         recovery_timelock_seconds.unwrap_or(DEFAULT_RECOVERY_TIMELOCK_SECONDS);
-    wallet.deposit_authority = None; // fase 1: permissionless deposits, zie §3.3
+    wallet.deposit_authority = None;
 
     let vault = &mut ctx.accounts.vault;
     vault.wallet = wallet.key();
@@ -104,25 +145,7 @@ pub fn init_wallet(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// secp256r1-precompile-parsing (SIMD-0075) + message-binding
-// ---------------------------------------------------------------------------
-//
-// Wire-layout van de Secp256r1SigVerify-instructiedata (little-endian):
-//   byte 0            : num_signatures (u8)
-//   byte 1            : padding (u8)
-//   per signature (14 bytes):
-//     signature_offset             u16
-//     signature_instruction_index  u16  (0xFFFF = huidige instructie)
-//     public_key_offset            u16
-//     public_key_instruction_index u16
-//     message_data_offset          u16
-//     message_data_size            u16
-//     message_instruction_index    u16
-//   daarna: signature (64B) / public key (33B) / message-bytes, doorgaans
-//   inline in dezelfde instructie als de offsets-struct.
-//
-// Bron: solana-improvement-documents SIMD-0075, secp256r1-precompile.
+// secp256r1-precompile-parsing
 
 const SIGNATURE_LEN: usize = 64;
 const OFFSETS_STRUCT_LEN: usize = 14;
@@ -155,10 +178,6 @@ fn parse_offsets(precompile_data: &[u8]) -> Result<ParsedOffsets> {
     let num_signatures = precompile_data[0];
     require!(num_signatures >= 1, SpankWalletError::InvalidPasskeySignature);
 
-    // Alleen de eerste handtekening in de instructie wordt ondersteund —
-    // execute/cancel_recovery/etc. gebruiken telkens één passkey-handtekening
-    // per aanroep. Meerdere signatures in één precompile-instructie zijn
-    // buiten scope voor fase 1.
     let base = HEADER_LEN;
     Ok(ParsedOffsets {
         signature_offset: read_u16_le(precompile_data, base)?,
@@ -171,9 +190,6 @@ fn parse_offsets(precompile_data: &[u8]) -> Result<ParsedOffsets> {
     })
 }
 
-/// Haalt de data van de instructie op waar `index` naar wijst, met 0xFFFF
-/// als conventie voor "deze instructie zelf" (zie Solana precompile-docs,
-/// zelfde patroon als bij het ed25519-precompile).
 fn resolve_instruction_data<'a>(
     ix_sysvar: &AccountInfo<'_>,
     index: u16,
@@ -187,18 +203,11 @@ fn resolve_instruction_data<'a>(
     }
 }
 
-/// Verifieert dat de instructie direct vóór de huidige (current_index - 1)
-/// een geldige secp256r1-precompile-aanroep is, met:
-///   1. het juiste programma-ID (Secp256r1SigVerify1111111111111111111111111)
-///   2. public key exact gelijk aan `expected_pubkey`
-///   3. het ondertekende bericht exact gelijk aan `expected_message` — dit is
-///      de binding die in de vorige versie ontbrak: zonder deze check zou een
-///      geldige handtekening op willekeurig welk bericht hergebruikt kunnen
-///      worden voor elke instructie die dezelfde owner_passkey verwacht.
 fn verify_passkey_signature(
     ix_sysvar: &AccountInfo<'_>,
     expected_pubkey: &[u8; PASSKEY_PUBKEY_LEN],
-    expected_message: &[u8],
+    expected_challenge: &[u8],
+    client_data_json: &[u8],
 ) -> Result<()> {
     let current_index = load_current_index_checked(ix_sysvar)?;
     require!(current_index > 0, SpankWalletError::InvalidPasskeySignature);
@@ -211,7 +220,6 @@ fn verify_passkey_signature(
 
     let offsets = parse_offsets(&precompile_ix.data)?;
 
-    // Publieke sleutel ophalen en vergelijken.
     let pubkey_source =
         resolve_instruction_data(ix_sysvar, offsets.public_key_instruction_index, &precompile_ix.data)?;
     let pk_start = offsets.public_key_offset as usize;
@@ -224,8 +232,6 @@ fn verify_passkey_signature(
         SpankWalletError::InvalidPasskeySignature
     );
 
-    // Bericht ophalen en vergelijken — dit is de binding aan de specifieke
-    // instructie-aanroep (replay-bescherming over instructies heen).
     let message_source =
         resolve_instruction_data(ix_sysvar, offsets.message_instruction_index, &precompile_ix.data)?;
     let msg_start = offsets.message_data_offset as usize;
@@ -233,17 +239,24 @@ fn verify_passkey_signature(
     let actual_message = message_source
         .get(msg_start..msg_end)
         .ok_or(SpankWalletError::InvalidPasskeySignature)?;
+
     require!(
-        actual_message == expected_message,
-        SpankWalletError::InvalidPasskeySignature
+        actual_message.len() >= 32,
+        SpankWalletError::WebAuthnMessageHashMismatch
+    );
+    let client_data_hash = sha256_32(client_data_json);
+    let message_hash_tail = &actual_message[actual_message.len() - 32..];
+    require!(
+        message_hash_tail == client_data_hash.as_slice(),
+        SpankWalletError::WebAuthnMessageHashMismatch
     );
 
-    // Sanity-check dat er daadwerkelijk 64 bytes handtekening op de
-    // opgegeven offset staan (de precompile zelf heeft de wiskundige
-    // geldigheid al geverifieerd vóórdat deze instructie draait — dat is
-    // exact het punt van een precompile: als de transactie deze instructie
-    // bereikt, is de curve-wiskunde al gevalideerd door de validator, wij
-    // hoeven alleen te controleren WELKE sleutel en WELK bericht).
+    let actual_challenge = extract_webauthn_challenge(client_data_json)?;
+    require!(
+        actual_challenge == expected_challenge,
+        SpankWalletError::WebAuthnChallengeMismatch
+    );
+
     let sig_source =
         resolve_instruction_data(ix_sysvar, offsets.signature_instruction_index, &precompile_ix.data)?;
     let sig_start = offsets.signature_offset as usize;
@@ -255,30 +268,19 @@ fn verify_passkey_signature(
     Ok(())
 }
 
-/// Bindt een handtekening aan deze specifieke wallet + actie + payload, zodat
-/// een geldige passkey-handtekening niet herbruikt kan worden voor een andere
-/// instructie of een andere wallet. `domain` onderscheidt instructietypes
-/// (bv. b"execute" vs b"cancel_recovery") zodat een handtekening voor de ene
-/// actie niet voor de andere geldig is.
-fn build_expected_message(wallet: &Pubkey, domain: &[u8], payload: &[u8]) -> Vec<u8> {
+fn build_expected_challenge(wallet: &Pubkey, domain: &[u8], payload: &[u8]) -> Vec<u8> {
     hashv(&[crate::ID.as_ref(), wallet.as_ref(), domain, payload])
         .as_ref()
         .to_vec()
 }
 
-// ---------------------------------------------------------------------------
-// execute — generieke "spending"-instructie
-// ---------------------------------------------------------------------------
+// execute
 
 #[derive(Accounts)]
 pub struct Execute<'info> {
     #[account(
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        // recovery_state moet leeg zijn: tijdens een lopend herstelverzoek
-        // wordt dagelijks spenden bevroren, zodat een aanvaller die het
-        // recovery-tijdslot heeft gestart niet ondertussen ook nog kan
-        // leegtrekken via de nog-actieve oude passkey.
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
     )]
     pub wallet: Account<'info, WalletAccount>,
@@ -289,25 +291,17 @@ pub struct Execute<'info> {
     )]
     pub vault: Account<'info, VaultAccount>,
 
-    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via
-    /// een Anchor Signer-check — een passkey is geen Ed25519-keypair dat
-    /// Solana's normale transactie-handtekeningen kan zetten.
     #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-/// `cpi_instruction_data` bevat de door de client opgebouwde payload voor de
-/// onderliggende actie (transfer, swap, etc.). De exacte CPI-routing (welk
-/// extern programma, welke accounts) wordt in de implementatiefase verder
-/// uitgewerkt — dit is bewust een dunne, generieke doorgeefinstructie zodat
-/// het programma zelf klein en auditeerbaar blijft (zie §2, punt 3).
-///
-/// De client moet de passkey exact `build_expected_message(wallet, b"execute",
-/// cpi_instruction_data)` laten ondertekenen — niet de ruwe payload zelf —
-/// zodat een handtekening niet voor een andere wallet of ander domain herbruikt
-/// kan worden.
-pub fn execute(ctx: Context<Execute>, cpi_instruction_data: Vec<u8>) -> Result<()> {
-    let expected_message = build_expected_message(
+pub fn execute(
+    ctx: Context<Execute>,
+    cpi_instruction_data: Vec<u8>,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let expected_challenge = build_expected_challenge(
         &ctx.accounts.wallet.key(),
         b"execute",
         &cpi_instruction_data,
@@ -315,18 +309,14 @@ pub fn execute(ctx: Context<Execute>, cpi_instruction_data: Vec<u8>) -> Result<(
     verify_passkey_signature(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
-        &expected_message,
+        &expected_challenge,
+        &client_data_json,
     )?;
 
-    // TODO: bouw en verstuur de daadwerkelijke CPI via invoke_signed met
-    // de vault-PDA-seeds als authority. Placeholder tot de eerste concrete
-    // use-case (SOL-transfer) is uitgewerkt en getest.
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// hunt — burn + close van client-side geclassificeerde spam-accounts
-// ---------------------------------------------------------------------------
+// hunt
 
 #[derive(Accounts)]
 pub struct Hunt<'info> {
@@ -342,31 +332,24 @@ pub struct Hunt<'info> {
     )]
     pub vault: Account<'info, VaultAccount>,
 
-    /// Het token-account dat de client als spam heeft geclassificeerd
-    /// (v0.2 §4 — classificatielogica is client-side, deze instructie
-    /// voert alleen de daadwerkelijke on-chain actie uit).
     #[account(mut)]
     pub target_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: mint-account wordt alleen doorgegeven aan de SPL Token CPI
-    /// (burn), die zelf valideert dat mint bij target_token_account hoort.
+    /// CHECK: mint-account wordt alleen doorgegeven aan de SPL Token CPI (burn).
     pub token_mint: UncheckedAccount<'info>,
 
-    /// SOL/rent uit gesloten accounts komt terug naar de vault, niet naar
-    /// een willekeurige aanroeper — voorkomt dat "hunt" misbruikt wordt als
-    /// manier om rent van andermans wallet te claimen.
     #[account(mut)]
     pub rent_destination: SystemAccount<'info>,
 
-    /// CHECK: zie Execute — passkey-verificatie via precompile.
     #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: zie Execute - passkey-verificatie via precompile.
     pub instructions_sysvar: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
 }
 
-pub fn hunt(ctx: Context<Hunt>) -> Result<()> {
-    let expected_message = build_expected_message(
+pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
+    let expected_challenge = build_expected_challenge(
         &ctx.accounts.wallet.key(),
         b"hunt",
         ctx.accounts.target_token_account.key().as_ref(),
@@ -374,20 +357,16 @@ pub fn hunt(ctx: Context<Hunt>) -> Result<()> {
     verify_passkey_signature(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
-        &expected_message,
+        &expected_challenge,
+        &client_data_json,
     )?;
 
-    let vault_key = ctx.accounts.vault.key();
     let wallet_key = ctx.accounts.wallet.key();
     let seeds = &[b"vault".as_ref(), wallet_key.as_ref(), &[ctx.accounts.vault.bump]];
     let signer_seeds = &[&seeds[..]];
 
     let balance = ctx.accounts.target_token_account.amount;
     if balance > 0 {
-        // Anchor 1.0-breaking-change: CpiContext::new(_with_signer) neemt sinds
-        // v1.0.0 een Pubkey (het programma-ID) in plaats van de AccountInfo van
-        // het programma — de oude redundante `program`-veldkopie is verwijderd.
-        // Zie release notes 1.0.0.
         let burn_ctx = CpiContext::new_with_signer(
             Token::id(),
             Burn {
@@ -411,13 +390,10 @@ pub fn hunt(ctx: Context<Hunt>) -> Result<()> {
     );
     token::close_account(close_ctx)?;
 
-    let _ = vault_key;
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Recovery-flow (v0.2 §3.1a)
-// ---------------------------------------------------------------------------
+// recovery-flow
 
 #[derive(Accounts)]
 pub struct InitiateRecovery<'info> {
@@ -429,9 +405,6 @@ pub struct InitiateRecovery<'info> {
     )]
     pub wallet: Account<'info, WalletAccount>,
 
-    /// De offline backup-authority moet dit als normale Ed25519 Signer
-    /// ondertekenen (het is een gewoon keypair, geen passkey) — dus hier
-    /// géén precompile-omweg nodig, gewone Anchor Signer-check volstaat.
     #[account(address = wallet.backup_authority @ SpankWalletError::InvalidBackupAuthoritySignature)]
     pub backup_authority: Signer<'info>,
 }
@@ -445,9 +418,6 @@ pub fn initiate_recovery(
         initiated_at: clock.unix_timestamp,
         new_owner_passkey,
     });
-    // TODO fase 1 §3.1b: emit! een event hier zodat het notificatie-endpoint
-    // dit kan oppikken en de watcher-mail kan versturen. Vorm (polling vs.
-    // webhook-relay) wordt in implementatiefase bepaald, zie ontwerpdocument.
     Ok(())
 }
 
@@ -461,16 +431,12 @@ pub struct CancelRecovery<'info> {
     )]
     pub wallet: Account<'info, WalletAccount>,
 
-    /// CHECK: veto door de HUIDIGE owner_passkey — via precompile, net als execute.
     #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: veto door de HUIDIGE owner_passkey - via precompile, net als execute.
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-pub fn cancel_recovery(ctx: Context<CancelRecovery>) -> Result<()> {
-    // Bericht wordt gebonden aan de specifieke lopende RecoveryState
-    // (initiated_at + new_owner_passkey), zodat een cancel-handtekening niet
-    // per ongeluk een latere, andere recovery-poging zou kunnen annuleren
-    // via een hergebruikte oude handtekening.
+pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) -> Result<()> {
     let recovery = ctx
         .accounts
         .wallet
@@ -480,12 +446,13 @@ pub fn cancel_recovery(ctx: Context<CancelRecovery>) -> Result<()> {
     payload.extend_from_slice(&recovery.initiated_at.to_le_bytes());
     payload.extend_from_slice(&recovery.new_owner_passkey);
 
-    let expected_message =
-        build_expected_message(&ctx.accounts.wallet.key(), b"cancel_recovery", &payload);
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"cancel_recovery", &payload);
     verify_passkey_signature(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
-        &expected_message,
+        &expected_challenge,
+        &client_data_json,
     )?;
     ctx.accounts.wallet.recovery_state = None;
     Ok(())
@@ -500,8 +467,6 @@ pub struct FinalizeRecovery<'info> {
         constraint = wallet.recovery_state.is_some() @ SpankWalletError::NoRecoveryInProgress
     )]
     pub wallet: Account<'info, WalletAccount>,
-    // Permissionless (v0.2 §3.1a — "wie dan ook" mag na afloop van het
-    // tijdslot finaliseren): geen Signer-account nodig.
 }
 
 pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {

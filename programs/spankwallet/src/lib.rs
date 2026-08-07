@@ -7,7 +7,7 @@ mod state;
 use instructions::*;
 use state::PASSKEY_PUBKEY_LEN;
 
-declare_id!("6YSKCPbagQABo9jqSoLiDpTtDKcjovxXLP88fDoLm8Dy");
+declare_id!("2vcxHtUWZx7Gxe9UkmustHX57FuAqJrjwr9JhmXNzqcj");
 
 #[program]
 pub mod spankwallet {

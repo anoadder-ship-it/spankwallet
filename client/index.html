@@ -2,7 +2,7 @@
 <html lang="nl">
   <head>
     <meta charset="UTF-8" />
-    <title>SpankWallet - Stap 1: passkey-aanmaak</title>
+    <title>SpankWallet - Stap 1+2: passkey + init_wallet</title>
     <style>
       body {
         font-family: monospace;
@@ -23,8 +23,10 @@
         color: white;
         border: none;
         border-radius: 4px;
+        margin-right: 10px;
       }
       button:hover { background: #1d4ed8; }
+      button:disabled { background: #333; cursor: not-allowed; color: #777; }
       #output {
         white-space: pre-wrap;
         word-break: break-all;
@@ -38,19 +40,26 @@
     </style>
   </head>
   <body>
-    <h1>SpankWallet - Stap 1: passkey-aanmaak</h1>
+    <h1>SpankWallet - Stap 1+2: passkey-aanmaak + init_wallet</h1>
     <p>
-      Dit test uitsluitend de eerste, meest risicovolle schakel:
-      een echte WebAuthn-passkey aanmaken en er de rauwe 33-byte
+      Stap 1: een echte WebAuthn-passkey aanmaken en er de rauwe 33-byte
       gecomprimeerde secp256r1-publieke sleutel uit halen (zelfgeschreven
-      CBOR-decodering, geen externe library). Nog geen Solana-interactie.
+      CBOR-decodering, geen externe library).
     </p>
     <p>
-      Werkt alleen als je browser een platform-authenticator heeft
-      (Windows Hello, Touch ID, Android biometrie, of een hardware-
-      security-key). Vereist een secure context - localhost of HTTPS.
+      Stap 2: verbind een Wallet Standard-browserwallet (Phantom, Solflare,
+      etc. - nooit een lokaal sleutelbestand) en roep init_wallet
+      daadwerkelijk aan met die echte passkey-sleutel als seed_key,
+      tegen de lokale validator op http://127.0.0.1:8899.
     </p>
-    <button id="start-btn">Passkey aanmaken</button>
+    <p>
+      Werkt alleen als je browser een platform-authenticator of
+      hardware-security-key heeft, en een Wallet Standard-conforme
+      wallet-extensie geinstalleerd is. Vereist een secure context -
+      localhost of HTTPS.
+    </p>
+    <button id="start-btn">1. Passkey aanmaken</button>
+    <button id="step2-btn" disabled>2. Wallet verbinden + init_wallet aanroepen</button>
     <div id="output"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

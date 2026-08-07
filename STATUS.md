@@ -169,3 +169,38 @@ telefoon-QR-hybride-flow, gaf NotAllowedError).
 Volgende stap (nog niet begonnen): init_wallet aanroepen met deze echte publieke sleutel
 als seed_key (vereist nog GEEN passkey-handtekening, dus logische tussenstap vóór
 navigator.credentials.get() + de secp256r1-precompile-transactie-opbouw).
+
+## 12. Client stap 2 bevestigd via CLI-verificatie (Phantom RPC-routing nog open)
+
+init_wallet is daadwerkelijk on-chain aangeroepen met de echte hardware-passkey-sleutel
+uit sectie 11 (03938bf37f37b80762a63244b624278fe38ae8197e3dd63efe49a9572429291ecb).
+PDA-afleiding, handmatige Borsh-encoding (client/src/initWallet.ts, geen IDL-
+afhankelijkheid), en de volledige transactie-opbouw zijn hiermee bewezen correct.
+
+Belangrijke complicatie onderweg: Phantom's browserextensie faalde herhaaldelijk met
+"Blockhash not found" bij simulatie via de Wallet Standard-integratie (client/src/
+wallet.ts). Eerste fix (blockhash pas verversen vlak voor verzending i.p.v. bij
+transactie-opbouw) loste het niet op. Root cause vermoedelijk: Phantom's interne
+"RPC ROUTER" praat mogelijk niet daadwerkelijk met http://127.0.0.1:8899 ondanks de
+Localnet-instelling, en dit kon niet definitief geverifieerd worden vanuit onze kant.
+
+Definitief bewijs geleverd door Phantom tijdelijk te omzeilen: client/scripts/
+cli-init-wallet-check.mjs tekent rechtstreeks met de lokale CLI-keypair
+(~/.config/solana/id.json, nooit in browsercode) en roept dezelfde init_wallet-instructie
+aan. Resultaat: SUCCES, WalletAccount aangemaakt, eigenaar en account-grootte (231 bytes)
+correct. Dit isoleert het probleem definitief tot Phantom's RPC-routing, niet onze code.
+
+**Openstaand, niet-blokkerend:** Phantom-localnet-RPC-routing-probleem nog niet opgelost.
+De Wallet Standard-integratie (wallet.ts) blijft de juiste architectuur voor de
+uiteindelijke productie-client — dit vereist later gerichter onderzoek (mogelijk Solflare
+als alternatief testen, of Phantom's exacte RPC-configuratie-opties verder uitzoeken).
+
+**Zijdelingse observatie:** de payer-pubkey uit ~/.config/solana/id.json
+(G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp) bleek anders dan de eerder geziene deploy-
+authority (GaU7itnumyaKbXmVDQtbEurimomGk4K3uFzur1Nbx9X2) — dat keypair-bestand is op enig
+moment herschreven. Geen probleem gebleken, maar het is opvallend en de moeite waard om
+in de gaten te houden.
+
+Volgende stap (nog niet begonnen): execute aanroepen met een ECHTE passkey-HANDTEKENING
+(niet alleen de publieke sleutel zoals in stap 2) - dit vereist navigator.credentials.get()
+en de secp256r1-precompile-transactie-opbouw, de kern van de WebAuthn-fix uit sectie 10.

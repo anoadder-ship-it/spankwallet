@@ -149,3 +149,23 @@ navigator.credentials.get() wordt aangeroepen.
 Gecommit en gepusht (commit 8ce4d39). Alle 8 bestaande tests blijven groen (raken deze
 instructies niet aan). Nog te doen: een test die deze flow met een echte of gesimuleerde
 WebAuthn-handtekening valideert - dat is de browser-testpagina, de eerstvolgende stap.
+
+## 11. Client stap 1 voltooid: passkey-aanmaak geverifieerd tegen echte hardware
+
+client/ bevat nu een werkende Vite/TypeScript-testpagina (client/src/passkey.ts,
+client/src/cbor.ts, client/src/main.ts, client/index.html) die een echte WebAuthn-passkey
+aanmaakt en de rauwe 33-byte gecomprimeerde secp256r1-publieke sleutel eruit haalt via een
+zelfgeschreven CBOR-decoder (geen externe library, bewust klein en auditeerbaar gehouden).
+
+Getest en bevestigd werkend tegen een echte FIDO2-hardware-security-key (PIN-flow, niet
+gesimuleerd): resultaat 02df56feb2ffcb354364b05770fa094966e839d337af74869faf1ccf21bae9ab4a
+- 33 bytes, prefix 0x02, exact het formaat dat init_wallet als seed_key verwacht.
+
+Belangrijke fix onderweg: authenticatorSelection.residentKey moest van "required" naar
+"preferred" (compatibeler met hybride/telefoon-flows), en er moest een expliciete
+timeout: 120000 worden toegevoegd (de default browsertimeout was te krap voor de
+telefoon-QR-hybride-flow, gaf NotAllowedError).
+
+Volgende stap (nog niet begonnen): init_wallet aanroepen met deze echte publieke sleutel
+als seed_key (vereist nog GEEN passkey-handtekening, dus logische tussenstap vóór
+navigator.credentials.get() + de secp256r1-precompile-transactie-opbouw).

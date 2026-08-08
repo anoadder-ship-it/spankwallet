@@ -18,7 +18,7 @@ import {
   encodeOptionalI64,
 } from "./webauthnTestHelper";
 
-describe("spankwallet: recovery-flow (initiate/finalize, zonder passkey)", () => {
+describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize zelf vereisen geen passkey, init_wallet erin wel)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.Spankwallet as Program<Spankwallet>;

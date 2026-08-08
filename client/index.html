@@ -2,7 +2,7 @@
 <html lang="nl">
   <head>
     <meta charset="UTF-8" />
-    <title>SpankWallet - Stap 1+2: passkey + init_wallet</title>
+    <title>SpankWallet - Testpagina alle 5 stappen</title>
     <style>
       body {
         font-family: monospace;
@@ -40,7 +40,7 @@
     </style>
   </head>
   <body>
-    <h1>SpankWallet - Stap 1+2: passkey-aanmaak + init_wallet</h1>
+    <h1>SpankWallet - Testpagina: passkey, wallet, execute, recovery, hunt</h1>
     <p>
       Stap 1: een echte WebAuthn-passkey aanmaken en er de rauwe 33-byte
       gecomprimeerde secp256r1-publieke sleutel uit halen (zelfgeschreven
@@ -51,6 +51,13 @@
       etc. - nooit een lokaal sleutelbestand) en roep init_wallet
       daadwerkelijk aan met die echte passkey-sleutel als seed_key,
       tegen devnet.
+    </p>
+    <p>
+      Stap 3: roep execute aan met een ECHTE WebAuthn-passkey-handtekening
+      (secp256r1-precompile). Stap 4: initiate_recovery (backup_authority) +
+      cancel_recovery (echte passkey-handtekening). Stap 5: hunt - spam-SPL-
+      token burnen + closen, teruggewonnen rent 50/50 gesplitst tussen de
+      hunter en Solana's incinerator-adres (permanent uit omloop).
     </p>
     <p>
       Werkt alleen als je browser een platform-authenticator of

@@ -297,3 +297,49 @@ gesimuleerde data.
 - Fase 2 (fee-gated PDA-inbox) en fase 3 (USB 2-of-2, post-quantum): nog niet begonnen
 - npm audit-kwetsbaarheden (8, 2 high) nog niet opgeruimd - browser-dev-dependencies,
   niet in productiecode, maar wel netjes om op te ruimen voor een echte release
+
+## 16. DOORBRAAK 3: volledige recovery-flow bewezen met echte handtekeningen
+
+initiate_recovery en cancel_recovery zijn nu ook end-to-end getest op devnet, allebei met
+echte ondertekening (niet gesimuleerd, niet met test-Keypairs uit de Rust-tests).
+
+Belangrijke technische fix vooraf nodig, ontdekt door vooruit te denken i.p.v. te gokken:
+initiate_recovery vereist TWEE handtekeningen in dezelfde transactie (fee-payer via
+wallet-extensie EN backup_authority als los Ed25519-keypair). client/src/wallet.ts's
+signAndSendTransaction bouwde intern een verse VersionedTransaction op
+(new VersionedTransaction(transaction.compileMessage())) die eerder gezette
+partialSign()-handtekeningen STILZWIJGEND verloor - een subtiele bug die nooit zichtbaar
+werd zolang er maar één signer was (alle eerdere stappen). Gefixed: signAndSendTransaction
+zet nu expliciet elke reeds aanwezige signature uit transaction.signatures over naar de
+juiste index in de VersionedTransaction, gematcht op publicKey. Ook: chain-hint gecorrigeerd
+van het nooit-bijgewerkte "solana:localnet" naar "solana:devnet" (geen blokkerend probleem
+gebleken - Phantom gebruikt zijn eigen ingestelde netwerk - maar wel onjuist en nu gefixed).
+
+Nieuw bestand client/src/recovery.ts:
+- Handmatige WalletAccount-byte-parser (readWalletAccount), OFFSETS handmatig afgeleid uit
+  state.rs, gevalideerd doordat de berekende totale grootte (231 bytes) exact overeenkwam
+  met de al eerder waargenomen on-chain account-grootte - onafhankelijke bevestiging zonder
+  IDL.
+- buildInitiateRecoveryTransaction: bouwt instructie + ondertekent alvast met
+  backup_authority via partialSign(), voordat de wallet-extensie zijn eigen handtekening
+  toevoegt.
+- buildCancelRecoveryTransaction: zelfde patroon als execute.ts (secp256r1-precompile +
+  echte navigator.credentials.get()), maar de challenge is hier gebonden aan de specifieke
+  lopende recovery (initiated_at + new_owner_passkey), exact zoals cancel_recovery in
+  instructions.rs dat vereist.
+
+initiate_recovery discriminator: 84943c4a31b2ebbb
+cancel_recovery discriminator: b017cb2579fbe353
+
+**Resultaat: volledig bevestigd op devnet, in één keer foutloos.** Beide instructies
+succesvol: "Instruction: InitiateRecovery" -> success, recovery_state correct uitgelezen
+(initiated_at + new_owner_passkey kloppen), "Instruction: CancelRecovery" -> success
+(tweede, onafhankelijke echte passkey-handtekening in dezelfde sessie), en tot slot
+bevestigd dat recovery_state weer None is na cancel - niet alleen "transactie ging door"
+maar de daadwerkelijke state-verandering geverifieerd.
+
+**Dit sluit de volledige, kritieke WebAuthn/recovery-testdekking van dit project af.**
+Nog niet getest tegen echte hardware: hunt (vereist een echte SPL-token-mint + token-
+account-opzet, aparte, grotere taak) en finalize_recovery (permissionless, geen
+handtekening nodig, dus eigenlijk al impliciet gedekt door de Rust-tests in
+tests/recovery.ts).

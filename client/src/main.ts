@@ -4,7 +4,8 @@ import { Buffer } from "buffer";
 
 import { createSpankWalletPasskey } from "./passkey";
 import { connectWallet, ConnectedWallet } from "./wallet";
-import { buildInitWalletTransaction } from "./initWallet";
+import { buildInitWalletTransaction, InitWalletPdas } from "./initWallet";
+import { buildExecuteTransaction } from "./execute";
 import { Connection, Keypair } from "@solana/web3.js";
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -19,6 +20,11 @@ function log(msg: string): void {
 }
 
 let lastPasskeyPublicKey: Uint8Array | null = null;
+let lastCredentialId: Uint8Array | null = null;
+let lastPdas: InitWalletPdas | null = null;
+let lastWallet: ConnectedWallet | null = null;
+
+const connection = new Connection("https://api.devnet.solana.com", "confirmed");
 
 async function runStep1(): Promise<void> {
   log("Stap 1: passkey aanmaken via navigator.credentials.create()...");
@@ -30,17 +36,18 @@ async function runStep1(): Promise<void> {
     );
 
     lastPasskeyPublicKey = result.compressedPublicKey;
+    lastCredentialId = result.credentialId;
 
     log("");
     log("SUCCES.");
     log("");
-    log(`Gecomprimeerde publieke sleutel (33 bytes, dit is seed_key voor init_wallet):`);
+    log("Gecomprimeerde publieke sleutel (33 bytes, dit is seed_key voor init_wallet):");
     log(bytesToHex(result.compressedPublicKey));
     log("");
-    log(`Lengte: ${result.compressedPublicKey.length} bytes (moet exact 33 zijn)`);
-    log(`Prefix-byte: 0x${result.compressedPublicKey[0].toString(16)} (moet 0x02 of 0x03 zijn)`);
+    log("Lengte: " + result.compressedPublicKey.length + " bytes (moet exact 33 zijn)");
+    log("Prefix-byte: 0x" + result.compressedPublicKey[0].toString(16) + " (moet 0x02 of 0x03 zijn)");
     log("");
-    log(`Credential-ID (nodig voor navigator.credentials.get() later):`);
+    log("Credential-ID (nodig voor navigator.credentials.get() later):");
     log(bytesToHex(result.credentialId));
     log("");
     log("Klaar voor stap 2 - klik 'Wallet verbinden + init_wallet aanroepen'.");
@@ -64,7 +71,8 @@ async function runStep2(): Promise<void> {
   let wallet: ConnectedWallet;
   try {
     wallet = await connectWallet();
-    log(`Verbonden met "${wallet.walletName}", publicKey: ${wallet.publicKey.toBase58()}`);
+    lastWallet = wallet;
+    log("Verbonden met \"" + wallet.walletName + "\", publicKey: " + wallet.publicKey.toBase58());
   } catch (err) {
     log("FOUT bij wallet-verbinding:");
     log(String(err));
@@ -80,13 +88,12 @@ async function runStep2(): Promise<void> {
       "timelock-semantiek."
   );
   const backupAuthority = Keypair.generate();
-  log(`backup_authority pubkey: ${backupAuthority.publicKey.toBase58()}`);
+  log("backup_authority pubkey: " + backupAuthority.publicKey.toBase58());
 
   log("");
   log("Transactie opbouwen (init_wallet, handmatig Borsh-geencodeerd, geen IDL)...");
 
   try {
-    const connection = new Connection("https://api.devnet.solana.com", "confirmed");
     const { transaction, pdas } = await buildInitWalletTransaction(
       connection,
       wallet.publicKey,
@@ -94,23 +101,16 @@ async function runStep2(): Promise<void> {
       backupAuthority.publicKey,
       null
     );
+    lastPdas = pdas;
 
-    log(`wallet PDA: ${pdas.walletPda.toBase58()}`);
-    log(`vault PDA:  ${pdas.vaultPda.toBase58()}`);
+    log("wallet PDA: " + pdas.walletPda.toBase58());
+    log("vault PDA:  " + pdas.vaultPda.toBase58());
     log("");
 
-    // Blockhash HIER pas verversen, vlak voor verzending - niet bij het
-    // opbouwen van de transactie hierboven. Lokale validators produceren
-    // blokken snel genoeg dat een blockhash kan verlopen in de tijd die de
-    // gebruiker nodig heeft om de wallet-goedkeuringsprompt te bevestigen.
     const { blockhash } = await connection.getLatestBlockhash();
     transaction.recentBlockhash = blockhash;
 
-    // EIGEN simulatie vóór we het aan Phantom geven: Phantom toont alleen
-    // "reverted", niet de daadwerkelijke reden. Onze require!-checks in het
-    // programma loggen wel de exacte oorzaak - dit maakt die logs zichtbaar
-    // i.p.v. te gokken naar de oorzaak van een eventuele revert.
-    log("Eigen simulatie (voor volledige programma-logs, los van Phantom)...");
+    log("Eigen simulatie (voor volledige programma-logs, los van de wallet-extensie)...");
     const simResult = await connection.simulateTransaction(transaction);
     log("Simulatie err: " + JSON.stringify(simResult.value.err));
     log("Simulatie logs:");
@@ -120,13 +120,13 @@ async function runStep2(): Promise<void> {
     log("");
 
     if (simResult.value.err) {
-      log("Simulatie faalde - stop hier, geen zin om aan Phantom aan te bieden.");
+      log("Simulatie faalde - stop hier.");
       return;
     }
 
     log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
     const { signature } = await wallet.signAndSendTransaction(transaction);
-    log(`Verstuurd. Signature: ${signature}`);
+    log("Verstuurd. Signature: " + signature);
 
     log("Wachten op bevestiging...");
     await connection.confirmTransaction(signature, "confirmed");
@@ -139,8 +139,75 @@ async function runStep2(): Promise<void> {
     }
     log("");
     log("SUCCES - WalletAccount daadwerkelijk aangemaakt on-chain, met echte passkey-sleutel.");
-    log(`Account-eigenaar (moet ons programma-ID zijn): ${accountInfo.owner.toBase58()}`);
-    log(`Account-grootte: ${accountInfo.data.length} bytes`);
+    log("Account-eigenaar (moet ons programma-ID zijn): " + accountInfo.owner.toBase58());
+    log("Account-grootte: " + accountInfo.data.length + " bytes");
+    log("");
+    log("Klaar voor stap 3 - klik 'Execute aanroepen met echte passkey-handtekening'.");
+
+    (document.getElementById("step3-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep3(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+
+  log("Stap 3: execute aanroepen met een ECHTE passkey-handtekening...");
+  log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+  try {
+    const { transaction, signedMessage, expectedChallenge } = await buildExecuteTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPdas.vaultPda,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+
+    log("");
+    log("Passkey-handtekening ontvangen en secp256r1-precompile-instructie opgebouwd.");
+    log("Verwachte challenge (keccak256): " + bytesToHex(expectedChallenge));
+    log("Daadwerkelijk ondertekend bericht (authenticatorData || SHA-256(clientDataJSON)):");
+    log(bytesToHex(signedMessage));
+    log("");
+
+    log("Eigen simulatie (dit is de daadwerkelijke test van verify_passkey_signature)...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("SUCCES - de secp256r1-precompile + verify_passkey_signature accepteerden een");
+    log("ECHTE WebAuthn-handtekening van echte hardware. Dit bewijst de WebAuthn-fix");
+    log("(STATUS.md sectie 10) daadwerkelijk werkt, niet alleen in theorie.");
+    log("");
+    log("Transactie versturen (keur goed in je wallet-extensie)...");
+
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd. Volledige passkey-handtekening-keten end-to-end bewezen.");
   } catch (err) {
     log("");
     log("FOUT:");
@@ -156,4 +223,8 @@ document.getElementById("start-btn")!.addEventListener("click", () => {
 
 document.getElementById("step2-btn")!.addEventListener("click", () => {
   runStep2();
+});
+
+document.getElementById("step3-btn")!.addEventListener("click", () => {
+  runStep3();
 });

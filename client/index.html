@@ -50,7 +50,7 @@
       Stap 2: verbind een Wallet Standard-browserwallet (Phantom, Solflare,
       etc. - nooit een lokaal sleutelbestand) en roep init_wallet
       daadwerkelijk aan met die echte passkey-sleutel als seed_key,
-      tegen de lokale validator op http://127.0.0.1:8899.
+      tegen devnet.
     </p>
     <p>
       Werkt alleen als je browser een platform-authenticator of
@@ -60,6 +60,7 @@
     </p>
     <button id="start-btn">1. Passkey aanmaken</button>
     <button id="step2-btn" disabled>2. Wallet verbinden + init_wallet aanroepen</button>
+    <button id="step3-btn" disabled>3. Execute met echte passkey-handtekening</button>
     <div id="output"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

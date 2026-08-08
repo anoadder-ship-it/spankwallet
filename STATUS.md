@@ -412,3 +412,47 @@ staan nog open - zie eerdere chatgeschiedenis voor de volledige afspraak. Concre
 npm audit-kwetsbaarheden opruimen, een grondige security-doorloop van elke require!/PDA-
 seed/ondertekeningscontrole met de kennis van hoe het systeem nu daadwerkelijk werkt, en
 daarna pas code-opschoning + UI-vereenvoudiging.
+
+## 19. Fase B (npm audit) afgerond
+
+Twee losse package.json-bestanden (root voor Anchor/Rust-testtooling, client/ voor de
+browser-testpagina) apart doorlopen, per kwetsbaarheid onderzocht i.p.v. blind
+`npm audit fix --force` (dat zou in beide gevallen kernpakketten - @solana/web3.js,
+@solana/spl-token, mocha - naar onbruikbaar oude versies hebben teruggezet).
+
+**client/package.json:** bigint-buffer (high, CVE-2025-3194, buffer-overflow in
+toBigIntLE(), pakket zelf onderhoudsloos, "no solution available yet" volgens de officiele
+advisory) - opgelost via npm overrides naar de onderhouden, API-compatibele fork
+@trufflesuite/bigint-buffer@^1.1.10, een in de praktijk al gebruikt patroon (o.a. bij
+BitGoJS). Resultaat: van 10 (4 high) naar 9 kwetsbaarheden (1 high). Die resterende "1 high"
+bleek bij nader onderzoek Vite's path-traversal-advisory, EXPLICIET beperkt tot "Windows
+alternate paths" - niet van toepassing op onze Linux/ARM64-omgeving. Overige moderate
+meldingen (esbuild, overige vite) zijn allemaal beperkt tot Vite's development-server,
+nooit aanwezig in een productie-build, en onze dev-server is sinds het weghalen van de
+Cloudflare-tunnel niet meer publiek blootgesteld.
+
+**Root package.json:** serialize-javascript (high, CVE-2020-7660/GHSA-5c6j-r48x-rmvq, RCE
+via RegExp.flags/Date.toISOString(), via mocha) - opgelost via npm overrides naar de
+gepatchte serialize-javascript@^7.0.3 (mocha zelf heeft deze dependency nog niet gebumped,
+maar deze exacte override is een breed gedocumenteerd, community-erkend patroon). Resultaat:
+van 7 (1 high) naar 5 (0 high). Bevestigd dat anchor test nog steeds foutloos 8/8 passing
+blijft na deze wijziging (overrides kunnen in theorie iets breken - expliciet getest, niet
+aangenomen).
+
+Resterende uuid-kwetsbaarheid (moderate, beide package.json's) - "No fix available", diep
+verweven in @solana/web3.js's eigen RPC-transportlaag (jayson). Zelf forceren zou
+@solana/web3.js zelf moeten breken, wat npm's eigen advies ook bevestigt. Bewust
+geaccepteerd risico, laag praktisch risico (uuid's kwetsbaarheid betreft een edge-case in
+hoe een optionele buffer-parameter gebruikt wordt, niet iets wat onze eigen code-paden
+raakt).
+
+**Opmerking over GitHub's Dependabot-telling:** blijft "2 high" tonen na deze fixes, ook al
+laat onze eigen npm audit 0 daadwerkelijk exploiteerbare high-severity kwetsbaarheden meer
+zien. Verklaring: Dependabot classificeert puur op pakketversie-bereiken zonder platform-
+context - de resterende "high"-classificatie (vite path-traversal) is Windows-specifiek en
+dus niet van toepassing op onze Linux/ARM64-omgeving, maar GitHub weet dat niet automatisch.
+Geen gemiste kwestie, puur een classificatie-discrepantie.
+
+Volgende stap in Fase B: grondige security-doorloop van elke require!/PDA-seed/
+ondertekeningscontrole in het Rust-programma, met de kennis van hoe het systeem nu
+daadwerkelijk werkt (na alle end-to-end-bevestigingen in sectie 11-17).

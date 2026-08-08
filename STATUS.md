@@ -250,3 +250,50 @@ wallet-extensie bij betrokken is.
 
 **Kleine opruiming:** cloudflared.deb (16,6MB installatiebestand) per ongeluk in client/
 gedownload en tijdelijk gestaged in git - hersteld en *.deb toegevoegd aan .gitignore.
+
+## 14. DOORBRAAK 2: execute met echte WebAuthn-passkey-handtekening bevestigd
+
+Voortbouwend op sectie 13 (init_wallet werkend via Phantom op devnet), is nu ook execute
+end-to-end getest met een ECHTE passkey-HANDTEKENING (niet alleen de publieke sleutel).
+Dit bewijst de WebAuthn-fix uit sectie 10 daadwerkelijk werkt tegen echte hardware.
+
+Nieuwe client-bestanden:
+- client/src/secp256r1.ts: DER-naar-raw signature-conversie + low-S-normalisatie (ECDSA-
+  handtekeningen zijn malleabel - (r,s) en (r,n-s) zijn beide geldig; Solana's precompile
+  weigert high-S, WebAuthn-authenticators garanderen geen low-S, dus normalisatie is
+  verplicht) + secp256r1-precompile-instructie-opbouw (offsets-struct exact matchend met
+  instructions.rs parse_offsets).
+- client/src/webauthnSign.ts: navigator.credentials.get() aanroepen, authenticatorData +
+  clientDataJSON + DER-handtekening extraheren, signedMessage opbouwen (authenticatorData
+  || SHA-256(clientDataJSON)).
+- client/src/execute.ts: bouwt de volledige transactie (secp256r1-precompile-instructie
+  direct gevolgd door execute-instructie, verplichte volgorde - het programma leest altijd
+  "instructie direct hiervoor"). Gebruikt Keccak-256 via @noble/hashes (bewust een kleine,
+  vertrouwde library i.p.v. zelf een Keccak-permutatie herimplementeren - in tegenstelling
+  tot de CBOR-decoder was dit een bewuste keuze omdat het een gestandaardiseerd
+  cryptografisch primitief is, geen eigen novel logica).
+
+execute discriminator (sha256("global:execute") eerste 8 bytes): 82ddf29a0dc1bd1d.
+
+**Resultaat: volledig bevestigd op devnet.** navigator.credentials.get() succesvol
+aangeroepen (tweede biometrie-/PIN-prompt op dezelfde hardware-key als stap 1), secp256r1-
+precompile + verify_passkey_signature accepteerden de echte handtekening, programma-logs
+tonen "Instruction: Execute" -> "success". Signature:
+6YnPpkX1rDUpVhk3rWaem1MrNLSjKq7YPVH8qpLqoEPKW3pvw7ipriZzoJtAZDBeXLncK421rSrKwe9PWGp7seQ.
+
+**Dit sluit het WebAuthn-hoofdstuk van dit project af:** de volledige keten - passkey-
+aanmaak, publieke-sleutel-extractie (CBOR), init_wallet, en execute met echte handtekening
+(DER-decodering, low-S-normalisatie, precompile-opbouw, on-chain verificatie) - is nu
+allemaal bewezen correct tegen echte hardware, niet alleen in Rust-unittests met
+gesimuleerde data.
+
+## 15. Volgende stappen (bijgewerkt overzicht)
+
+- hunt: nog niet getest tegen echte passkey (zelfde patroon als execute, zou nu snel moeten
+  kunnen met de bestaande secp256r1/webauthnSign-bouwstenen)
+- cancel_recovery: idem, nog niet getest tegen echte passkey
+- execute's CPI-uitvoering is nog steeds een no-op placeholder in het Rust-programma - de
+  eerste concrete use-case (bv. kale SOL-transfer) moet nog uitgewerkt worden
+- Fase 2 (fee-gated PDA-inbox) en fase 3 (USB 2-of-2, post-quantum): nog niet begonnen
+- npm audit-kwetsbaarheden (8, 2 high) nog niet opgeruimd - browser-dev-dependencies,
+  niet in productiecode, maar wel netjes om op te ruimen voor een echte release

@@ -43,4 +43,13 @@ pub enum SpankWalletError {
 
     #[msg("Onvoldoende fee betaald voor gated deposit")]
     InsufficientDepositFee,
+
+    #[msg("Ongeldig secp256r1-publieke-sleutel-prefix - moet 0x02 of 0x03 zijn (gecomprimeerd punt)")]
+    InvalidPasskeyPrefix,
+
+    #[msg("target_token_account is geen Associated Token Account van deze vault voor deze mint")]
+    InvalidTargetTokenAccount,
+
+    #[msg("Onverwachte tijdstempel-overflow bij het berekenen van verstreken recovery-tijd")]
+    TimestampOverflow,
 }

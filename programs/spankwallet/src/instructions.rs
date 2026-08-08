@@ -32,6 +32,21 @@ fn sha256_32(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Valideert dat een secp256r1-publieke-sleutel-byte-array met een geldig
+/// gecomprimeerd-punt-prefix begint (0x02 = even Y, 0x03 = oneven Y - de
+/// twee enige geldige waarden per SEC1). Voorkomt dat een misvormde waarde
+/// permanent vastgelegd wordt: bij init_wallet is dat vooral verspilde
+/// rent, maar bij initiate_recoverys new_owner_passkey zou een ongeldige
+/// waarde de wallet na finalize_recovery ONHERSTELBAAR vastzetten - geen
+/// enkele handtekening kan ooit tegen ongeldige sleutelbytes valideren.
+fn validate_passkey_prefix(passkey: &[u8; PASSKEY_PUBKEY_LEN]) -> Result<()> {
+    require!(
+        passkey[0] == 0x02 || passkey[0] == 0x03,
+        SpankWalletError::InvalidPasskeyPrefix
+    );
+    Ok(())
+}
+
 fn base64url_decode(input: &[u8]) -> Result<Vec<u8>> {
     fn val(c: u8) -> Result<u8> {
         match c {
@@ -130,6 +145,7 @@ pub fn init_wallet(
         wallet_seed_hash == hash_seed_key(&seed_key),
         SpankWalletError::InvalidWalletSeedHash
     );
+    validate_passkey_prefix(&seed_key)?;
 
     let wallet = &mut ctx.accounts.wallet;
     let clock = Clock::get()?;
@@ -338,7 +354,11 @@ pub struct Hunt<'info> {
         bump = wallet.vault_bump,
     )]
     pub vault: Account<'info, VaultAccount>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = target_token_account.owner == vault.key() @ SpankWalletError::InvalidTargetTokenAccount,
+        constraint = target_token_account.mint == token_mint.key() @ SpankWalletError::InvalidTargetTokenAccount,
+    )]
     pub target_token_account: Account<'info, TokenAccount>,
     /// CHECK: mint-account wordt alleen doorgegeven aan de SPL Token CPI (burn).
     pub token_mint: UncheckedAccount<'info>,
@@ -465,6 +485,7 @@ pub fn initiate_recovery(
     ctx: Context<InitiateRecovery>,
     new_owner_passkey: [u8; PASSKEY_PUBKEY_LEN],
 ) -> Result<()> {
+    validate_passkey_prefix(&new_owner_passkey)?;
     let clock = Clock::get()?;
     ctx.accounts.wallet.recovery_state = Some(RecoveryState {
         initiated_at: clock.unix_timestamp,
@@ -528,7 +549,10 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
         .ok_or(SpankWalletError::NoRecoveryInProgress)?;
 
     let clock = Clock::get()?;
-    let elapsed = clock.unix_timestamp - recovery.initiated_at;
+    let elapsed = clock
+        .unix_timestamp
+        .checked_sub(recovery.initiated_at)
+        .ok_or(SpankWalletError::TimestampOverflow)?;
     require!(
         elapsed >= wallet.recovery_timelock_seconds,
         SpankWalletError::RecoveryTimelockNotElapsed

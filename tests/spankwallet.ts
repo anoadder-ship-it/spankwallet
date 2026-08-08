@@ -27,7 +27,13 @@ describe("spankwallet: init_wallet", () => {
   // deze file. Randomness lost dit bij de bron op, voor alle testfiles
   // tegelijk en voor elke herhaalde run.
   function dummySeedKey(): number[] {
-    return Array.from(randomBytes(33));
+    const bytes = randomBytes(33);
+    // secp256r1-gecomprimeerd-punt-prefix moet 0x02 of 0x03 zijn (SEC1) -
+    // het programma valideert dit nu expliciet (validate_passkey_prefix,
+    // zie STATUS.md sectie 21). De overige 32 bytes blijven willekeurig,
+    // dat behoudt de botsingsbescherming tussen testruns hierboven.
+    bytes[0] = 0x02;
+    return Array.from(bytes);
   }
 
   function derivePdas(seedKey: number[]) {

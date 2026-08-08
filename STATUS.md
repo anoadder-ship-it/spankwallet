@@ -503,3 +503,72 @@ in sectie 19.
 **Openstaand, bewust uitgesteld:** een volledig geteste major-upgrade naar Vite 6/7/8, als
 aparte, apart geplande taak wanneer daar tijd voor is - niet blokkerend voor nu, want het
 daadwerkelijke aanvalspad is al gesloten.
+
+## 21. Fase B afgerond: grondige security-doorloop van de Rust-programmalogica
+
+Op expliciet verzoek een systematische doorloop van instructions.rs en state.rs, getoetst
+tegen bekende Solana-kwetsbaarheidsklassen (ontbrekende signer/owner-checks, PDA-seed-
+botsingen, type-cosplay, close-account-revival, integer-overflow, CPI-manipulatie). Vier
+concrete bevindingen, drie direct gefixt:
+
+**Bevinding A (gefixt) - ontbrekende validatie van passkey-prefix-bytes.** Nergens werd
+gecontroleerd of seed_key (init_wallet) of new_owner_passkey (initiate_recovery)
+daadwerkelijk met 0x02 of 0x03 begint (het verplichte SEC1-gecomprimeerd-punt-prefix). Bij
+initiate_recovery was dit ernstig: een misvormde waarde zou de wallet na
+finalize_recovery PERMANENT en ONHERSTELBAAR vastzetten - geen enkele handtekening kan ooit
+tegen ongeldige sleutelbytes valideren. Fix: nieuwe validate_passkey_prefix()-helper,
+aangeroepen in beide instructies, nieuwe SpankWalletError::InvalidPasskeyPrefix.
+
+**Bevinding B (gefixt) - ontbrekende expliciete eigendom-/mint-check in hunt.** hunt
+vertrouwde volledig op SPL Token's eigen interne validatie voor de relatie tussen
+target_token_account, vault, en token_mint - niet direct misbruikbaar (SPL Token weigert
+zelf al een mismatch), maar fragiele engineering. Fix: expliciete Anchor-constraints
+(target_token_account.owner == vault.key(), target_token_account.mint == token_mint.key()),
+nieuwe SpankWalletError::InvalidTargetTokenAccount.
+
+**Bevinding C (bewust NIET gefixt, gedocumenteerd als open ontwerprisico) - theoretisch
+front-running-risico bij init_wallet.** init_wallet vereist geen bewijs van eigendom van de
+meegegeven seed_key op het moment van aanmaak - wie dan ook kan een wallet claimen voor een
+willekeurige 33-byte-waarde. Als een aanvaller een passkey-publieke-sleutel zou kunnen
+onderscheppen VOORDAT de rechtmatige eigenaar zelf init_wallet aanroept (kort tijdvenster
+tussen passkey-aanmaak en transactiebevestiging), zou de aanvaller een wallet kunnen
+claimen met een eigen backup_authority en na de recovery-flow de wallet overnemen. Praktisch
+smal venster, geen raadbare sleutel nodig door de aanvaller - maar een reeel, tot nu toe niet
+gedocumenteerd ontwerprisico. Vereist een bewuste ontwerpbeslissing (bv. commit-reveal-
+patroon, of accepteren als afgewogen risico) - geen quick fix, bewust uitgesteld tot een
+apart gesprek hierover.
+
+**Bevinding D (gefixt) - inconsistente arithmetic-stijl.** finalize_recovery's
+tijdsberekening (elapsed = clock.unix_timestamp - recovery.initiated_at) gebruikte gewone
+aftrekking i.p.v. checked_sub, inconsistent met de checked-arithmetic-stijl elders (hunt).
+Praktisch onschadelijk (zou pas na miljarden jaren overflowen) maar voor consistentie
+gefixt met een eigen SpankWalletError::TimestampOverflow (bewust APART van
+RentAccountingOverflow - een tussentijdse sed-fout tijdens het doorvoeren verwarde deze twee
+foutcodes eerst, ontdekt en direct hersteld voordat verder werd gegaan, zie ook onderstaande
+les).
+
+**Zijeffect, ontdekt tijdens het testen van de fixes:** de bestaande TS-testfixtures
+(tests/recovery.ts, tests/spankwallet.ts) gebruikten volledig willekeurige 33-byte-waarden
+via randomBytes(33) voor seed_key/new_owner_passkey, zonder ooit het prefix-byte te forceren
+- de nieuwe validate_passkey_prefix-check liet daardoor terecht alle 8 tests initieel falen.
+Dit was geen regressie maar een onthulling dat de testfixtures nooit realistisch waren op
+dit punt. Gefixt: bytes[0] = 0x02 geforceerd in beide testbestanden, overige 32 bytes
+blijven willekeurig (behoudt de botsingsbescherming tussen testruns tegen het permanente
+devnet-account-hergebruik-probleem uit eerdere secties).
+
+**Les over voorzichtig sed-gebruik bij foutcode-hernoeming:** een aanvankelijk te brede
+sed-vervanging (regex zonder regelnummer-specificiteit) veranderde per ongeluk 5 legitieme
+RentAccountingOverflow-verwijzingen in hunt mee naar TimestampOverflow. Direct ontdekt door
+het gewijzigde bestand meteen te herlezen na de vervanging (in plaats van te vertrouwen op
+"het zal wel goed gegaan zijn"), en gericht per regelnummer hersteld. Bevestigt de waarde
+van de in deze sessie gehanteerde werkwijze: elke wijziging direct verifiëren door het
+gewijzigde bestand terug te lezen, nooit aannemen.
+
+Bevestigd: 8/8 Rust-tests groen na alle wijzigingen. Gedeployed op devnet:
+Bt7jcHC5RE93E6J5HGRtWBBmnXYbC3e21pjXLP6tqtBm.
+
+**Fase B is hiermee inhoudelijk afgerond** (npm audit + Rust-security-doorloop). Open
+punten: Bevinding C (ontwerpgesprek nodig), Vite major-upgrade (sectie 20, bewust
+uitgesteld). Volgende fase per eerdere afspraak: Fase C (compacter/zuiverder/eenvoudiger -
+code-opschoning + UI-vereenvoudiging), pas te beginnen nadat Bevinding C is besproken en
+opgelost of bewust geaccepteerd.

@@ -6,6 +6,11 @@ import { createSpankWalletPasskey } from "./passkey";
 import { connectWallet, ConnectedWallet } from "./wallet";
 import { buildInitWalletTransaction, InitWalletPdas } from "./initWallet";
 import { buildExecuteTransaction } from "./execute";
+import {
+  readWalletAccount,
+  buildInitiateRecoveryTransaction,
+  buildCancelRecoveryTransaction,
+} from "./recovery";
 import { Connection, Keypair } from "@solana/web3.js";
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -23,6 +28,7 @@ let lastPasskeyPublicKey: Uint8Array | null = null;
 let lastCredentialId: Uint8Array | null = null;
 let lastPdas: InitWalletPdas | null = null;
 let lastWallet: ConnectedWallet | null = null;
+let lastBackupAuthority: Keypair | null = null;
 
 const connection = new Connection("https://api.devnet.solana.com", "confirmed");
 
@@ -82,12 +88,13 @@ async function runStep2(): Promise<void> {
 
   log("");
   log(
-    "backup_authority: willekeurig gegenereerd Ed25519-keypair, ALLEEN voor deze " +
-      "geisoleerde init_wallet-test. Dit is GEEN veilig backup-mechanisme - de " +
-      "recovery-flow zelf is al apart getest in tests/recovery.ts met correcte " +
-      "timelock-semantiek."
+    "backup_authority: willekeurig gegenereerd Ed25519-keypair, bewaard voor hergebruik " +
+      "in stap 4 (recovery-flow). Dit is GEEN veilig backup-mechanisme voor productie - " +
+      "puur test-keypair, de recovery-timelock-semantiek is al apart getest in " +
+      "tests/recovery.ts."
   );
   const backupAuthority = Keypair.generate();
+  lastBackupAuthority = backupAuthority;
   log("backup_authority pubkey: " + backupAuthority.publicKey.toBase58());
 
   log("");
@@ -142,9 +149,10 @@ async function runStep2(): Promise<void> {
     log("Account-eigenaar (moet ons programma-ID zijn): " + accountInfo.owner.toBase58());
     log("Account-grootte: " + accountInfo.data.length + " bytes");
     log("");
-    log("Klaar voor stap 3 - klik 'Execute aanroepen met echte passkey-handtekening'.");
+    log("Klaar voor stap 3 en/of stap 4.");
 
     (document.getElementById("step3-btn") as HTMLButtonElement).disabled = false;
+    (document.getElementById("step4-btn") as HTMLButtonElement).disabled = false;
   } catch (err) {
     log("");
     log("FOUT:");
@@ -195,8 +203,7 @@ async function runStep3(): Promise<void> {
     }
 
     log("SUCCES - de secp256r1-precompile + verify_passkey_signature accepteerden een");
-    log("ECHTE WebAuthn-handtekening van echte hardware. Dit bewijst de WebAuthn-fix");
-    log("(STATUS.md sectie 10) daadwerkelijk werkt, niet alleen in theorie.");
+    log("ECHTE WebAuthn-handtekening van echte hardware.");
     log("");
     log("Transactie versturen (keur goed in je wallet-extensie)...");
 
@@ -207,7 +214,107 @@ async function runStep3(): Promise<void> {
 
     log("Wachten op bevestiging...");
     await connection.confirmTransaction(signature, "confirmed");
-    log("Bevestigd. Volledige passkey-handtekening-keten end-to-end bewezen.");
+    log("Bevestigd. execute end-to-end bewezen.");
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep4(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet || !lastBackupAuthority) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+
+  log("Stap 4: initiate_recovery + cancel_recovery, allebei met echte ondertekening...");
+  log("");
+
+  try {
+    log("4a. initiate_recovery (ondertekend door backup_authority, GEEN passkey nodig)...");
+    const dummyNewOwnerPasskey = crypto.getRandomValues(new Uint8Array(33));
+
+    const initiateTx = await buildInitiateRecoveryTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastBackupAuthority,
+      dummyNewOwnerPasskey
+    );
+
+    const initiateSimResult = await connection.simulateTransaction(initiateTx);
+    log("Simulatie err: " + JSON.stringify(initiateSimResult.value.err));
+    for (const line of initiateSimResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    if (initiateSimResult.value.err) {
+      log("initiate_recovery-simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Versturen (keur goed in je wallet-extensie)...");
+    const { signature: initiateSig } = await lastWallet.signAndSendTransaction(initiateTx);
+    log("Verstuurd. Signature: " + initiateSig);
+    await connection.confirmTransaction(initiateSig, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    log("Controleren of recovery_state daadwerkelijk gezet is (ruwe account-bytes)...");
+    const afterInitiate = await readWalletAccount(connection, lastPdas.walletPda);
+    if (!afterInitiate.recoveryState) {
+      log("FOUT: recovery_state is None na bevestigde initiate_recovery (onverwacht).");
+      return;
+    }
+    log("recovery_state.initiated_at: " + afterInitiate.recoveryState.initiatedAt);
+    log(
+      "recovery_state.new_owner_passkey: " +
+        bytesToHex(afterInitiate.recoveryState.newOwnerPasskey)
+    );
+    log("");
+
+    log("4b. cancel_recovery (ECHTE passkey-handtekening, huidige owner_passkey)...");
+    log("navigator.credentials.get() wordt aangeroepen - keur de prompt goed.");
+
+    const { transaction: cancelTx } = await buildCancelRecoveryTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname,
+      afterInitiate.recoveryState
+    );
+
+    const cancelSimResult = await connection.simulateTransaction(cancelTx);
+    log("Simulatie err: " + JSON.stringify(cancelSimResult.value.err));
+    for (const line of cancelSimResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    if (cancelSimResult.value.err) {
+      log("cancel_recovery-simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    cancelTx.recentBlockhash = blockhash;
+    const { signature: cancelSig } = await lastWallet.signAndSendTransaction(cancelTx);
+    log("Verstuurd. Signature: " + cancelSig);
+    await connection.confirmTransaction(cancelSig, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    log("Controleren of recovery_state weer None is...");
+    const afterCancel = await readWalletAccount(connection, lastPdas.walletPda);
+    if (afterCancel.recoveryState) {
+      log("FOUT: recovery_state is nog steeds gezet na bevestigde cancel_recovery.");
+      return;
+    }
+    log("");
+    log("SUCCES - volledige recovery-flow (initiate met backup_authority, cancel met");
+    log("ECHTE passkey-handtekening) end-to-end bewezen op devnet.");
   } catch (err) {
     log("");
     log("FOUT:");
@@ -227,4 +334,8 @@ document.getElementById("step2-btn")!.addEventListener("click", () => {
 
 document.getElementById("step3-btn")!.addEventListener("click", () => {
   runStep3();
+});
+
+document.getElementById("step4-btn")!.addEventListener("click", () => {
+  runStep4();
 });

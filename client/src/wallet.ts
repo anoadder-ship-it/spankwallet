@@ -64,13 +64,33 @@ export async function connectWallet(): Promise<ConnectedWallet> {
     publicKey,
     walletName: wallet.name,
     signAndSendTransaction: async (transaction: Transaction) => {
-      const versioned = new VersionedTransaction(transaction.compileMessage());
+      const compiledMessage = transaction.compileMessage();
+      const versioned = new VersionedTransaction(compiledMessage);
+
+      // BELANGRIJK: VersionedTransaction(message) initialiseert signatures
+      // als lege placeholders - eventuele reeds gezette handtekeningen op de
+      // legacy Transaction (via transaction.partialSign(), bv. voor
+      // multi-signer-instructies zoals initiate_recovery met een losse
+      // backup_authority-sleutel naast de wallet-extensie) gaan anders
+      // stilzwijgend verloren. Hier expliciet overzetten naar de juiste
+      // signer-index in de versioned message.
+      for (const { publicKey: signerKey, signature } of transaction.signatures) {
+        if (signature === null) continue;
+        const idx = compiledMessage.accountKeys.findIndex((k) => k.equals(signerKey));
+        if (idx === -1) {
+          throw new Error(
+            "Kon signer " + signerKey.toBase58() + " niet terugvinden in de gecompileerde message"
+          );
+        }
+        versioned.signatures[idx] = signature;
+      }
+
       const serialized = versioned.serialize();
 
       const results = await signAndSendFeature.signAndSendTransaction({
         transaction: serialized,
         account,
-        chain: "solana:localnet",
+        chain: "solana:devnet",
       });
 
       const signatureBytes = results[0].signature;

@@ -19,10 +19,17 @@ function bytesToHex(bytes: Uint8Array): string {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
-
 function log(msg: string): void {
   const el = document.getElementById("output")!;
-  el.textContent += msg + "\n";
+  const line = document.createElement("span");
+  if (msg.startsWith("SUCCES")) {
+    line.className = "log-success";
+  } else if (msg.startsWith("FOUT")) {
+    line.className = "log-error";
+  }
+  line.textContent = msg;
+  el.appendChild(line);
+  el.appendChild(document.createTextNode("\n"));
 }
 
 let lastPasskeyPublicKey: Uint8Array | null = null;

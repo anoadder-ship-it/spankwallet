@@ -38,7 +38,7 @@ let lastPdas: InitWalletPdas | null = null;
 let lastWallet: ConnectedWallet | null = null;
 let lastBackupAuthority: Keypair | null = null;
 
-const connection = new Connection("https://api.devnet.solana.com", "confirmed");
+const connection = new Connection("https://solana-devnet.api.onfinality.io/public", "confirmed");
 
 async function runStep1(): Promise<void> {
   log("Stap 1: passkey aanmaken via navigator.credentials.create()...");
@@ -180,6 +180,9 @@ async function runStep3(): Promise<void> {
   }
 
   log("Stap 3: execute aanroepen met een ECHTE passkey-handtekening...");
+  log("transfer_sol: 1000 lamports terug naar de payer zelf (kleinste zinvolle test).");
+  const testRecipient = lastWallet.publicKey;
+  const testAmountLamports = 1000n;
   log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
 
   try {
@@ -188,6 +191,8 @@ async function runStep3(): Promise<void> {
       lastWallet.publicKey,
       lastPdas.walletPda,
       lastPdas.vaultPda,
+      testRecipient,
+      testAmountLamports,
       lastPasskeyPublicKey,
       lastCredentialId,
       window.location.hostname

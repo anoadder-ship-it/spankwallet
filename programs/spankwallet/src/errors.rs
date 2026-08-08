@@ -50,6 +50,12 @@ pub enum SpankWalletError {
     #[msg("target_token_account is geen Associated Token Account van deze vault voor deze mint")]
     InvalidTargetTokenAccount,
 
+    #[msg("Onverwachte lamport-boekhouding bij transfer_sol in execute")]
+    ExecuteTransferOverflow,
+
+    #[msg("Deze overdracht zou de vault onder zijn rent-exempte minimum laten zakken")]
+    VaultWouldFallBelowRentExempt,
+
     #[msg("Onverwachte tijdstempel-overflow bij het berekenen van verstreken recovery-tijd")]
     TimestampOverflow,
 }

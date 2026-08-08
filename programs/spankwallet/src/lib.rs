@@ -7,7 +7,7 @@ mod state;
 use instructions::*;
 use state::PASSKEY_PUBKEY_LEN;
 
-declare_id!("Gcj9TL8Pt2KfknLVXRrSJ83qkgZzqgghCAFG7UaM31QP");
+declare_id!("ERAEjxMgxserGuj8hc6v7LVy6ZaXaVxwDtXFLbsxj8wY");
 
 #[program]
 pub mod spankwallet {
@@ -33,10 +33,10 @@ pub mod spankwallet {
 
     pub fn execute(
         ctx: Context<Execute>,
-        cpi_instruction_data: Vec<u8>,
+        amount: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::execute(ctx, cpi_instruction_data, client_data_json)
+        instructions::execute(ctx, amount, client_data_json)
     }
 
     pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {

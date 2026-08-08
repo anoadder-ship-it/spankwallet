@@ -349,32 +349,80 @@ pub struct Execute<'info> {
     pub wallet: Account<'info, WalletAccount>,
 
     #[account(
+        mut,
         seeds = [b"vault", wallet.key().as_ref()],
         bump = wallet.vault_bump,
     )]
     pub vault: Account<'info, VaultAccount>,
+
+    /// CHECK: willekeurige ontvanger - geen eigendomsbeperking nodig, crediteren
+    /// van lamports naar een willekeurig account is altijd toegestaan (zelfde
+    /// Solana-runtime-regel als gebruikt in hunt, zie STATUS.md sectie 17).
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
 
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
+/// execute is BEWUST GEEN generieke CPI-doorgeefluik (geen rauwe
+/// instructie-bytes die de client aanlevert en het programma blind
+/// ondertekent). Dat patroon staat bekend als "Arbitrary CPI" - een erkende
+/// kwetsbaarheidsklasse: wie een geldige handtekening kan produceren zou
+/// daarmee de vault kunnen laten interacteren met ELK programma, ELKE
+/// instructie. In plaats daarvan is dit een GESLOTEN, GETYPEERDE actie
+/// (transfer_sol: alleen recipient + amount, geen vrije-vorm-data) - de
+/// enige mogelijke actie is precies wat de handtekening expliciet toestaat,
+/// er is structureel niets anders om te misbruiken. Toekomstige acties
+/// (transfer_token, etc.) horen volgens hetzelfde patroon te worden
+/// toegevoegd: eigen, apart getypeerde instructies met een eigen
+/// challenge-domain, NOOIT als generieke CPI-doorgeefluik. Zie STATUS.md
+/// voor de volledige afweging en de geplande roadmap (program-allowlists,
+/// spend limits, gelaagde privileges) voor wie ooit wel bredere
+/// programmatische controle wil.
 pub fn execute(
     ctx: Context<Execute>,
-    cpi_instruction_data: Vec<u8>,
+    amount: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
-    let expected_challenge = build_expected_challenge(
-        &ctx.accounts.wallet.key(),
-        b"execute",
-        &cpi_instruction_data,
-    );
+    let mut payload = Vec::with_capacity(32 + 8);
+    payload.extend_from_slice(ctx.accounts.recipient.key().as_ref());
+    payload.extend_from_slice(&amount.to_le_bytes());
+
+    let expected_challenge = build_expected_challenge(&ctx.accounts.wallet.key(), b"execute", &payload);
     verify_passkey_signature(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
         &expected_challenge,
         &client_data_json,
     )?;
+
+    // Directe lamport-manipulatie i.p.v. een System-Program-CPI: de vault is
+    // eigendom van ONS programma, niet van System Program (zelfde situatie
+    // als in hunt, zie STATUS.md sectie 17) - System::transfer zou hier
+    // sowieso falen. Debiteren mag alleen de eigenaar van een account,
+    // crediteren mag altijd, ongeacht wie het doelaccount bezit.
+    let rent = Rent::get()?;
+    let min_vault_balance = rent.minimum_balance(VaultAccount::LEN);
+
+    let vault_ai = ctx.accounts.vault.to_account_info();
+    let new_vault_balance = vault_ai
+        .lamports()
+        .checked_sub(amount)
+        .ok_or(SpankWalletError::ExecuteTransferOverflow)?;
+    require!(
+        new_vault_balance >= min_vault_balance,
+        SpankWalletError::VaultWouldFallBelowRentExempt
+    );
+    **vault_ai.try_borrow_mut_lamports()? = new_vault_balance;
+
+    let recipient_ai = ctx.accounts.recipient.to_account_info();
+    let new_recipient_balance = recipient_ai
+        .lamports()
+        .checked_add(amount)
+        .ok_or(SpankWalletError::ExecuteTransferOverflow)?;
+    **recipient_ai.try_borrow_mut_lamports()? = new_recipient_balance;
 
     Ok(())
 }

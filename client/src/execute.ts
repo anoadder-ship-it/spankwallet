@@ -20,18 +20,29 @@ export interface ExecuteResult {
   expectedChallenge: Uint8Array;
 }
 
+/**
+ * Bouwt de execute-transactie (transfer_sol): stuurt exact `amountLamports`
+ * van de vault naar `recipient`. GEEN generieke CPI-doorgeefluik meer sinds
+ * STATUS.md sectie 25 - een gesloten, getypeerde actie, precies wat de
+ * handtekening expliciet toestaat, structureel niets anders om te
+ * misbruiken (mitigeert de "Arbitrary CPI"-kwetsbaarheidsklasse).
+ */
 export async function buildExecuteTransaction(
   connection: Connection,
   payer: PublicKey,
   walletPda: PublicKey,
   vaultPda: PublicKey,
+  recipient: PublicKey,
+  amountLamports: bigint,
   passkeyCompressedPublicKey: Uint8Array,
   credentialId: Uint8Array,
   rpId: string
 ): Promise<ExecuteResult> {
-  const cpiInstructionData = new Uint8Array(0);
+  const amountBytes = new Uint8Array(8);
+  new DataView(amountBytes.buffer).setBigUint64(0, amountLamports, true);
+  const payload = concatBytes(recipient.toBytes(), amountBytes);
 
-  const expectedChallenge = buildExpectedChallenge(walletPda, "execute", cpiInstructionData);
+  const expectedChallenge = buildExpectedChallenge(walletPda, "execute", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -47,7 +58,7 @@ export async function buildExecuteTransaction(
 
   const executeData = concatBytes(
     EXECUTE_DISCRIMINATOR,
-    encodeBorshVecU8(cpiInstructionData),
+    amountBytes,
     encodeBorshVecU8(clientDataJSON)
   );
 
@@ -55,7 +66,8 @@ export async function buildExecuteTransaction(
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
       { pubkey: walletPda, isSigner: false, isWritable: false },
-      { pubkey: vaultPda, isSigner: false, isWritable: false },
+      { pubkey: vaultPda, isSigner: false, isWritable: true },
+      { pubkey: recipient, isSigner: false, isWritable: true },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
     ],
     data: Buffer.from(executeData),

@@ -86,7 +86,7 @@ async function runStep2(): Promise<void> {
   log("Transactie opbouwen (init_wallet, handmatig Borsh-geencodeerd, geen IDL)...");
 
   try {
-    const connection = new Connection("http://127.0.0.1:8899", "confirmed");
+    const connection = new Connection("https://api.devnet.solana.com", "confirmed");
     const { transaction, pdas } = await buildInitWalletTransaction(
       connection,
       wallet.publicKey,
@@ -98,8 +98,6 @@ async function runStep2(): Promise<void> {
     log(`wallet PDA: ${pdas.walletPda.toBase58()}`);
     log(`vault PDA:  ${pdas.vaultPda.toBase58()}`);
     log("");
-    log("Transactie versturen (keur goed in je wallet-extensie)...");
-
 
     // Blockhash HIER pas verversen, vlak voor verzending - niet bij het
     // opbouwen van de transactie hierboven. Lokale validators produceren
@@ -108,6 +106,25 @@ async function runStep2(): Promise<void> {
     const { blockhash } = await connection.getLatestBlockhash();
     transaction.recentBlockhash = blockhash;
 
+    // EIGEN simulatie vóór we het aan Phantom geven: Phantom toont alleen
+    // "reverted", niet de daadwerkelijke reden. Onze require!-checks in het
+    // programma loggen wel de exacte oorzaak - dit maakt die logs zichtbaar
+    // i.p.v. te gokken naar de oorzaak van een eventuele revert.
+    log("Eigen simulatie (voor volledige programma-logs, los van Phantom)...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier, geen zin om aan Phantom aan te bieden.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
     const { signature } = await wallet.signAndSendTransaction(transaction);
     log(`Verstuurd. Signature: ${signature}`);
 

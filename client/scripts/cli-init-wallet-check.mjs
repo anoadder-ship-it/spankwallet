@@ -12,7 +12,7 @@ import { createHash } from "crypto";
 import { homedir } from "os";
 import path from "path";
 
-const PROGRAM_ID = new PublicKey("2vcxHtUWZx7Gxe9UkmustHX57FuAqJrjwr9JhmXNzqcj");
+const PROGRAM_ID = new PublicKey("4mE8U2TFRpDDPR3681KdPCwgQMVr2xhaMebvBp9gKW58");
 const RPC_URL = "http://127.0.0.1:8899";
 
 const INIT_WALLET_DISCRIMINATOR = Buffer.from([

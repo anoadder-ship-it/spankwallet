@@ -7,7 +7,7 @@ import {
 } from "@solana/web3.js";
 
 export const SPANKWALLET_PROGRAM_ID = new PublicKey(
-  "2vcxHtUWZx7Gxe9UkmustHX57FuAqJrjwr9JhmXNzqcj"
+  "4mE8U2TFRpDDPR3681KdPCwgQMVr2xhaMebvBp9gKW58"
 );
 
 const INIT_WALLET_DISCRIMINATOR = Uint8Array.from([

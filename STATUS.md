@@ -664,3 +664,45 @@ Nog openstaand in Fase C: dezelfde soort duplicatie bestaat ook tussen client/sr
 secp256r1.ts en tests/webauthnTestHelper.ts (bewust nog niet samengevoegd, twee losse
 npm-projecten - zie sectie 22), CLI-testscript opruimen/archiveren, en de UI-vereenvoudiging
 (momenteel vijf losse debug-knoppen, niet hoe een eindgebruiker SpankWallet zou ervaren).
+
+## 24. Fase C afgerond: opruiming en leesbaarheid
+
+Drie concrete opschoningsstappen na de eerdere helper-samenvoeging (sectie 23):
+
+**CLI-testscript verwijderd:** client/scripts/cli-init-wallet-check.mjs was waardevol vroeg
+in het project (toen Phantom nog niet met localnet kon praten, zie sectie 12/13), maar
+overbodig sinds de volledige browserflow bewezen werkt. Verwijderd; de geschiedenis in Git
+en STATUS.md behoudt de context mocht dat ooit nog relevant worden.
+
+**Per-ongeluk-gecommit duplicaat-bestand ontdekt en verwijderd:** client/STATUS.md bleek te
+bestaan naast het root-STATUS.md - ontstaan doordat een `cat >> STATUS.md`-commando ooit
+per ongeluk vanuit de client/-map werd uitgevoerd i.p.v. de project-root (verklaart ook de
+eerder opgemerkte, ogenschijnlijk inhoudsloze dubbele commit met identiek bericht). Bevatte
+een geïsoleerde kopie van sectie 22. Correct verwijderd via git rm, geen inhoud verloren
+(stond al compleet in het root-bestand).
+
+**Verouderde teksten gecorrigeerd:** tests/recovery.ts's describe-beschrijving zei nog
+"zonder passkey", wat niet meer klopt sinds createWallet() daarin een echte
+passkey-handtekening gebruikt voor init_wallet (initiate/finalize zelf vereisen nog steeds
+geen passkey - beschrijving verduidelijkt om dat onderscheid expliciet te maken).
+client/index.html's titel en introductietekst spraken nog van "Stap 1+2", zonder stap 3-5 te
+noemen - uitgebreid met een volledige, accurate beschrijving van alle vijf stappen.
+
+**UI-leesbaarheid, bewust minimaal-risico aanpak:** op de vraag "wat is het veiligste"
+gekozen voor de kleinst mogelijke, puur cosmetische wijziging i.p.v. de teststructuur zelf
+te herzien - de vijf-losse-knoppen-met-volledige-logging-opzet blijft ongewijzigd, omdat
+die opzet vandaag herhaaldelijk cruciaal was om problemen op te sporen (blockhash-volgorde,
+RPC-propagatievertraging, de vergeten prefix-fix in runStep4). log() in main.ts gebruikt nu
+DOM-elementen (createElement/textContent, GEEN innerHTML - voorkomt elk injectie-risico,
+ook al is de inhoud altijd onze eigen programma-gegenereerde tekst) i.p.v. simpele
+textContent-optelling, zodat regels die met "SUCCES" beginnen groen en regels die met
+"FOUT" beginnen rood weergegeven worden. Nul functionele wijziging, puur visuele
+leesbaarheidsverbetering. Bevestigd in de browser: styling werkt, rest van de flow
+ongewijzigd (op devnet's bekende rate-limiting na, niet gerelateerd aan deze wijziging).
+
+**Nog openstaand in Fase C (bewust laag-prioriteit, niet blokkerend):** de duplicatie tussen
+client/src/secp256r1.ts en tests/webauthnTestHelper.ts (twee losse npm-projecten, een
+gedeeld package zou een monorepo-herstructurering vereisen - groter dan de huidige
+Fase C-scope rechtvaardigt). Een eventuele grotere UI-herziening (bijv. richting een
+daadwerkelijke productie-achtige wallet-interface i.p.v. testpagina) is een aparte,
+toekomstige fase, geen onderdeel van deze opschoning.

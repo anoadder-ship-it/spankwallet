@@ -639,3 +639,28 @@ Gedeployed op devnet: Gcj9TL8Pt2KfknLVXRrSJ83qkgZzqgghCAFG7UaM31QP.
 (A, B, C, D) uit de security-doorloop zijn nu opgelost, niet slechts gedeeltelijk of
 gedocumenteerd-als-risico. Volgende, per eerdere afspraak: Fase C (compacter/zuiverder/
 eenvoudiger - code-opschoning + UI-vereenvoudiging).
+
+## 23. Fase C gestart: gedeelde client-helpers samengevoegd
+
+Eerste concrete Fase C-stap (compacter/zuiverder): de drie helperfuncties concatBytes(),
+encodeBorshVecU8(), en buildExpectedChallenge() stonden bijna-identiek viervoudig
+gedupliceerd in execute.ts, hunt.ts, recovery.ts en initWallet.ts. Samengevoegd tot een
+nieuw, gedeeld client/src/challenge.ts.
+
+Onderweg ontdekt en voorkomen: challenge.ts heeft SPANKWALLET_PROGRAM_ID nodig, maar
+initWallet.ts (waar die constante voorheen stond) zou omgekeerd challenge.ts's helpers
+nodig hebben - een circulaire import. Opgelost door de constante naar een eigen, minimaal
+bestand client/src/programId.ts te verplaatsen, dat beide zonder cirkel kunnen importeren.
+initWallet.ts blijft SPANKWALLET_PROGRAM_ID wel exporteren (re-export) zodat andere
+bestanden die er al vanuit initWallet.ts importeerden niet hoefden te wijzigen.
+
+Alle vier bestanden herschreven om de gedeelde helpers te importeren i.p.v. lokaal te
+herdefiniëren. Bevestigd in de browser: stap 1, 2, en het begin van stap 4 slaagden
+volledig identiek aan voor de opschoning (initiate_recovery met echte on-chain bevestiging).
+Latere stappen liepen tegen devnet's RPC-rate-limiting aan (429, na de vele testruns van
+vandaag) - een externe, tijdelijke beperking, geen regressie door de refactor.
+
+Nog openstaand in Fase C: dezelfde soort duplicatie bestaat ook tussen client/src/
+secp256r1.ts en tests/webauthnTestHelper.ts (bewust nog niet samengevoegd, twee losse
+npm-projecten - zie sectie 22), CLI-testscript opruimen/archiveren, en de UI-vereenvoudiging
+(momenteel vijf losse debug-knoppen, niet hoe een eindgebruiker SpankWallet zou ervaren).

@@ -10,6 +10,14 @@ use crate::state::*;
 
 pub const SECP256R1_PROGRAM_ID: Pubkey = pubkey!("Secp256r1SigVerify1111111111111111111111111");
 
+/// Solana's algemeen erkende "dead address" - off-curve, geen bekende
+/// private key, gebruikt in het hele ecosysteem om SOL permanent uit
+/// omloop te halen. De helft van de door hunt teruggewonnen rent gaat
+/// hierheen (deflatoir, komt alle SOL-houders ten goede) i.p.v. volledig
+/// naar de hunter - maakt spammen kostbaar zonder een specifieke,
+/// gecentraliseerde begunstigde te kiezen. Zie STATUS.md voor de motivatie.
+pub const INCINERATOR: Pubkey = pubkey!("1nc1nerator11111111111111111111111111111111");
+
 fn hash_seed_key(seed_key: &[u8; PASSKEY_PUBKEY_LEN]) -> [u8; 32] {
     let digest = solana_sha256_hasher::hash(seed_key.as_ref());
     let mut out = [0u8; 32];
@@ -317,7 +325,6 @@ pub fn execute(
 }
 
 // hunt
-
 #[derive(Accounts)]
 pub struct Hunt<'info> {
     #[account(
@@ -325,29 +332,28 @@ pub struct Hunt<'info> {
         bump = wallet.bump,
     )]
     pub wallet: Account<'info, WalletAccount>,
-
     #[account(
+        mut,
         seeds = [b"vault", wallet.key().as_ref()],
         bump = wallet.vault_bump,
     )]
     pub vault: Account<'info, VaultAccount>,
-
     #[account(mut)]
     pub target_token_account: Account<'info, TokenAccount>,
-
     /// CHECK: mint-account wordt alleen doorgegeven aan de SPL Token CPI (burn).
     pub token_mint: UncheckedAccount<'info>,
-
     #[account(mut)]
     pub rent_destination: SystemAccount<'info>,
-
+    /// CHECK: adres-constraint hieronder garandeert dat dit exact het vaste,
+    /// algemeen erkende Solana-"dead address" is (geen bekende private key) -
+    /// zie de toelichting bij de INCINERATOR-constante bovenaan dit bestand.
+    #[account(mut, address = INCINERATOR @ SpankWalletError::InvalidIncineratorAccount)]
+    pub incinerator: UncheckedAccount<'info>,
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: zie Execute - passkey-verificatie via precompile.
     pub instructions_sysvar: UncheckedAccount<'info>,
-
     pub token_program: Program<'info, Token>,
 }
-
 pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
     let expected_challenge = build_expected_challenge(
         &ctx.accounts.wallet.key(),
@@ -360,11 +366,9 @@ pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
         &expected_challenge,
         &client_data_json,
     )?;
-
     let wallet_key = ctx.accounts.wallet.key();
     let seeds = &[b"vault".as_ref(), wallet_key.as_ref(), &[ctx.accounts.vault.bump]];
     let signer_seeds = &[&seeds[..]];
-
     let balance = ctx.accounts.target_token_account.amount;
     if balance > 0 {
         let burn_ctx = CpiContext::new_with_signer(
@@ -379,20 +383,68 @@ pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
         token::burn(burn_ctx, balance)?;
     }
 
+    // Sluit het spam-token-account, maar NIET rechtstreeks naar
+    // rent_destination - de vrijgekomen rent landt eerst bij de vault zelf,
+    // zodat we het exacte, daadwerkelijk teruggewonnen bedrag kunnen meten
+    // (vault_lamports_after - vault_lamports_before) voordat we het
+    // splitsen. Rechtstreeks naar rent_destination sluiten zou geen manier
+    // geven om te weten hoeveel er precies is teruggewonnen zonder
+    // aannames te doen over de rent-exempt-drempel.
+    let vault_ai = ctx.accounts.vault.to_account_info();
+    let vault_lamports_before = vault_ai.lamports();
+
     let close_ctx = CpiContext::new_with_signer(
         Token::id(),
         CloseAccount {
             account: ctx.accounts.target_token_account.to_account_info(),
-            destination: ctx.accounts.rent_destination.to_account_info(),
-            authority: ctx.accounts.vault.to_account_info(),
+            destination: vault_ai.clone(),
+            authority: vault_ai.clone(),
         },
         signer_seeds,
     );
     token::close_account(close_ctx)?;
 
+    let vault_lamports_after = vault_ai.lamports();
+    let reclaimed = vault_lamports_after
+        .checked_sub(vault_lamports_before)
+        .ok_or(SpankWalletError::RentAccountingOverflow)?;
+
+    // Helft naar de incinerator (permanent uit omloop, komt alle
+    // SOL-houders ten goede - zie STATUS.md voor de motivatie), de rest
+    // (bij een oneven bedrag: de ene lamport extra) naar de hunter zelf.
+    let to_incinerator = reclaimed / 2;
+    let to_user = reclaimed
+        .checked_sub(to_incinerator)
+        .ok_or(SpankWalletError::RentAccountingOverflow)?;
+
+    // Directe lamport-herverdeling, geen System-Program-CPI: de vault is
+    // eigendom van ONS programma (niet van System Program), en alleen de
+    // eigenaar van een account mag er lamports uit debiteren. Crediteren
+    // van willekeurige accounts (rent_destination, incinerator) mag altijd,
+    // ongeacht wie ze bezit - dat is de Solana-runtime-regel die dit
+    // toestaat.
+    let new_vault_balance = vault_ai
+        .lamports()
+        .checked_sub(reclaimed)
+        .ok_or(SpankWalletError::RentAccountingOverflow)?;
+    **vault_ai.try_borrow_mut_lamports()? = new_vault_balance;
+
+    let rent_dest_ai = ctx.accounts.rent_destination.to_account_info();
+    let new_rent_dest_balance = rent_dest_ai
+        .lamports()
+        .checked_add(to_user)
+        .ok_or(SpankWalletError::RentAccountingOverflow)?;
+    **rent_dest_ai.try_borrow_mut_lamports()? = new_rent_dest_balance;
+
+    let incinerator_ai = ctx.accounts.incinerator.to_account_info();
+    let new_incinerator_balance = incinerator_ai
+        .lamports()
+        .checked_add(to_incinerator)
+        .ok_or(SpankWalletError::RentAccountingOverflow)?;
+    **incinerator_ai.try_borrow_mut_lamports()? = new_incinerator_balance;
+
     Ok(())
 }
-
 // recovery-flow
 
 #[derive(Accounts)]

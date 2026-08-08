@@ -17,6 +17,12 @@ pub enum SpankWalletError {
     #[msg("secp256r1 precompile-verificatie ontbreekt of komt niet overeen met owner_passkey")]
     InvalidPasskeySignature,
 
+    #[msg("Meegegeven incinerator-account komt niet overeen met het vaste, verwachte adres")]
+    InvalidIncineratorAccount,
+
+    #[msg("Onverwachte lamport-boekhouding bij het splitsen van teruggewonnen rent in hunt")]
+    RentAccountingOverflow,
+
     #[msg("Er loopt al een recovery-verzoek voor deze wallet")]
     RecoveryAlreadyInProgress,
 

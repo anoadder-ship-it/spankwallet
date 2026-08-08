@@ -1,21 +1,38 @@
 # Security Policy
 
-## Supported Versions
+SpankWallet is een actief-in-ontwikkeling, non-custodial Solana-wallet met passkey-
+authenticatie (WebAuthn / secp256r1). Er is geen versienummering zoals bij een
+releasepakket - het project draait momenteel uitsluitend op **devnet**, is niet naar
+mainnet gedeployed, en is nog niet geschikt voor productiegebruik met echte waarde.
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+## Ondersteunde omgeving
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+| Omgeving | Status |
+|----------|--------|
+| Devnet   | Actief, primaire testomgeving |
+| Mainnet  | Nog niet gedeployed |
 
-## Reporting a Vulnerability
+De `main`-branch is de enige actief onderhouden branch. Zie `STATUS.md` voor de volledige,
+actuele stand van zaken en bekende openstaande punten.
 
-Use this section to tell people how to report a vulnerability.
+## Een kwetsbaarheid melden
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+Meld een kwetsbaarheid via [GitHub Security
+Advisories](https://github.com/anoadder-ship-it/spankwallet/security/advisories/new) -
+dit houdt de melding privé totdat er een fix is, in plaats van een publiek issue te openen.
+
+Neem in de melding op:
+- Een duidelijke beschrijving van de kwetsbaarheid en de mogelijke impact
+- Stappen om het te reproduceren (indien van toepassing)
+- Of het gaat om het on-chain programma (`programs/spankwallet/`), de browser-client
+  (`client/`), of iets anders
+
+**Geef alsjeblieft geen details over de kwetsbaarheid in een publiek issue of pull
+request.**
+
+## Wat te verwachten
+
+Dit is een klein, actief project - er is geen formeel SLA, maar meldingen worden serieus
+en zo snel mogelijk bekeken. Zie `STATUS.md` voor context over reeds bekende en
+opgeloste beveiligingsoverwegingen (met name secties 21-22 over de grondige
+security-doorloop en secties 25-26 over de `execute`-herziening).

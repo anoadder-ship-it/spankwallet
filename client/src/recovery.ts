@@ -6,10 +6,10 @@ import {
   Transaction,
   TransactionInstruction,
 } from "@solana/web3.js";
-import { keccak_256 } from "@noble/hashes/sha3";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { SPANKWALLET_PROGRAM_ID } from "./initWallet";
+import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import { SPANKWALLET_PROGRAM_ID } from "./programId";
 
 const INITIATE_RECOVERY_DISCRIMINATOR = Uint8Array.from([
   0x84, 0x94, 0x3c, 0x4a, 0x31, 0xb2, 0xeb, 0xbb,
@@ -17,38 +17,6 @@ const INITIATE_RECOVERY_DISCRIMINATOR = Uint8Array.from([
 const CANCEL_RECOVERY_DISCRIMINATOR = Uint8Array.from([
   0xb0, 0x17, 0xcb, 0x25, 0x79, 0xfb, 0xe3, 0x53,
 ]);
-
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  const total = arrays.reduce((sum, a) => sum + a.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const a of arrays) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
-}
-
-function encodeBorshVecU8(bytes: Uint8Array): Uint8Array {
-  const lenBytes = new Uint8Array(4);
-  new DataView(lenBytes.buffer).setUint32(0, bytes.length, true);
-  return concatBytes(lenBytes, bytes);
-}
-
-function buildExpectedChallenge(
-  wallet: PublicKey,
-  domain: string,
-  payload: Uint8Array
-): Uint8Array {
-  const domainBytes = new TextEncoder().encode(domain);
-  const combined = concatBytes(
-    SPANKWALLET_PROGRAM_ID.toBytes(),
-    wallet.toBytes(),
-    domainBytes,
-    payload
-  );
-  return keccak_256(combined);
-}
 
 const OFFSET_RECOVERY_STATE_TAG = 148;
 const OFFSET_RECOVERY_INITIATED_AT = 149;

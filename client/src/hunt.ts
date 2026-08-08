@@ -16,11 +16,11 @@ import {
   createMintToInstruction,
   getMinimumBalanceForRentExemptMint,
 } from "@solana/spl-token";
-import { keccak_256 } from "@noble/hashes/sha3";
 import { ConnectedWallet } from "./wallet";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { SPANKWALLET_PROGRAM_ID } from "./initWallet";
+import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import { SPANKWALLET_PROGRAM_ID } from "./programId";
 
 const HUNT_DISCRIMINATOR = Uint8Array.from([
   0x94, 0x1e, 0x1c, 0x39, 0x31, 0xf9, 0x1d, 0x41,
@@ -30,38 +30,6 @@ const HUNT_DISCRIMINATOR = Uint8Array.from([
 // instructions.rs's INCINERATOR-constante. Zie STATUS.md voor de motivatie
 // (helft van hunt's teruggewonnen rent gaat hierheen, permanent uit omloop).
 export const INCINERATOR = new PublicKey("1nc1nerator11111111111111111111111111111111");
-
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  const total = arrays.reduce((sum, a) => sum + a.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const a of arrays) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
-}
-
-function encodeBorshVecU8(bytes: Uint8Array): Uint8Array {
-  const lenBytes = new Uint8Array(4);
-  new DataView(lenBytes.buffer).setUint32(0, bytes.length, true);
-  return concatBytes(lenBytes, bytes);
-}
-
-function buildExpectedChallenge(
-  wallet: PublicKey,
-  domain: string,
-  payload: Uint8Array
-): Uint8Array {
-  const domainBytes = new TextEncoder().encode(domain);
-  const combined = concatBytes(
-    SPANKWALLET_PROGRAM_ID.toBytes(),
-    wallet.toBytes(),
-    domainBytes,
-    payload
-  );
-  return keccak_256(combined);
-}
 
 export interface SpamTokenSetupResult {
   mint: PublicKey;

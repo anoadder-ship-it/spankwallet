@@ -6,13 +6,12 @@ import {
   Transaction,
   TransactionInstruction,
 } from "@solana/web3.js";
-import { keccak_256 } from "@noble/hashes/sha3";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
+import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import { SPANKWALLET_PROGRAM_ID } from "./programId";
 
-export const SPANKWALLET_PROGRAM_ID = new PublicKey(
-  "Gcj9TL8Pt2KfknLVXRrSJ83qkgZzqgghCAFG7UaM31QP"
-);
+export { SPANKWALLET_PROGRAM_ID };
 
 const INIT_WALLET_DISCRIMINATOR = Uint8Array.from([
   0x8d, 0x84, 0xe9, 0x82, 0xa8, 0xb7, 0x0a, 0x77,
@@ -21,17 +20,6 @@ const INIT_WALLET_DISCRIMINATOR = Uint8Array.from([
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
   const digest = await crypto.subtle.digest("SHA-256", data);
   return new Uint8Array(digest);
-}
-
-function concatBytes(...arrays: Uint8Array[]): Uint8Array {
-  const total = arrays.reduce((sum, a) => sum + a.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const a of arrays) {
-    out.set(a, offset);
-    offset += a.length;
-  }
-  return out;
 }
 
 // Borsh Option<i64>-codering voor het INSTRUCTIE-ARGUMENT: variabele lengte
@@ -59,27 +47,6 @@ function encodeChallengeOptionalI64(value: bigint | null): Uint8Array {
     new DataView(out.buffer).setBigInt64(1, value, true);
   }
   return out;
-}
-
-function encodeBorshVecU8(bytes: Uint8Array): Uint8Array {
-  const lenBytes = new Uint8Array(4);
-  new DataView(lenBytes.buffer).setUint32(0, bytes.length, true);
-  return concatBytes(lenBytes, bytes);
-}
-
-function buildExpectedChallenge(
-  wallet: PublicKey,
-  domain: string,
-  payload: Uint8Array
-): Uint8Array {
-  const domainBytes = new TextEncoder().encode(domain);
-  const combined = concatBytes(
-    SPANKWALLET_PROGRAM_ID.toBytes(),
-    wallet.toBytes(),
-    domainBytes,
-    payload
-  );
-  return keccak_256(combined);
 }
 
 function encodeInitWalletArgs(

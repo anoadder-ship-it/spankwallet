@@ -456,3 +456,50 @@ Geen gemiste kwestie, puur een classificatie-discrepantie.
 Volgende stap in Fase B: grondige security-doorloop van elke require!/PDA-seed/
 ondertekeningscontrole in het Rust-programma, met de kennis van hoe het systeem nu
 daadwerkelijk werkt (na alle end-to-end-bevestigingen in sectie 11-17).
+
+## 20. Vervolg Fase B: Vite path-traversal (GHSA-4w7w-66w2-5vf9) grondig onderzocht en structureel gefixt
+
+Na sectie 19 kwam op expliciet verzoek een tweede, dieper onderzoek naar de resterende
+"1 high" (Vite path-traversal in .map-afhandeling van optimized deps, CWE-22/CWE-200).
+
+**Eerdere te snelle conclusie, gecorrigeerd:** in eerste instantie leek dit niet van
+toepassing (GitHub's eigen advisory-pagina zegt expliciet "affected: >=6.0.0", en wij
+draaien vite@5.4.21). Bij nader onderzoek bleek npm's eigen audit-database een ANDER,
+breder bereik te hanteren ("<=6.4.1", geen ondergrens) - en een concreet extern
+GitHub-issue (medusajs/medusa#15659) bevestigde expliciet: "There is no 5.x backport - the
+fix exists only in vite@>=6.4.2". We staan al op de nieuwste 5.4.x-patch (5.4.21, geen
+5.4.22 beschikbaar) - dus een niet-brekende patch-upgrade binnen de huidige major was geen
+optie. Les: bij tegenstrijdige bronnen (advisory-pagina vs. audit-database-bereik), het
+bredere/voorzichtigere bereik aanhouden, niet de gunstigste lezing kiezen.
+
+**Bewuste keuze: GEEN overhaaste major-upgrade naar Vite 6+.** Dat zou (a) een grote,
+ongeteste breaking change zijn na uren zorgvuldig debuggen om de huidige Vite 5-opzet
+werkend te krijgen (Buffer-polyfill-volgorde, allowedHosts, etc.), en (b) npm's eigen
+voorstel sprong zelfs door naar Vite 8, een nog grotere sprong. Een major-upgrade is een
+aparte, bewust geplande taak, geen tussendoortje.
+
+**In plaats daarvan: de daadwerkelijke aanvalsvoorwaarde structureel gesloten.** De
+advisory zelf specificeert exact: misbruik vereist dat de dev-server publiek bereikbaar
+wordt gemaakt via --host/server.host. client/vite.config.ts kreeg
+`server.host: false` toegevoegd - dwingt af dat de dev-server ALTIJD uitsluitend aan
+127.0.0.1 bindt, ongeacht toekomstige per-ongeluk-CLI-vlaggen of config-wijzigingen. Dit is
+geen operationele gewoonte meer ("we typen toevallig nooit --host") maar een verifieerbare,
+code-level garantie. Bijkomend: de overbodige `allowedHosts: true` (overgebleven van de
+eerdere, inmiddels niet meer gebruikte Cloudflare Tunnel-test, zie sectie 13) is
+verwijderd - was zelf ook een onnodige verruiming van dezelfde toegangscontrole.
+
+Bevestigd getest: `npm run dev` toont na de wijziging geen "Network:"-regel meer (die
+verschijnt normaliter alleen bij --host-gebruik) - dat kan nu structureel niet meer
+gebeuren.
+
+**Waarom GitHub's Dependabot-telling na deze fix nog steeds "1 high" toont:** Dependabot
+categoriseert uitsluitend op geinstalleerde pakketversie versus bekend-kwetsbaar bereik. Het
+kan niet zien dat we de daadwerkelijke aanvalsvoorwaarde (publieke blootstelling) zelf al
+structureel onmogelijk gemaakt hebben zonder de versie te wijzigen. Dit is een verwachte,
+onschuldige discrepantie tussen geautomatiseerde classificatie en daadwerkelijke,
+in-code-geverifieerde risicomitigatie - vergelijkbaar met de eerdere Windows-only-observatie
+in sectie 19.
+
+**Openstaand, bewust uitgesteld:** een volledig geteste major-upgrade naar Vite 6/7/8, als
+aparte, apart geplande taak wanneer daar tijd voor is - niet blokkerend voor nu, want het
+daadwerkelijke aanvalspad is al gesloten.

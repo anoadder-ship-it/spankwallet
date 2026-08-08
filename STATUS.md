@@ -204,3 +204,49 @@ in de gaten te houden.
 Volgende stap (nog niet begonnen): execute aanroepen met een ECHTE passkey-HANDTEKENING
 (niet alleen de publieke sleutel zoals in stap 2) - dit vereist navigator.credentials.get()
 en de secp256r1-precompile-transactie-opbouw, de kern van de WebAuthn-fix uit sectie 10.
+
+## 13. DOORBRAAK: browserwallet-flow volledig werkend op devnet
+
+Na de CLI-verificatie in sectie 12 volgde uitgebreid, systematisch speurwerk naar waarom
+Phantom's browserextensie bleef falen op de lokale validator - ondanks dat onze EIGEN
+simulatie (rechtstreeks naar 127.0.0.1:8899) telkens succesvol was, met volledige
+programma-logs die "success" toonden.
+
+**Definitieve oorzaak, bevestigd door Phantom's eigen foutmelding:** "Are you sure? Failed
+to simulate the results of this request. Proceeding is unsafe, so Phantom blocked this
+request." Zelfs na expliciet "unsafe" te bevestigen, bleef het falen. Conclusie: Phantom
+simuleert/verstuurt transacties via zijn EIGEN achtergrondinfrastructuur (niet via de RPC
+die onze pagina zelf gebruikt), en die infrastructuur kan per definitie nooit bij een
+127.0.0.1-adres dat alleen op de lokale machine bestaat - ongeacht welk domein de webpagina
+zelf gebruikt (localhost, of zelfs een Cloudflare Tunnel-domein via cloudflared, beide
+faalden op dezelfde manier omdat het domein van de PAGINA niet het probleem was).
+
+**Tussenstap die dit isoleerde (niet meer nodig, maar leerzaam):** Cloudflare Tunnel
+(cloudflared, quick-tunnel-modus, geen account nodig) gebruikt om de lokale Vite-server via
+een echt HTTPS-domein bereikbaar te maken, om te testen of Phantom's aanvankelijke
+domeinverificatie-afwijzing van "localhost" de oorzaak was. Vite's eigen allowedHosts-
+beveiliging moest daarvoor aangepast (vite.config.ts, server.allowedHosts: true). Loste het
+NIET op - bevestigde daarmee dat het probleem dieper zat dan alleen domeinverificatie.
+
+**Oplossing: overgestapt naar echt devnet voor browserwallet-tests.** Programma opnieuw
+gedeployed naar devnet met hetzelfde programma-ID (4mE8U2TFRpDDPR3681KdPCwgQMVr2xhaMebvBp9gKW58,
+dus GEEN client-ID-update nodig) via:
+  solana program deploy target/deploy/spankwallet.so --program-id target/deploy/spankwallet-keypair.json --keypair ~/.config/solana/id.json --url https://api.devnet.solana.com
+client/src/main.ts's Connection-adres aangepast van http://127.0.0.1:8899 naar
+https://api.devnet.solana.com. Phantom teruggezet naar zijn Devnet-instelling.
+
+**Resultaat: volledig succesvolle end-to-end flow**, voor het eerst zonder enige omweg:
+echte hardware-passkey -> Wallet Standard -> Phantom-browserextensie -> daadwerkelijke,
+bevestigde on-chain transactie. Signature: mVrwnFMvr9559fRtKqG1vfXYfRP8EJaMLvxgckqLNhkLCbc
+TNRat7AoftffGZXKijNLUgY2S3vPauLXkZBzVfEM. WalletAccount aangemaakt, 231 bytes, correcte
+eigenaar.
+
+**Praktische les voor toekomstige sessies:** browserwallet-extensies (Phantom in elk geval,
+vermoedelijk anderen ook) zijn NIET geschikt om te testen tegen een lokale
+solana-test-validator, ongeacht netwerkbereikbaarheid van de testpagina zelf. Gebruik
+devnet voor elke test die een echte wallet-extensie in de lus heeft. De lokale validator
+blijft prima voor de Rust-programmatests (anchor test) en CLI-scripts, waar geen
+wallet-extensie bij betrokken is.
+
+**Kleine opruiming:** cloudflared.deb (16,6MB installatiebestand) per ongeluk in client/
+gedownload en tijdelijk gestaged in git - hersteld en *.deb toegevoegd aan .gitignore.

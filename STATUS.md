@@ -343,3 +343,72 @@ Nog niet getest tegen echte hardware: hunt (vereist een echte SPL-token-mint + t
 account-opzet, aparte, grotere taak) en finalize_recovery (permissionless, geen
 handtekening nodig, dus eigenlijk al impliciet gedekt door de Rust-tests in
 tests/recovery.ts).
+
+## 17. Hunt voltooid: burn+close met echte handtekening, 50/50 rent-splitsing naar incinerator
+
+Op verzoek is hunt uitgebreid: in plaats van 100% van de teruggewonnen SPL-token-account-
+rent naar de hunter, gaat nu de helft permanent naar Solana's algemeen erkende "dead
+address" (1nc1nerator11111111111111111111111111111111, off-curve, geen bekende private
+key) - deflatoir voor alle SOL-houders, maakt spammen kostbaar zonder een gecentraliseerde
+begunstigde te kiezen.
+
+Belangrijke technische ontdekking tijdens het ontwerp: de vault-PDA is eigendom van ONS
+programma (niet System Program), dus een System-Program-CPI-transfer om lamports te
+splitsen is niet mogelijk (System Program mag alleen debiteren van accounts die het zelf
+bezit). Oplossing: directe lamport-manipulatie
+(**account.try_borrow_mut_lamports()? = nieuw_saldo), wat elk programma mag doen op
+accounts die het zelf bezit (debiteren) of op willekeurige accounts (crediteren - altijd
+toegestaan, ongeacht eigenaarschap). token_account wordt eerst gesloten NAAR DE VAULT ZELF
+(niet rechtstreeks naar rent_destination) zodat het programma het exacte teruggewonnen
+bedrag kan meten (vault_lamports_after - vault_lamports_before) voordat het splitst -
+zonder aannames over de rent-exempt-drempel.
+
+Nieuwe Rust-constanten/errors: INCINERATOR (instructions.rs), InvalidIncineratorAccount +
+RentAccountingOverflow (errors.rs). Hunt-struct: vault nu mut, nieuw incinerator-account
+met address-constraint. hunt discriminator: 941e1c3931f91d41.
+
+Nieuwe client-bestanden: client/src/hunt.ts (setupSpamTokenAccount met @solana/spl-token -
+bewust een officiele library, zelfde afweging als eerdere gestandaardiseerde onderdelen -
+plus buildHuntTransaction).
+
+**Belangrijke ontdekte les: ES-module-import-volgorde en Buffer-polyfill.** De bestaande
+Buffer-polyfill bovenaan main.ts bleek NIET betrouwbaar zodra @solana/spl-token werd
+geimporteerd - in ES-modules worden ALLE import-statements eerst volledig geevalueerd, in
+volgorde, voordat er ook maar een gewone regel in het aanroepende bestand draait. Een
+polyfill-toewijzing simpelweg bovenaan main.ts plaatsen draait daardoor pas NA alle (ook
+diep geneste) imports. Opgelost met client/src/polyfill.ts, een apart bestand met als
+enige afhankelijkheid het buffer-package zelf, als allereerste import in main.ts.
+
+**Verificatie-episode, uiteindelijk vals alarm - waardevolle les over RPC-consistentie:**
+de eigen client-side na-hunt-verificatie (getBalance() direct na confirmTransaction()) las
+aanvankelijk 0 lamports voor de incinerator, wat leek op een falende rent-splitsing. Bleek
+GEEN programma-bug: solana confirm -v op de exacte transactie-signature toonde de
+daadwerkelijke pre/post-lamport-balansen uit de blockchain zelf, en die klopten EXACT tot
+op de lamport (incinerator: 0 -> 1.019.640 lamports, precies de helft van de 2.039.280-
+lamport rent-exempt-drempel voor een SPL-token-account, geen rest). Zelfs een direct
+daaropvolgend `solana balance`-commando toonde nog steeds 0 - een bevestigd, bekend
+propagatie-vertragingsfenomeen bij publieke, load-balanced RPC-endpoints (devnet in dit
+geval), niet uniek voor onze eigen JS-code. Les: voor definitieve verificatie na een
+transactie, gebruik de transactie-signature zelf (solana confirm -v of vergelijkbaar) i.p.v.
+een losse, onmiddellijk daaropvolgende account-balans-query op mogelijk een andere RPC-node.
+
+**Resultaat: volledig bevestigd, functioneel EN qua rent-boekhouding tot op de lamport
+correct.** Dit is de laatste van de vier kern-instructies (init_wallet, execute, recovery,
+hunt) die nu allemaal end-to-end bewezen zijn met echte hardware-passkey-handtekeningen op
+devnet.
+
+## 18. Status na Fase A (functionele dekking)
+
+Alle bestaande instructies zijn nu getest tegen echte hardware:
+- init_wallet: bewezen (sectie 11-12)
+- execute: bewezen, al is de CPI-uitvoering zelf nog een no-op placeholder (sectie 14)
+- initiate_recovery + cancel_recovery: bewezen (sectie 16)
+- hunt: bewezen, inclusief de nieuwe 50/50-rentsplitsing (sectie 17)
+- finalize_recovery: permissionless, geen handtekening nodig, al gedekt door
+  tests/recovery.ts
+
+Volgende, afgesproken fase (Fase B: veiligheid verharden) en Fase C (compacter/zuiverder)
+staan nog open - zie eerdere chatgeschiedenis voor de volledige afspraak. Concreet:
+npm audit-kwetsbaarheden opruimen, een grondige security-doorloop van elke require!/PDA-
+seed/ondertekeningscontrole met de kennis van hoe het systeem nu daadwerkelijk werkt, en
+daarna pas code-opschoning + UI-vereenvoudiging.

@@ -69,7 +69,7 @@ async function runStep1(): Promise<void> {
 }
 
 async function runStep2(): Promise<void> {
-  if (!lastPasskeyPublicKey) {
+  if (!lastPasskeyPublicKey || !lastCredentialId) {
     log("Voer eerst stap 1 uit (passkey aanmaken).");
     return;
   }
@@ -102,10 +102,13 @@ async function runStep2(): Promise<void> {
   log("Transactie opbouwen (init_wallet, handmatig Borsh-geencodeerd, geen IDL)...");
 
   try {
+    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
     const { transaction, pdas } = await buildInitWalletTransaction(
       connection,
       wallet.publicKey,
       lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname,
       backupAuthority.publicKey,
       null
     );
@@ -237,6 +240,7 @@ async function runStep4(): Promise<void> {
   try {
     log("4a. initiate_recovery (ondertekend door backup_authority, GEEN passkey nodig)...");
     const dummyNewOwnerPasskey = crypto.getRandomValues(new Uint8Array(33));
+    dummyNewOwnerPasskey[0] = 0x02; // secp256r1-prefix moet 0x02/0x03 zijn (validate_passkey_prefix)
 
     const initiateTx = await buildInitiateRecoveryTransaction(
       connection,

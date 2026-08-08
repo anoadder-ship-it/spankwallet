@@ -1,49 +1,41 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
+import {
+  PublicKey,
+  Keypair,
+  SystemProgram,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+} from "@solana/web3.js";
 import { createHash, randomBytes } from "crypto";
 import { assert } from "chai";
 import BN from "bn.js";
 import type { Spankwallet } from "../target/types/spankwallet";
+import {
+  generateTestPasskey,
+  buildExpectedChallenge,
+  signTestChallenge,
+  buildSecp256r1Instruction,
+  encodeOptionalI64,
+} from "./webauthnTestHelper";
 
 describe("spankwallet: recovery-flow (initiate/finalize, zonder passkey)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.Spankwallet as Program<Spankwallet>;
 
-  // Zelfde opzet als in spankwallet.ts: geen echte secp256r1-sleutel nodig
-  // voor init_wallet/initiate_recovery/finalize_recovery — die vereisen geen
-  // passkey-handtekening. Alleen cancel_recovery (owner-veto) en execute/hunt
-  // vereisen de secp256r1-precompile en zijn dus NIET hier getest — die
-  // wachten op een echte WebAuthn-passkey (zie README, browser-testpagina).
-  //
-  // ECHTE randomness i.p.v. vaste fill-waarden: Anchor.toml draait tegen ECHT
-  // devnet, waar accounts PERMANENT blijven bestaan tussen testruns. Vaste
-  // seed_keys botsten hierdoor zowel tussen testfiles onderling als bij elke
-  // herhaalde `anchor test`-run ("already in use") — zie README voor de volle
-  // uitleg. Randomness lost dit bij de bron op.
-  function dummySeedKey(): number[] {
-    const bytes = randomBytes(33);
-    // secp256r1-gecomprimeerd-punt-prefix moet 0x02 of 0x03 zijn (SEC1) -
-    // het programma valideert dit nu expliciet (validate_passkey_prefix,
-    // zie STATUS.md sectie 21). De overige 32 bytes blijven willekeurig,
-    // dat behoudt de botsingsbescherming tussen testruns hierboven.
-    bytes[0] = 0x02;
-    return Array.from(bytes);
-  }
-
+  // new_owner_passkey (argument van initiate_recovery) wordt hier NIET
+  // cryptografisch geverifieerd - initiate_recovery vereist alleen de
+  // backup_authority-handtekening, geen passkey-precompile. Puur het
+  // prefix-byte moet geldig zijn (validate_passkey_prefix, STATUS.md
+  // sectie 21) - vandaar dat dit nog steeds willekeurige bytes mag zijn.
   function dummyNewOwnerPasskey(): number[] {
     const bytes = randomBytes(33);
-    // secp256r1-gecomprimeerd-punt-prefix moet 0x02 of 0x03 zijn (SEC1) -
-    // het programma valideert dit nu expliciet (validate_passkey_prefix,
-    // zie STATUS.md sectie 21). De overige 32 bytes blijven willekeurig,
-    // dat behoudt de botsingsbescherming tussen testruns hierboven.
     bytes[0] = 0x02;
     return Array.from(bytes);
   }
 
-  function derivePdas(seedKey: number[]) {
-    const seedHash = createHash("sha256").update(Buffer.from(seedKey)).digest();
+  function derivePdas(compressedPublicKey: Buffer) {
+    const seedHash = createHash("sha256").update(compressedPublicKey).digest();
     const [walletPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("wallet"), seedHash],
       program.programId
@@ -55,27 +47,59 @@ describe("spankwallet: recovery-flow (initiate/finalize, zonder passkey)", () =>
     return { walletPda, vaultPda, walletSeedHash: Array.from(seedHash) };
   }
 
+  // init_wallet vereist sinds STATUS.md sectie 22 een ECHTE secp256r1-
+  // handtekening (bewijs van bezit). Zie tests/spankwallet.ts voor dezelfde
+  // aanpak, hier hergebruikt binnen deze recovery-flow-tests.
   async function createWallet(timelockSeconds?: number) {
-    const seedKey = dummySeedKey();
+    const passkey = generateTestPasskey();
     const backupAuthority = Keypair.generate();
-    const { walletPda, vaultPda, walletSeedHash } = derivePdas(seedKey);
+    const { walletPda, vaultPda, walletSeedHash } = derivePdas(passkey.compressedPublicKey);
+    const recoveryTimelockSeconds = timelockSeconds != null ? new BN(timelockSeconds) : null;
+
+    const payload = Buffer.concat([
+      backupAuthority.publicKey.toBuffer(),
+      encodeOptionalI64(recoveryTimelockSeconds ? recoveryTimelockSeconds.toNumber() : null),
+    ]);
+    const expectedChallenge = buildExpectedChallenge(
+      program.programId,
+      walletPda,
+      "init_wallet",
+      payload
+    );
+    const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
+      passkey,
+      expectedChallenge
+    );
+    const secp256r1Ix = buildSecp256r1Instruction(
+      passkey.compressedPublicKey,
+      signedMessage,
+      rawSignature
+    );
 
     await program.methods
       .initWallet(
-        seedKey,
+        Array.from(passkey.compressedPublicKey),
         walletSeedHash,
         backupAuthority.publicKey,
-        timelockSeconds != null ? new BN(timelockSeconds) : null
+        recoveryTimelockSeconds,
+        clientDataJSON
       )
       .accounts({
         wallet: walletPda,
         vault: vaultPda,
         payer: provider.wallet.publicKey,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         systemProgram: SystemProgram.programId,
       })
+      .preInstructions([secp256r1Ix])
       .rpc();
 
-    return { seedKey, backupAuthority, walletPda, vaultPda };
+    return {
+      seedKey: Array.from(passkey.compressedPublicKey),
+      backupAuthority,
+      walletPda,
+      vaultPda,
+    };
   }
 
   function sleep(ms: number) {
@@ -103,11 +127,10 @@ describe("spankwallet: recovery-flow (initiate/finalize, zonder passkey)", () =>
       Array.from(wallet.recoveryState.newOwnerPasskey),
       newOwnerPasskey
     );
-    // owner_passkey mag nog NIET gewijzigd zijn — pas na finalize_recovery.
     assert.deepEqual(Array.from(wallet.ownerPasskey), seedKey);
 
     const initiatedAt = wallet.recoveryState.initiatedAt.toNumber();
-    assert.isAtLeast(initiatedAt, beforeTs - 5); // kleine marge voor klokverschil
+    assert.isAtLeast(initiatedAt, beforeTs - 5);
   });
 
   it("faalt met een verkeerde backup_authority-signer", async () => {
@@ -161,8 +184,6 @@ describe("spankwallet: recovery-flow (initiate/finalize, zonder passkey)", () =>
   });
 
   it("finalize_recovery faalt vóór het tijdslot is verstreken", async () => {
-    // Timelock ruim genoeg om de assertie hierna te draaien (10s), maar kort
-    // genoeg om de andere tests niet te lang op te houden.
     const { backupAuthority, walletPda } = await createWallet(10);
     const newOwnerPasskey = dummyNewOwnerPasskey();
 
@@ -188,7 +209,7 @@ describe("spankwallet: recovery-flow (initiate/finalize, zonder passkey)", () =>
   });
 
   it("finalize_recovery slaagt ná het tijdslot en wijzigt owner_passkey", async () => {
-    const timelockSeconds = 3; // kort gehouden zodat de test snel blijft
+    const timelockSeconds = 3;
     const { seedKey, backupAuthority, walletPda } = await createWallet(timelockSeconds);
     const newOwnerPasskey = dummyNewOwnerPasskey();
 
@@ -208,12 +229,6 @@ describe("spankwallet: recovery-flow (initiate/finalize, zonder passkey)", () =>
     const wallet = await program.account.walletAccount.fetch(walletPda);
     assert.deepEqual(Array.from(wallet.ownerPasskey), newOwnerPasskey);
     assert.isNull(wallet.recoveryState);
-
-    // seed_key mag NOOIT muteren, ook niet na recovery (zie state.rs §3.1 —
-    // dit is precies de eerder gevonden kritieke PDA-adresseringsbug). We
-    // vergelijken met de seedKey die createWallet() daadwerkelijk gebruikte,
-    // niet met een opnieuw gegenereerde waarde (die zou vanwege de
-    // randomness sowieso nooit matchen).
     assert.deepEqual(Array.from(wallet.seedKey), seedKey);
   });
 });

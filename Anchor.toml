@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-spankwallet = "Bt7jcHC5RE93E6J5HGRtWBBmnXYbC3e21pjXLP6tqtBm"
+spankwallet = "Gcj9TL8Pt2KfknLVXRrSJ83qkgZzqgghCAFG7UaM31QP"
 
 [provider]
 cluster = "localnet"

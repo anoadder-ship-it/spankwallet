@@ -11,6 +11,8 @@
     "bn.js": "^5.2.1"
   },
   "devDependencies": {
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.5.0",
     "@types/bn.js": "^5.1.5",
     "@types/chai": "^4.3.11",
     "@types/mocha": "^10.0.6",

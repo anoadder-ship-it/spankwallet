@@ -7,7 +7,7 @@ mod state;
 use instructions::*;
 use state::PASSKEY_PUBKEY_LEN;
 
-declare_id!("Bt7jcHC5RE93E6J5HGRtWBBmnXYbC3e21pjXLP6tqtBm");
+declare_id!("Gcj9TL8Pt2KfknLVXRrSJ83qkgZzqgghCAFG7UaM31QP");
 
 #[program]
 pub mod spankwallet {
@@ -19,6 +19,7 @@ pub mod spankwallet {
         wallet_seed_hash: [u8; 32],
         backup_authority: Pubkey,
         recovery_timelock_seconds: Option<i64>,
+        client_data_json: Vec<u8>,
     ) -> Result<()> {
         instructions::init_wallet(
             ctx,
@@ -26,6 +27,7 @@ pub mod spankwallet {
             wallet_seed_hash,
             backup_authority,
             recovery_timelock_seconds,
+            client_data_json,
         )
     }
 

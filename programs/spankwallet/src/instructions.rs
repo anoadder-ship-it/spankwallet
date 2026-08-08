@@ -131,7 +131,24 @@ pub struct InitWallet<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: passkey-verificatie via secp256r1-precompile, zie Execute.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
     pub system_program: Program<'info, System>,
+}
+
+/// Codeert Option<i64> als vaste 9 bytes (1 tag-byte + 8 waarde-bytes LE,
+/// nul-gevuld bij None) - voor gebruik in de challenge-payload van
+/// init_wallet. Vaste breedte i.p.v. Borsh-Vec-stijl-encodering omdat dit
+/// puur voor challenge-binding dient, niet voor account-opslag.
+fn encode_optional_i64(value: Option<i64>) -> [u8; 9] {
+    let mut out = [0u8; 9];
+    if let Some(v) = value {
+        out[0] = 1;
+        out[1..9].copy_from_slice(&v.to_le_bytes());
+    }
+    out
 }
 
 pub fn init_wallet(
@@ -140,12 +157,33 @@ pub fn init_wallet(
     wallet_seed_hash: [u8; 32],
     backup_authority: Pubkey,
     recovery_timelock_seconds: Option<i64>,
+    client_data_json: Vec<u8>,
 ) -> Result<()> {
     require!(
         wallet_seed_hash == hash_seed_key(&seed_key),
         SpankWalletError::InvalidWalletSeedHash
     );
     validate_passkey_prefix(&seed_key)?;
+
+    // Bewijs van bezit: voorkomt dat een aanvaller een onderschepte publieke
+    // sleutel front-runt door zelf een init_wallet met EIGEN backup_authority
+    // in te dienen voordat de rechtmatige eigenaar dat doet (STATUS.md sectie
+    // 21, Bevinding C). De challenge bindt backup_authority en
+    // recovery_timelock_seconds mee - zonder die binding zou een onderschepte
+    // handtekening herbruikbaar zijn met een ANDERE backup_authority, wat
+    // dezelfde overname-aanval in een net iets andere vorm terug zou brengen.
+    let mut payload = Vec::with_capacity(32 + 9);
+    payload.extend_from_slice(backup_authority.as_ref());
+    payload.extend_from_slice(&encode_optional_i64(recovery_timelock_seconds));
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"init_wallet", &payload);
+    verify_passkey_signature(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &seed_key,
+        &expected_challenge,
+        &client_data_json,
+    )?;
 
     let wallet = &mut ctx.accounts.wallet;
     let clock = Clock::get()?;
@@ -170,6 +208,7 @@ pub fn init_wallet(
 }
 
 // secp256r1-precompile-parsing
+
 
 const SIGNATURE_LEN: usize = 64;
 const OFFSETS_STRUCT_LEN: usize = 14;

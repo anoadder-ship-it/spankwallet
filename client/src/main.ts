@@ -12,7 +12,7 @@ import {
   buildCancelRecoveryTransaction,
 } from "./recovery";
 import { setupSpamTokenAccount, buildHuntTransaction, INCINERATOR } from "./hunt";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes)
@@ -38,7 +38,7 @@ let lastPdas: InitWalletPdas | null = null;
 let lastWallet: ConnectedWallet | null = null;
 let lastBackupAuthority: Keypair | null = null;
 
-const connection = new Connection("https://solana-devnet.api.onfinality.io/public", "confirmed");
+const connection = new Connection("https://devnet.helius-rpc.com/?api-key=f39fc413-6730-4848-a60f-a6685a6f04d3", "confirmed");
 
 async function runStep1(): Promise<void> {
   log("Stap 1: passkey aanmaken via navigator.credentials.create()...");
@@ -181,6 +181,20 @@ async function runStep3(): Promise<void> {
 
   log("Stap 3: execute aanroepen met een ECHTE passkey-handtekening...");
   log("transfer_sol: 1000 lamports terug naar de payer zelf (kleinste zinvolle test).");
+  log("Vault eerst funden met 100000 lamports (init_wallet maakt de vault met precies de rent-exempte minimum aan, geen vrij saldo om te versturen)...");
+  const fundTx = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: lastWallet.publicKey,
+      toPubkey: lastPdas.vaultPda,
+      lamports: 100000,
+    })
+  );
+  fundTx.feePayer = lastWallet.publicKey;
+  const { blockhash: fundBh } = await connection.getLatestBlockhash();
+  fundTx.recentBlockhash = fundBh;
+  const { signature: fundSig } = await lastWallet.signAndSendTransaction(fundTx);
+  await connection.confirmTransaction(fundSig, "confirmed");
+  log("Vault gefund. Signature: " + fundSig);
   const testRecipient = lastWallet.publicKey;
   const testAmountLamports = 1000n;
   log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");

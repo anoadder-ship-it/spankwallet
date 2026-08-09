@@ -955,3 +955,53 @@ de UI mag NOOIT de indruk wekken dat "aanbevolen" hetzelfde is als "gegarandeerd
 altijd expliciet vermelden dat het gaat om een zorgvuldige, maar geen onfeilbare
 beoordeling. Consistent met het principe uit sectie 27: de gebruiker beslist en tekent
 altijd zelf, de aanbevolen lijst is advies, geen garantie of vrijwaring.
+
+## 30. execute/transfer_sol live-browsertest voltooid + drie reele bugs gevonden en opgelost
+
+Vervolgsessie, begon met "stap 1" (bevestigen dat gisteren se werk nog standhoudt) - leverde
+drie onafhankelijke, echte problemen op, geen van alle mysterieus of onoplosbaar, elk
+gevonden door grondig door te vragen i.p.v. genoegen te nemen met een vage foutmelding.
+
+**Probleem 1: RPC-instabiliteit hield aan.** Zowel api.devnet.solana.com als het OnFinality-
+fallback-endpoint (sectie 25) bleken vandaag opnieuw structureel overbelast (429's, ook
+Phantom's eigen achtergrondverkeer liep vast met een generieke 400-fout). Opgelost door een
+dedicated, gratis Helius-devnet-RPC-account aan te maken (1M credits/maand gratis tier) -
+structurele oplossing i.p.v. weer een ander gedeeld publiek endpoint proberen. Client
+(client/src/main.ts) wijst nu naar https://devnet.helius-rpc.com/?api-key=<eigen-sleutel>.
+Phantom zelf bleek geen instelbaar custom-RPC-veld voor devnet te hebben - blijft op zijn
+eigen infrastructuur draaien, wat na de Helius-omschakeling geen probleem meer bleek.
+
+**Probleem 2: verouderd programma-ID in client/src/programId.ts.** Na de execute-herbouw
+naar transfer_sol (sectie 25, nieuw devnet-ID ERAEjxMgxserGuj8hc6v7LVy6ZaXaVxwDtXFLbsxj8wY)
+was programId.ts nooit bijgewerkt - bleef wijzen naar het OUDE, pre-herziening programma-ID
+(Gcj9TL8Pt...). Dit veroorzaakte een InstructionDidNotDeserialize-fout (0x66) bij execute:
+de client verstuurde de NIEUWE instructie-encodering (amount: u64 als 8 rauwe bytes) naar
+het OUDE programma, dat nog de oude signatuur (cpi_instruction_data: Vec<u8>) verwachtte.
+Ontstaan tijdens Fase C's helper-samenvoeging (sectie 23) toen SPANKWALLET_PROGRAM_ID naar
+een eigen bestand verplaatst werd - de verplaatsing zelf was correct, maar de waarde was op
+dat moment al verouderd en is nooit apart geverifieerd tegen de laatste deploy. Direct
+gevonden door de testoutput exact te vergelijken met de in sectie 25 gedocumenteerde nieuwe
+program-ID, en gefixed met een gerichte sed-vervanging.
+
+**Probleem 3 (geen bug, correct gedrag): VaultWouldFallBelowRentExempt bij de eerste
+transfer_sol-poging.** Na het fixen van probleem 2 trad een NIEUWE foutmelding op:
+VaultWouldFallBelowRentExempt (6017). Onderzoek wees uit dat dit geen programmabug was maar
+verwacht, correct gedrag: de vault-PDA wordt door init_wallet aangemaakt met PRECIES de
+rent-exempte minimum-lamports, zonder enig vrij saldo - elke transfer_sol-poging, hoe klein
+ook, zou de vault daardoor onder zijn eigen minimum duwen. Dit bevestigt dat de
+rent-exempt-drempelbewaking uit sectie 25 exact werkt zoals ontworpen. Opgelost door
+main.ts's runStep3 een funding-stap te geven: eerst 100000 lamports van de payer naar de
+vault-PDA sturen (gewone SystemProgram.transfer, aparte Phantom-goedkeuring), pas daarna
+transfer_sol van 1000 lamports proberen - slaagt nu.
+
+**Resultaat: execute/transfer_sol volledig bevestigd end-to-end**, met echte hardware-
+passkey-handtekening en Phantom, op devnet. Signature van de succesvolle execute-aanroep:
+4rnr3UdRzbJuma1UxK2cjHbuUHhiaPC9rkTmf9Xe7Smkzsx3vtJ8VHt1eykriZQEPaZRuXyEYzqSZzhca2cq5VkK.
+
+**Les voor toekomstige refactors:** wanneer een constante (zoals een programma-ID) naar een
+nieuw bestand verplaatst wordt tijdens een opschoning, expliciet verifieren dat de
+VERPLAATSTE WAARDE zelf nog actueel is, niet alleen dat de verplaatsing zelf syntactisch
+correct is - een refactor kan een reeds-verouderde waarde onbedoeld "bevriezen" zonder dat
+er een functionele testfout in dezelfde sessie optreedt (Fase C's eigen browsertest
+gebruikte toen alleen init_wallet/hunt/recovery, niet execute, dus de fout bleef onopgemerkt
+tot vandaag).

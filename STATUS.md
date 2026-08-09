@@ -806,3 +806,152 @@ geen allowlist-complexiteit) is de veiligste, kleinste, meest verdedigbare basis
 volgt hetzelfde principe dat vandaag is vastgesteld: elke nieuwe mogelijkheid als eigen,
 apart getypeerde instructie met eigen challenge-domain, nooit als generieke CPI-doorgeefluik.
 
+## 27. Concrete uitwerking programma-allowlist (besproken, nog niet gebouwd - startpunt voor volgende sessie)
+
+Vervolg op de roadmap uit sectie 26, na een gesprek over de praktische balans tussen
+veiligheid en bruikbaarheid (SOL/SPL-tokens vrij laten stromen, DeFi-platforms
+toegankelijk maken zonder de kernveiligheid los te laten).
+
+**transfer_token (eerstvolgende stap, vóór de allowlist):** zelfde patroon als
+transfer_sol (sectie 25) maar voor SPL-tokens - dekt daarmee automatisch zBTC, BTCSOL, en
+elke andere SPL-token zonder per-munt-configuratie. De specifieke munt is geen
+beveiligingsgrens; het SPL Token-programma zelf handelt de overdracht al veilig af zodra
+`transfer_token` bestaat. Munt-namen/iconen zijn puur een UI-aangelegenheid.
+
+**Programma-allowlist-architectuur (voor bredere DeFi-interactie zoals Jupiter):**
+
+- Nieuw, klein on-chain policy-account gekoppeld aan WalletAccount, met een lijst
+  toegestane programma-ID's.
+- Twee nieuwe instructies: add_allowed_program, remove_allowed_program - BEIDE vereisen
+  een echte passkey-handtekening, dus uitsluitend de walleteigenaar zelf kan zijn eigen
+  lijst wijzigen. Geen enkele bevoorrechte partij (inclusief de ontwikkelaars) kan hier iets
+  aan toevoegen namens de gebruiker.
+- Een uitgebreide execute-variant die WEL een CPI naar een extern programma mag doen, maar
+  eerst controleert of dat programma-ID op de eigen, gebruiker-goedgekeurde lijst staat -
+  behoudt de kernbeveiliging (geen blinde/willekeurige CPI, zie sectie 25) terwijl er
+  ruimte komt voor wat de gebruiker zelf vertrouwt.
+
+**Twee-niveaus-UX voor het toevoegen van programma's, BEIDE via exact dezelfde on-chain
+instructie (bewust geen on-chain onderscheid - zie motivatie hieronder):**
+
+1. Aanbevolen lijst (client-side, door ons meegeleverd): een klein, zorgvuldig gecureerd
+   lijstje bekende, veelgebruikte programma's (bijv. Jupiter). Puur een UI-gemaksfunctie -
+   bij toevoegen alvast ingevuld met een geruststellende badge ("bekend, veelgebruikt
+   programma"). De gebruiker moet nog steeds zelf, met zijn eigen passkey, expliciet
+   bevestigen.
+2. Handmatig een eigen adres toevoegen: dezelfde on-chain instructie, zonder badge, met een
+   stevige, expliciete waarschuwing in de UI ("je staat op het punt deze wallet te laten
+   interacteren met een niet-geverifieerd programma - voeg alleen toe wat je vertrouwt").
+
+**Bewust ontwerpprincipe:** de on-chain logica maakt GEEN onderscheid tussen "aanbevolen"
+en "handmatig" - beide lopen via identieke add_allowed_program-instructie met identieke
+passkey-vereiste. Het verschil zit uitsluitend in de client-UI (badge/waarschuwingstekst
+afhankelijk van of het adres in de meegeleverde lijst voorkomt). Bewust zo gekozen: een
+on-chain onderscheid zou "aanbevolen" een soort door-de-ontwikkelaars-gecontroleerde
+bevoorrechte status geven - een nieuw centralisatierisico. Dit houdt de wallet volledig
+non-custodial: de ontwikkelaars adviseren alleen (via de client), de gebruiker beslist en
+ondertekent altijd zelf, on-chain, zonder uitzondering.
+
+Nog te bepalen bij implementatie: exacte account-layout van het policy-account, maximum
+aantal toegestane programma's (vast array vs. dynamisch), en of remove_allowed_program een
+timelock nodig heeft (voorkomt dat een gestolen sessie een programma stilletjes toevoegt
+en er direct misbruik van maakt - te overwegen samen met de gelaagde-privileges-roadmap
+uit sectie 26).
+
+## 28. UI-veiligheidsroadmap (besproken, nog niet volledig geïmplementeerd)
+
+Naast de programma-allowlist (sectie 27) is ook de veiligheid van de client-UI zelf
+besproken - een wallet-UI is precies de plek waar een kleine kwetsbaarheid (XSS, een
+gecompromitteerde dependency, clickjacking) direct tot verlies van fondsen kan leiden.
+
+**Reeds aanwezig, zonder dat het expliciet als beveiligingsmaatregel was benoemd:**
+- client/src/main.ts's log()-functie gebruikt createElement()/textContent, nooit
+  innerHTML - maakt XSS via geinjecteerde HTML structureel onmogelijk, zelfs bij
+  onverwachte tekens in gelogde data (zie sectie 24, oorspronkelijk toegevoegd voor
+  leesbaarheid, blijkt ook een beveiligingsvoordeel).
+- WebAuthn's rpId-binding zorgt al voor domeinbinding op protocolniveau - een phishing-site
+  op een ander domein kan structureel nooit een geldige handtekening van dezelfde passkey
+  verkrijgen.
+- Geen externe CDN's voor scripts - alles via npm/Vite gebundeld, geen derde partij die
+  ongemerkt andere code kan gaan serveren.
+
+**Nog toe te voegen, vastgelegd als concreet startpunt:**
+
+1. **Strict Content-Security-Policy (CSP).** Belangrijkste, meest concrete stap. Verbiedt
+   externe scripts, inline-scripts, en eval() - zelfs bij een geslaagde HTML-injectie kan
+   dan alsnog geen code worden uitgevoerd. Voor een wallet zo strikt mogelijk:
+   script-src 'self', geen unsafe-inline, geen unsafe-eval. Te implementeren via een
+   meta-tag in index.html of (beter, bij eventuele eigen hosting) een HTTP-response-header.
+
+2. **Supply-chain-verharding.** npm ci gebruiken i.p.v. npm install in elke build (respecteert
+   de lockfile exact, geen onverwachte versie-drift). Bewust overwegen om dependency-versies
+   vast te pinnen i.p.v. ^-ranges, met name voor cryptografie-gerelateerde packages
+   (@noble/curves, @noble/hashes, @solana/web3.js). Elke nieuwe dependency bewust
+   beoordelen op onderhoud/vertrouwen voordat toegevoegd, niet alleen op functionaliteit.
+
+3. **Clickjacking-bescherming.** X-Frame-Options: DENY of frame-ancestors 'none' - voorkomt
+   dat de wallet-UI onzichtbaar in een iframe op een kwaadaardige site geladen kan worden
+   om klikken te kapen.
+
+4. **Bij een eventuele eigen browserextensie (i.p.v. leunen op Phantom zoals nu):** de
+   bevestigingsprompt (waar de gebruiker ziet wat hij ondertekent) moet in een
+   geisoleerde context draaien, gescheiden van de rest van de UI-code - zoals Phantom het
+   zelf doet. Sluit aan bij de observatie uit sectie 25 dat Phantom's eigen
+   simulatie-preview al een waardevol tweede controlepunt is naast de WebAuthn-prompt
+   zelf (die geen leesbare transactie-inhoud toont).
+
+Prioriteitsvolgorde voor implementatie: CSP eerst (grootste beveiligingswinst, kleinste
+implementatie-inspanning), dan npm ci in de build-workflow, dan de overige punten
+naarmate het project richting een bredere/publiekere release beweegt.
+
+
+## 29. Beoordelingscriteria voor de aanbevolen-lijst (uitbreiding op sectie 27)
+
+Op de vraag hoe de "aanbevolen lijst" (sectie 27) daadwerkelijk gebruikers moet
+beschermen - niet alleen technisch (is het programma veilig aan te roepen) maar ook
+financieel (wat gebeurt er met je geld als het misgaat) - onderstaande criteria
+vastgelegd, in volgorde van belang:
+
+1. **Audit-geschiedenis.** Meerdere onafhankelijke, gerenommeerde audits, met publiek
+   toegankelijke rapporten. Een enkele audit is een startpunt, geen garantie.
+
+2. **Trackrecord, met name gedrag NA een incident.** Hoe langer een protocol zonder
+   incidenten draait is een signaal, maar minstens even belangrijk: als er ooit een hack
+   was, zijn gebruikers dan volledig terugbetaald? Dit zegt vaak meer over
+   betrouwbaarheid dan "nooit gehackt" - elk protocol kan getroffen worden, hoe ermee
+   omgegaan wordt is het onderscheidende signaal.
+
+3. **Verzekering/reserves specifiek voor gebruikerscompensatie.** Heeft het protocol een
+   eigen verzekeringsfonds, externe dekking (bijv. protocol-verzekering zoals Nexus
+   Mutual-achtige constructies), of een treasury expliciet gereserveerd voor terugbetaling
+   bij een exploit?
+
+4. **Upgrade-authority-decentralisatie.** Cruciaal, vaak over het hoofd gezien: staat het
+   programma onder een timelocked multisig, of kan een enkele sleutel het programma
+   ogenblikkelijk wijzigen? Dat laatste is een reëel "rug pull"-risico, los van hoe goed de
+   huidige code is - relevant voor SpankWallet zelf ook (zie de eigen upgrade-authority-
+   observatie in sectie 12).
+
+5. **Actief bug-bounty-programma** (bijv. via Immunefi). Teken van doorlopende, serieuze
+   investering in veiligheid, niet alleen een eenmalige audit bij lancering.
+
+6. **TVL + tijd in productie.** Ruwe, aanvullende marktvertrouwens-indicator, nooit op
+   zichzelf voldoende - een aanvulling op de bovenstaande criteria, geen vervanging.
+
+**Belangrijk onderscheid: on-chain DeFi-programma's versus gecentraliseerde beurzen.**
+Bovenstaande criteria gelden voor on-chain programma's waarmee de wallet daadwerkelijk via
+CPI interacteert (Jupiter, DEX's - de allowlist uit sectie 27). Een gecentraliseerde beurs
+is technisch fundamenteel anders: geld ernaartoe sturen is een gewone transfer, geen
+programma-aanroep, dus geen allowlist-kwestie in dezelfde zin. Verdient een EIGEN,
+apart waarschuwingstype in de UI: "je stuurt geld naar een custodial platform - je
+vertrouwt hun solvabiliteit en beveiliging, niet die van deze wallet." Een fundamenteel
+ander risicotype dan een smart-contract-bug, moet ook anders gecommuniceerd worden -
+niet met dezelfde "geverifieerd programma"-badge als een DeFi-protocol.
+
+**Eerlijke, verplichte grens - altijd te communiceren in de UI:** de financiele
+soliditeit van een beurs of protocol kan niet in realtime programmatisch geverifieerd
+worden. Dit blijft mensenwerk, vereist periodieke herziening van de aanbevolen lijst, en
+de UI mag NOOIT de indruk wekken dat "aanbevolen" hetzelfde is als "gegarandeerd veilig" -
+altijd expliciet vermelden dat het gaat om een zorgvuldige, maar geen onfeilbare
+beoordeling. Consistent met het principe uit sectie 27: de gebruiker beslist en tekent
+altijd zelf, de aanbevolen lijst is advies, geen garantie of vrijwaring.

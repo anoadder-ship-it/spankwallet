@@ -1773,3 +1773,97 @@ echte hardware-cryptografie, niet enkel met testvalidator-keypairs: een tweede s
 toevoegen, zelfstandige, volledige zeggenschap van die sleutel over een willekeurige
 andere instructie, de oorspronkelijke sleutel intrekken zodra een vervanger bestaat, en de
 onmogelijkheid om de wallet per ongeluk permanent op slot te zetten.
+
+## 40. Session keys gedeployed en end-to-end bewezen op devnet, inclusief een gevonden en gefixte autorisatie-ordeningsbug
+
+Vervolgstap op sectie 38-achtige aanpak, nu voor session keys: devnet-deploy, client-
+integratie (`client/src/sessionKeys.ts`, functies voor alle 7 instructies), vijf nieuwe
+browserstappen (16-20), een tijdens het live testen gevonden en gerepareerde bug in de
+autorisatie-volgorde van `execute_advanced_via_session`, een herdeploy, en een volledige
+herbevestiging.
+
+**Client + browserstappen 16-20, zelfde structuur als sectie 39's multi-passkey-stappen.**
+Stap 16 maakt een sessiesleutel aan (gewone Ed25519-`Keypair`, GEEN passkey - puur lokaal
+gegenereerd) met scope `can_execute=true` (verder alles `false`) en een slot-gebonden
+expiry, registreert hem via `add_session_key` (`[PASSKEY]`-prompt - het wijzigen van WIE
+toegang heeft blijft altijd passkey-gated, ook al is de sessiesleutel zelf dat niet), en
+fundt zowel de vault als de sessiesleutel (wallet-extensie-prompt, geen passkey). Stap 17
+is het kernbewijs: `execute_via_session`, volledig zelfstandig ondertekend door de
+sessiesleutel, verstuurd via `sendRawTransaction` - GEEN passkey-prompt, GEEN
+wallet-extensie-prompt, precies het punt van het hele ontwerp (ontwerppunt 5: een
+sessiesleutel is een gewone Solana-signer, Solana's eigen transactie-ondertekening bindt
+hem al aan de instructie). Stap 18 bewijst het negatieve scope-pad
+(`execute_advanced_via_session` met een sessie die daar niet voor gescoped is). Stap 19
+wacht daadwerkelijk (pollt `getSlot()`, echte devnet-tijd, geen dummy-transacties zoals in
+de lokale testsuite) tot de sessie verlopen is en bewijst `SessionExpired`. Stap 20 bewijst
+dat `close_expired_session` permissionless is: een verse, willekeurige derde partij ruimt
+de verlopen sessie op en claimt de rent.
+
+**Eerste live-testronde ontdekte een echte bug, geen testfout.** Stap 18 verwachtte
+`SessionInstructionNotAllowed` maar kreeg `AccountNotInitialized` (Anchor-foutcode 3012) op
+het `policy`-account - de testwallet had nooit `add_allowed_program` aangeroepen, dus
+`PolicyAccount` bestond niet. Root cause: `policy` was `Account<'info, PolicyAccount>`
+(typed) in `ExecuteAdvancedViaSession` - Anchors macro deserialiseert elk typed
+`Account<T>`-veld altijd in `try_accounts()`, VOORDAT de instructie-body ooit draait. Geen
+enkele `require!()`-volgorde binnen de body-tekst kan dat corrigeren, ongeacht waar de
+autorisatie-check staat geschreven - de account-existence-check gebeurt structureel eerst,
+door Anchors eigen constructie, niet door leesvolgorde. Dit werd voor het eerst zichtbaar
+via een live devnet-aanroep, niet via de lokale testsuite (geen enkele bestaande test riep
+`execute_advanced_via_session` aan zonder eerst een PolicyAccount aan te maken).
+
+**Fix, zelfde patroon als eerder toegepast op `passkeys`/`session` in dit bestand:**
+`policy` is nu `UncheckedAccount<'info>`, tolerant gelezen via de al-bestaande
+`read_policy_account`-helper ("bestaat niet" = lege allowlist, geen foutcase) NA de
+autorisatie-checks (`SessionExpired`, `SessionInstructionNotAllowed`,
+`SessionProgramNotAllowed`). Een sessie zonder `execute_advanced`-scope krijgt nu altijd
+`SessionInstructionNotAllowed`, ongeacht of er ooit een `PolicyAccount` bestaat - autorisatie
+gaat nu daadwerkelijk voor op de vraag of iets anders uberhaupt bestaat. Nieuwe
+regressietest in `tests/sessionKeys.ts` controleert expliciet de foutcode zelf
+(`SessionInstructionNotAllowed` aanwezig, `AccountNotInitialized` afwezig), niet enkel "er
+was een fout" - anders zou een toekomstige regressie van precies dit probleem stilzwijgend
+door de test heen glippen. Bewust NIET toegepast op het langer-bestaande `execute_advanced`
+(passkey-pad), dat dezelfde onderliggende eigenschap heeft maar apart, al-bewezen, live
+code is - een aparte, latere afweging als dat ooit relevant wordt.
+
+**Tweede, kleinere bug tijdens dezelfde live-testronde: de eerste expiry-marge (40 slots,
+~15-20s) was te krap.** Realistische klik-/bevestigingstijd tussen stap 16 en 17
+(passkey-prompt-interactie + twee sequentiele transactiebevestigingen) overschreed die
+marge ruimschoots - de sessie was al verlopen voordat stap 17 ooit kon draaien. Verhoogd
+naar 300 slots (~2 minuten), ruim voldoende voor stap 17-18 zonder stap 19's wachttijd
+onredelijk te maken.
+
+**Twee devnet-deploys in dit traject**, beide volgens het beproefde proces (`anchor build`
+eerst voor de IDL, `cargo-build-sbf --arch v3` laatst voor de deployable binary,
+byte-offset vooraf geverifieerd, `--program-id`/`--keypair` expliciet, nooit `anchor keys
+sync` voor een upgrade):
+1. Client-integratie-deploy: slot 482740156, data length 444608 bytes, signature
+   `5hyRdinpvBeTbbbW9uzdzvg6mHjQyC2afhZTfup2i4V62kTCBYKsVgce4iHdL53hs9wakZce7Niqw9YrcTAjbPnr`.
+2. Bugfix-deploy: slot 482750163, signature
+   `x3XVcc9kpb2ehKD4aCATy2mzjK9m9EJ1JSyRqYoe6w913JADmMZ8C4pjv6fESrqptyf7mXQM18Fa6KduQFkzFzD`.
+   Op-chain "Data Length" (454848 bytes) kwam NIET overeen met de lokale build (445272
+   bytes) - onderzocht via `solana program dump` + `cmp`: de eerste 445272 bytes zijn
+   byte-voor-byte identiek aan de lokale build, de rest is pure zero-padding. Verklaring:
+   Solana-programma-accounts kunnen groeien maar nooit krimpen; de extra ruimte is
+   restcapaciteit van een eerdere, grotere allocatie, geen deploy-fout. Genoteerd als les:
+   "Data Length" uit `solana program show` alleen is onvoldoende voor byte-verificatie bij
+   incrementeel kleine wijzigingen na een eerdere grotere deploy - een directe
+   dump-en-vergelijk is de sluitende check.
+
+**Live herbevestigd op devnet met een echte hardware-passkey, volledig succesvol na de
+fix.** `add_session_key`
+(signature `3tAvbygU9C2XJG2eri8P3ekkeLP4BMRF572tHasianb9nRpSEUAAHRTy1khe6zmuL8VQBLR1vB6EduKKAJXDJpM4`,
+teruggelezen `canExecute=true, canTransferToken=false, canExecuteAdvanced=false`). Stap 17,
+het kernbewijs, zelfstandig door de sessiesleutel ondertekend zonder enige prompt
+(signature `5SYVNsZFDSj6KR7isr1triidwUy8bqaqq7aYqaFxm8m7yuHjbiR2Sx4FyuBaa6i9SgNPt693bcCVFSd2uCaEadtN`).
+Stap 18, na de fix: `Custom(6035)` / `SessionInstructionNotAllowed` ("Deze sessiesleutel is
+niet gescoped voor deze instructiesoort") - precies de bedoelde, specifieke foutcode, niet
+langer een onbedoelde `AccountNotInitialized`. Stap 19: on-chain slot daadwerkelijk voorbij
+`expiry_slot` (482751268 -> 482751270 tijdens het pollen), daarna `Custom(6032)` /
+`SessionExpired` bevestigd. Stap 20 (permissionless opruiming door een willekeurige derde,
+ongewijzigde code sinds de fix) al bewezen in de voorgaande volledige testronde: het
+session-account sloot en de closer-balans steeg van 5.000.000 naar 8.259.240 lamports
+(signature `x264a2RzxiCFvKjxn3JPrLXCq6xZvGoCqC7qRFNJ47R9t938Ka9sXFq61uY2sRE8wur1sdLZyNnUy4ubh43cV8B`).
+Geen console- of CSP-fouten. Het volledige session-key-model is nu bewezen met echte
+hardware-cryptografie: een tijdelijke, smal-gescopede sleutel zelfstandig laten ondertekenen
+zonder enige prompt, de scope-beperking die andere instructies weigert, daadwerkelijk
+verlopen, en permissionless opruiming.

@@ -1406,9 +1406,9 @@ async function runStep16(): Promise<void> {
   log("Een sessiesleutel is een GEWONE Ed25519-Solana-Keypair, GEEN passkey - puur");
   log("lokaal gegenereerd in de browser, geen navigator.credentials-aanroep nodig");
   log("om hem aan te maken. Scope voor deze test: ALLEEN execute toegestaan (geen");
-  log("transfer_token, geen execute_advanced), expiry over 40 slots (~15-20");
-  log("seconden op devnet) - kort genoeg om binnen deze test daadwerkelijk te laten");
-  log("verlopen (stap 19).");
+  log("transfer_token, geen execute_advanced), expiry over 300 slots (ruim 2");
+  log("minuten op devnet - genoeg marge om stap 17-18 comfortabel te doorlopen");
+  log("voordat je bij stap 19 daadwerkelijk op de expiry gaat wachten).");
   log("");
 
   try {
@@ -1417,7 +1417,7 @@ async function runStep16(): Promise<void> {
     log("Sessiesleutel (publiek): " + sessionKeypair.publicKey.toBase58());
 
     const currentSlot = BigInt(await connection.getSlot());
-    const expirySlot = currentSlot + 40n;
+    const expirySlot = currentSlot + 300n;
     lastSessionExpirySlot = expirySlot;
     log("Huidige slot: " + currentSlot + ", expiry_slot: " + expirySlot);
     log("");

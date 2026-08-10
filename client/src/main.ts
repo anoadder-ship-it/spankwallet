@@ -2,6 +2,11 @@ import "./polyfill";
 
 
 
+import {
+  getAssociatedTokenAddressSync,
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+} from "@solana/spl-token";
 import { createSpankWalletPasskey } from "./passkey";
 import { connectWallet, ConnectedWallet } from "./wallet";
 import { buildInitWalletTransaction, InitWalletPdas } from "./initWallet";
@@ -164,6 +169,7 @@ async function runStep2(): Promise<void> {
 
     (document.getElementById("step3-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step4-btn") as HTMLButtonElement).disabled = false;
+    (document.getElementById("step6-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step5-btn") as HTMLButtonElement).disabled = false;
   } catch (err) {
     log("");
@@ -466,6 +472,113 @@ async function runStep5(): Promise<void> {
   }
 }
 
+
+async function runStep6(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("Stap 6: hunt tegen een ECHT, extern devnet-token (Circle devnet-USDC),");
+  log("niet zelf aangemaakt - bewijst dat hunt correct werkt op elk willekeurig");
+  log("SPL-token, niet alleen tokens uit onze eigen testflow.");
+  log("");
+  try {
+    const usdcMint = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+    const payerAta = getAssociatedTokenAddressSync(usdcMint, lastWallet.publicKey);
+    const vaultAta = getAssociatedTokenAddressSync(usdcMint, lastPdas.vaultPda, true);
+
+    log("6a. 1 USDC (1000000 units, 6 decimalen) sturen van je eigen wallet naar de");
+    log("vault-PDA (simuleert een echte, ongevraagde ontvangst van buitenaf)...");
+    log("Dit vraagt om 2 goedkeuringen in je wallet-extensie (ATA-aanmaak, dan transfer).");
+
+    const createAtaTx = new Transaction().add(
+      createAssociatedTokenAccountInstruction(
+        lastWallet.publicKey,
+        vaultAta,
+        lastPdas.vaultPda,
+        usdcMint
+      )
+    );
+    createAtaTx.feePayer = lastWallet.publicKey;
+    const { blockhash: ataBh } = await connection.getLatestBlockhash();
+    createAtaTx.recentBlockhash = ataBh;
+    const { signature: ataSig } = await lastWallet.signAndSendTransaction(createAtaTx);
+    await connection.confirmTransaction(ataSig, "confirmed");
+    log("Vault-USDC-ATA aangemaakt: " + vaultAta.toBase58());
+
+    const transferTx = new Transaction().add(
+      createTransferInstruction(payerAta, vaultAta, lastWallet.publicKey, 1_000_000)
+    );
+    transferTx.feePayer = lastWallet.publicKey;
+    const { blockhash: transferBh } = await connection.getLatestBlockhash();
+    transferTx.recentBlockhash = transferBh;
+    const { signature: transferSig } = await lastWallet.signAndSendTransaction(transferTx);
+    await connection.confirmTransaction(transferSig, "confirmed");
+    log("1 USDC verstuurd naar de vault. Signature: " + transferSig);
+    log("");
+
+    const incineratorBalanceBefore = await connection.getBalance(INCINERATOR);
+    log("Incinerator-saldo voor hunt: " + incineratorBalanceBefore + " lamports");
+    log("");
+    log("6b. hunt aanroepen op het echte devnet-USDC-token in de vault...");
+    log("navigator.credentials.get() wordt aangeroepen - keur de prompt goed.");
+    const { transaction } = await buildHuntTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPdas.vaultPda,
+      vaultAta,
+      usdcMint,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+    log("");
+    log("Eigen simulatie...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+    log("Controleren of het vault-USDC-account daadwerkelijk gesloten is...");
+    const closedAccountInfo = await connection.getAccountInfo(vaultAta);
+    if (closedAccountInfo !== null) {
+      log("FOUT: target_token_account bestaat nog na bevestigde hunt (onverwacht).");
+      return;
+    }
+    log("Bevestigd: account gesloten.");
+    log("");
+    const incineratorBalanceAfter = await connection.getBalance(INCINERATOR);
+    const incineratorDelta = incineratorBalanceAfter - incineratorBalanceBefore;
+    log("Incinerator-saldo na hunt: " + incineratorBalanceAfter + " lamports");
+    log("Incinerator-toename door deze hunt: " + incineratorDelta + " lamports");
+    log("");
+    log("SUCCES - hunt werkt correct op een echt, extern devnet-token (Circle");
+    log("devnet-USDC) dat niet door onze eigen testcode is aangemaakt. De 1 USDC");
+    log("zelf is verbrand (destructief per ontwerp, zie STATUS.md), het token-account");
+    log("is gesloten, en de teruggewonnen rent is 50/50 gesplitst.");
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
 document.getElementById("start-btn")!.addEventListener("click", () => {
   document.getElementById("output")!.textContent = "";
   runStep1();
@@ -485,4 +598,7 @@ document.getElementById("step4-btn")!.addEventListener("click", () => {
 
 document.getElementById("step5-btn")!.addEventListener("click", () => {
   runStep5();
+});
+document.getElementById("step6-btn")!.addEventListener("click", () => {
+  runStep6();
 });

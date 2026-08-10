@@ -2,7 +2,9 @@
 
 Non-custodial Solana wallet met **passkey-authenticatie** (WebAuthn / secp256r1) in plaats van seed phrases.
 
-- Passkey i.p.v. seed phrase
+- Passkey i.p.v. seed phrase, met optioneel meerdere gelijkwaardige passkeys per wallet
+- Tijdelijke, smal-gescopede **session keys** (LazorKit-geinspireerd, slot-gebonden expiry) voor dApp/game-gebruik zonder herhaalde WebAuthn-prompts
+- Programma-allowlist: gecontroleerde CPI naar externe programma's, uitsluitend naar zelf goedgekeurde programma-ID's
 - Anti-spam: `hunt` burnt/sluit ongevraagde spam-tokens, teruggewonnen rent 50/50 gesplitst tussen de hunter en Solana's incinerator-adres (permanent uit omloop)
 - Recovery via offline Ed25519 backup-authority met 72u-timelock + owner-veto
 - **Gesloten, getypeerde acties** - geen open CPI-doorgeefluik
@@ -19,7 +21,11 @@ Non-custodial Solana wallet met **passkey-authenticatie** (WebAuthn / secp256r1)
 | transfer_token                     | Bewezen end-to-end op devnet (echte devnet-USDC)                |
 | hunt                                | Bewezen, incl. 50/50-rentsplitsing, ook tegen extern devnet-USDC |
 | Recovery-flow                       | Volledig bewezen (initiate / cancel / finalize)                |
-| Browser-testpagina                  | Werkend (Vite + Wallet Standard), 7 teststappen                 |
+| Programma-allowlist + execute_advanced | Bewezen end-to-end op devnet (add/remove_allowed_program)   |
+| WebAuthn-hardening                  | UV-vlag afgedwongen + expliciete type-validatie, bevestigd op devnet |
+| Multi-passkey                       | Bewezen end-to-end op devnet (meerdere gelijkwaardige sleutels, lockout-bescherming) |
+| Session keys                        | Bewezen end-to-end op devnet (slot-gebonden expiry, scope-beperking, permissionless cleanup) |
+| Browser-testpagina                  | Werkend (Vite + Wallet Standard), 20 teststappen                |
 | Open CPI / arbitrary instructions   | Bewust verwijderd (zie STATUS.md sectie 25-26)                  |
 
 **Program ID (devnet):** 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9
@@ -49,34 +55,73 @@ pub fn execute(
 
 transfer_token volgt exact hetzelfde principe: een gesloten, getypeerde actie met een eigen
 challenge-domain, zonder generieke CPI, werkend voor elke SPL-token (zBTC, BTCSOL, USDC, etc.)
-zonder per-munt-configuratie. Zie STATUS.md sectie 25-26 voor de volledige motivatie en de
-roadmap (allowlists, spend limits, risk tiers).
+zonder per-munt-configuratie. Wie wel bredere, programmatische controle nodig heeft, gebruikt
+`execute_advanced` - dat mag WEL een CPI doen naar een extern programma, maar uitsluitend naar
+een programma-ID dat de wallet-eigenaar zelf, met zijn eigen passkey, vooraf op zijn eigen
+allowlist heeft gezet (`add_allowed_program`). Zie STATUS.md sectie 25-27 voor de volledige
+motivatie en ontwerpafwegingen.
 
 ## Instructies
 
-| Instructie          | Handtekening              | Beschrijving                                  |
-|----------------------|----------------------------|------------------------------------------------|
-| init_wallet          | Passkey (WebAuthn)         | Wallet + Vault-PDA aanmaken                   |
-| execute              | Passkey                    | SOL-transfer (getypeerd)                      |
-| transfer_token       | Passkey                    | SPL-token-transfer (getypeerd, munt-onafhankelijk) |
-| hunt                 | Passkey                    | Spam-token burnen + account sluiten (50/50 rent) |
-| initiate_recovery    | Backup authority            | Recovery starten                              |
-| cancel_recovery      | Passkey (owner-veto)        | Recovery annuleren                            |
-| finalize_recovery    | Permissionless               | Recovery afronden na timelock                 |
+Alle instructies hieronder staan in `programs/spankwallet/src/lib.rs`. "Handtekening" is wie
+de actie mag autoriseren: een echte WebAuthn-passkey (via de secp256r1-precompile), de
+offline Ed25519 backup-authority, een tijdelijke session key (gewone Ed25519-transactiesigner,
+geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate doet het werk).
+
+| Instructie                    | Handtekening                        | Beschrijving                                                        |
+|--------------------------------|--------------------------------------|-----------------------------------------------------------------------|
+| init_wallet                    | Passkey                              | Wallet + Vault-PDA aanmaken                                          |
+| execute                        | Passkey                              | SOL-transfer (getypeerd)                                             |
+| transfer_token                 | Passkey                              | SPL-token-transfer (getypeerd, munt-onafhankelijk)                  |
+| add_allowed_program             | Passkey                              | Programma-ID toevoegen aan de wallet-eigen allowlist                |
+| remove_allowed_program          | Passkey                              | Programma-ID verwijderen van de allowlist                           |
+| execute_advanced                | Passkey                              | CPI naar een programma dat op de eigen allowlist staat               |
+| hunt                            | Passkey                              | Spam-token burnen + account sluiten (50/50 rent)                    |
+| add_passkey                     | Een van de al geldige passkeys        | Extra, gelijkwaardige passkey registreren (multi-passkey)           |
+| remove_passkey                  | Een van de al geldige passkeys        | Passkey intrekken (lockout-beschermd: nooit de laatste verwijderen) |
+| initiate_recovery                | Backup authority                     | Recovery starten                                                    |
+| cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren                                                   |
+| finalize_recovery                | Permissionless (na timelock)          | Recovery afronden, wist ook alle extra passkeys/sessies              |
+| add_session_key                  | Een van de al geldige passkeys        | Tijdelijke session key registreren (scope + slot-gebonden expiry)   |
+| remove_session_key               | Een van de al geldige passkeys        | Session key vroegtijdig intrekken                                    |
+| close_session                    | De session key zelf                   | Eigen sessie zelf sluiten, rent terug (enige zelfstandige actie)     |
+| close_expired_session             | Permissionless (na expiry_slot)       | Verlopen sessie opruimen, rent naar de aanroeper                    |
+| execute_via_session               | De session key zelf                   | SOL-transfer via een tijdelijke, gescopede sessiesleutel             |
+| transfer_token_via_session         | De session key zelf                   | SPL-token-transfer via een tijdelijke, gescopede sessiesleutel       |
+| execute_advanced_via_session       | De session key zelf                   | CPI via sessiesleutel, dubbel gescoped (sessie-sub-scope + live allowlist) |
 
 ## Structuur
 
 ```
 spankwallet/
-programs/spankwallet/     - Anchor-programma (Rust)
-  src/lib.rs
-  src/state.rs             - WalletAccount, VaultAccount, RecoveryState
-  src/instructions.rs
+programs/spankwallet/       - Anchor-programma (Rust)
+  src/lib.rs                 - #[program]-entrypoints (19 instructies)
+  src/state.rs                - WalletAccount, VaultAccount, RecoveryState, PolicyAccount,
+                                 PasskeysAccount, SessionKeyAccount
+  src/instructions.rs          - alle instructielogica + gedeelde verificatiehelpers
   src/errors.rs
-client/                    - Vite/TS-testpagina (passkey + Phantom)
-tests/                      - Anchor-tests (8/8 groen)
+client/                      - Vite/TS-testpagina (passkey + Phantom), 20 teststappen
+  src/main.ts                  - de testpagina zelf (stap 1-20)
+  src/passkey.ts, cbor.ts       - passkey aanmaken + rauwe publieke sleutel decoderen
+  src/webauthnSign.ts, secp256r1.ts - WebAuthn-assertie + secp256r1-precompile-instructie
+  src/wallet.ts                 - Wallet Standard-verbinding (Phantom e.d.)
+  src/challenge.ts               - gedeelde challenge-/Borsh-encodeerhelpers
+  src/programId.ts                - SPANKWALLET_PROGRAM_ID-constante
+  src/polyfill.ts                  - Buffer-polyfill, moet als allereerste module laden
+  src/initWallet.ts, execute.ts, transferToken.ts, hunt.ts, recovery.ts - kerninstructies
+  src/policy.ts                  - programma-allowlist (add/remove_allowed_program)
+  src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
+  src/passkeys.ts                 - multi-passkey (add/remove_passkey)
+  src/sessionKeys.ts               - session keys, alle 7 instructies
+tests/                        - Anchor-tests (49/49 groen)
+  spankwallet.ts                 - init_wallet
+  policy.ts                       - programma-allowlist + execute_advanced
+  passkeys.ts                      - multi-passkey + finalize_recovery-wipe
+  recovery.ts                       - recovery-flow
+  sessionKeys.ts                     - session keys, alle 7 instructies
+  webauthnTestHelper.ts               - gedeelde testhelpers (o.a. slot-/tijd-advancers)
 scripts/
-STATUS.md                   - lees dit eerst
+STATUS.md                     - lees dit eerst
 SECURITY.md
 ```
 
@@ -106,10 +151,19 @@ voor de volledige diagnose van dit probleem).
 
 ```bash
 solana program deploy target/deploy/spankwallet.so \
-  --program-id target/deploy/spankwallet-keypair.json \
+  --program-id 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9 \
   --keypair ~/.config/solana/id.json \
   --url https://api.devnet.solana.com
 ```
+
+Gebruik voor een upgrade ALTIJD het vaste, hierboven genoemde programma-ID direct als
+`--program-id`, NOOIT het pad naar `target/deploy/spankwallet-keypair.json` - dat
+keypair-bestand is een lokaal, wegwerpbaar build-artefact (gitignored) dat op elk moment kan
+afwijken van het daadwerkelijk gedeployde adres (bijv. na een `anchor keys sync`-misser of een
+schone `target/`-rebuild). Zie STATUS.md voor de volledige lijst bekende deploy-valkuilen
+(verkeerde signer uit een gedeelde solana-config, `anchor keys sync` dat per ongeluk een
+nieuw programma-ID genereert, `anchor build` dat de `--arch v3`-binary overschrijft) en het
+altijd-eerst-`anchor build`-dan-`cargo-build-sbf --arch v3`-proces.
 
 Rate-limiting: api.devnet.solana.com heeft een officieel, strikt rate-limit (100
 verzoeken/10s per IP). Bij intensief testen op een dag raak je dat onvermijdelijk. Een
@@ -117,7 +171,7 @@ werkend, gratis alternatief zonder aanmelding:
 
 ```bash
 solana program deploy target/deploy/spankwallet.so \
-  --program-id target/deploy/spankwallet-keypair.json \
+  --program-id 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9 \
   --keypair ~/.config/solana/id.json \
   --url https://solana-devnet.api.onfinality.io/public
 ```
@@ -128,13 +182,25 @@ RPC-provider (Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke end
 
 ## Veiligheidsprincipes
 
-- Geen open CPI - alleen expliciet getypeerde acties.
+- Geen open CPI - alleen expliciet getypeerde acties, of CPI naar een programma dat de
+  eigenaar zelf vooraf op zijn eigen allowlist heeft gezet (`execute_advanced`).
 - Passkey-verificatie via Solana's secp256r1-precompile (SIMD-0075) + WebAuthn-
-  clientDataJSON-binding.
+  clientDataJSON-binding, inclusief afgedwongen User Verification (UV-vlag) en expliciete
+  `"type":"webauthn.get"`-validatie.
 - PDA-seeds gebruiken wallet_seed_hash (SHA-256 van de 33-byte passkey) vanwege Solana's
   32-byte-per-seed-limiet.
 - seed_key is onveranderlijk; owner_passkey muteert alleen bij een succesvolle recovery.
-- Recovery heeft een 72u-timelock + owner-veto (cancel_recovery).
+- Multi-passkey is optioneel en zero-migratie: een wallet die nooit add_passkey aanroept
+  gedraagt zich exact als voorheen. Lockout-bescherming verbiedt het verwijderen van de
+  allerlaatste geldige sleutel.
+- Session keys zijn een lager-vertrouwde, tijdelijke autorisatielaag naast passkeys: gewone
+  Ed25519-Solana-signers (geen WebAuthn-ceremonie nodig per spend), altijd smal gescoped
+  (welke instructiesoorten, welke sub-allowlist), altijd slot-gebonden begrensd, en kunnen
+  zichzelf nooit verlengen of nieuwe bevoegdheid creeren - alleen aanmaken/intrekken via een
+  echte passkey.
+- Recovery heeft een 72u-timelock + owner-veto (cancel_recovery), en wist bij succes de
+  volledige extra-passkey-set - geen stale, mogelijk-gecompromitteerde sleutels overleven
+  een recovery.
 - Elke gevoelige actie bindt zijn volledige, relevante parameters in de ondertekende
   challenge (nooit alleen een deel) - voorkomt dat een geldige handtekening voor iets anders
   hergebruikt kan worden dan waarvoor hij bedoeld was.
@@ -143,7 +209,9 @@ RPC-provider (Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke end
 
 - Fase 1: kerninstructies + echte passkey-flow - afgerond
   - execute (transfer_sol) en transfer_token beide bewezen als gesloten, getypeerde acties
-  - Optionele policy-lagen (spend limits, recipient-allowlist, risk tiers) - zie STATUS.md sectie 26
+  - Programma-allowlist + execute_advanced - afgerond, bewezen op devnet
+  - Multi-passkey (meerdere gelijkwaardige sleutels per wallet) - afgerond, bewezen op devnet
+  - Session keys (tijdelijke, gescopede sleutels) - afgerond, bewezen op devnet
 - Fase 2: fee-gated PDA-inbox
 - Fase 3: USB 2-of-2 / post-quantum (later)
 

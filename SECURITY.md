@@ -34,5 +34,8 @@ request.**
 
 Dit is een klein, actief project - er is geen formeel SLA, maar meldingen worden serieus
 en zo snel mogelijk bekeken. Zie `STATUS.md` voor context over reeds bekende en
-opgeloste beveiligingsoverwegingen (met name secties 21-22 over de grondige
-security-doorloop en secties 25-26 over de `execute`-herziening).
+opgeloste beveiligingsoverwegingen, met name secties 21-22 (de grondige security-doorloop),
+25-26 (de `execute`-herziening naar gesloten, getypeerde acties), 36-37 (WebAuthn-hardening:
+User Verification-afdwinging en clientDataJSON-type-validatie), 38-39 (het multi-passkey-
+model en zijn lockout-bescherming), en 40 (session keys: hun scope-/expiry-beperkingen en
+een gevonden-en-gefixte autorisatie-ordeningsbug in `execute_advanced_via_session`).

@@ -1141,3 +1141,124 @@ Dependabot-PR #1 (npm_and_yarn-groep, /client) bumpt vite 5.4.21 -> 6.4.3 en esb
 -> 0.25.12. Dit is exact de major-upgrade die in sectie 20 bewust werd uitgesteld ("een
 aparte, bewust geplande taak, geen tussendoortje") - blijft op verzoek van de gebruiker
 onaangeraakt tot een expliciete, apart geplande test van die upgrade.
+
+## 34. Programma-allowlist gebouwd: add_allowed_program, remove_allowed_program, execute_advanced
+
+Eerste concrete bouwstap uit de architectuur die in sectie 26/27 was uitgewerkt maar
+bewust nog niet gebouwd - de programma-allowlist die bredere DeFi-interactie (Jupiter en
+vergelijkbaar) mogelijk maakt zonder de kernbeveiliging (geen blinde/willekeurige CPI, zie
+sectie 25) los te laten.
+
+**Nieuw account: PolicyAccount, PDA `[b"policy", wallet.key()]`.** Vast array van 32
+programma-ID's (`allowed_programs: [Pubkey; 32]` + `count: u8`) i.p.v. een dynamische Vec.
+Bewuste keuze, samen met de gebruiker doorgesproken: een dynamische lijst zou bij elke
+`add_allowed_program` een Anchor `realloc` vereisen (extra rent-topup, en bij `remove` geeft
+een Vec geen rent terug zonder aparte, foutgevoelige boekhouding). Voor een persoonlijke
+wallet-allowlist (een handvol gecureerde + handmatig toegevoegde programma's, geen
+honderden) is een vast aantal slots simpelweg goedkoper EN eenvoudiger - 1066 bytes,
+~0,008 SOL eenmalige rent, zonder enige realloc-complexiteit. `remove_allowed_program`
+gebruikt swap-remove (laatste actieve entry naar het gat) om de actieve slots altijd
+aaneengesloten vanaf index 0 te houden, O(1).
+
+Het policy-account wordt LUI aangemaakt op de eerste `add_allowed_program`-aanroep via
+Anchor's `init_if_needed` (nieuwe Cargo-feature op anchor-lang), i.p.v. een aparte
+`init_policy`-instructie. Dit is hier veilig zonder de bekende init_if_needed-valkuil
+(re-init-aanvallen bij accounts die ook een ANDER type/eigenaar zouden kunnen hebben): het
+policy-adres is een PDA die uitsluitend deterministisch van `wallet.key()` afhangt, dus er
+kan nooit een ander accounttype op dat adres bestaan om per ongeluk te "hergebruiken" - het
+is ofwel nog nooit aangemaakt, ofwel altijd al precies deze structuur. Eerste-gebruik wordt
+herkend via `policy.wallet == Pubkey::default()` (een echte WalletAccount-PDA is nooit gelijk
+aan de default/nul-pubkey).
+
+**add_allowed_program / remove_allowed_program vereisen BEIDE een echte, domain-gebonden
+secp256r1-passkey-handtekening** - zelfde patroon als execute/transfer_token/hunt (challenge
+bindt het programma-ID aan de wallet + de instructienaam als domain). Geen enkele partij,
+ook niet de ontwikkelaars, kan de allowlist namens de gebruiker wijzigen. `add_allowed_program`
+weigert bovendien het eigen SpankWallet-programma-ID (`SelfCpiNotAllowed` - er is geen
+legitiem gebruik voor zelf-CPI, en dit sluit elke twijfel over reentrancy-gedrag structureel
+af in plaats van te leunen op runtime-garanties die tussen Solana-versies kunnen verschillen).
+
+**Bewust GEEN on-chain onderscheid tussen "aanbevolen" en "handmatig toegevoegd" programma** -
+exact zoals in sectie 27 vastgelegd. Beide lopen via identiek `add_allowed_program`, on-chain
+volledig gelijk behandeld; het verschil (badge/waarschuwing) is puur clientside UI, een latere,
+aparte stap.
+
+**Timelock-vraag uit sectie 27 voorgelegd en samen met de gebruiker besloten: GEEN timelock,
+noch op add, noch op remove.** Motivatie (voorgelegd via expliciete opties, gebruiker koos de
+aanbevolen optie): in dit ontwerp bestaat er geen "gestolen sessie" zoals bij OAuth-sessies of
+browserextensie-permissies - elke aanroep vereist sowieso een eigen, verse, live
+passkey-handtekening. Het specifieke risico dat sectie 27 noemde ("toevoegen + direct
+misbruiken") gebeurt hoe dan ook atomair BINNEN dezelfde transactie als de add (via
+blind-signing/een misleidende client, zie sectie 25) - een timelock op remove verandert daar
+niets aan, de schade is al gebeurd voordat remove ooit relevant wordt. De precies gerichte
+mitigatie (een activatievertraging voordat een NIEUW toegevoegd programma door
+execute_advanced gebruikt mag worden) hoort thuis in de al geplande "gelaagde
+privileges"-roadmap van sectie 26, bewust niet vandaag gebouwd als blanket-timelock.
+
+**execute_advanced: de eerste instructie die wél een CPI naar een extern programma mag doen.**
+Accounts: wallet (read-only), vault (mut - mag als CPI-autoriteit optreden), policy (read-only,
+membership-check), `cpi_program` (UncheckedAccount, moet op `policy.allowed_programs` staan EN
+`executable` zijn), instructions_sysvar. De daadwerkelijke CPI-accounts komen via
+`ctx.remaining_accounts` - elke account wiens sleutel gelijk is aan de vault wordt via
+`invoke_signed` met de vault-PDA-seeds als signer doorgegeven (zelfde mechanisme als
+hunt/transfer_token), de rest ongewijzigd doorgegeven zoals de aanroeper aanlevert (de
+Solana-runtime staat sowieso geen signer-escalatie toe voor accounts die het programma niet
+zelf via invoke_signed kan verantwoorden).
+
+**Challenge bindt het VOLLEDIGE CPI-target**, niet alleen het programma-ID: programma-ID + elke
+meegegeven account (sleutel + schrijf-vlag + signer-vlag, deze laatste al geforceerd voor de
+vault) + de instructiedata zelf. Een onderschepte handtekening is dus uitsluitend geldig voor
+precies deze ene, volledig gespecificeerde CPI-aanroep tegen precies dat toegestane programma -
+zelfde principe als transfer_sol/transfer_token (sectie 25/32).
+
+**Twee compilerfouten tijdens het bouwen, beide meteen opgelost en geverifieerd door
+herbouwen:**
+1. Borrow-checker-conflict (`policy.allowed_programs[policy.count as usize] = ...` - `count`
+   lezen terwijl `allowed_programs` al mutabel geleend is) - opgelost door `count` eerst in
+   een lokale variabele te zetten.
+2. Lifetime-fout bij het combineren van `ctx.remaining_accounts` (leeft zo lang als Context's
+   eigen `'info`) met `ctx.accounts.cpi_program.to_account_info()` (kreeg een losstaande,
+   niet-geünificeerde lifetime door elisie) - opgelost door `execute_advanced` een expliciete,
+   gedeelde `'info`-lifetime te geven op zowel de vrije functie in instructions.rs als de
+   `#[program]`-wrapper in lib.rs (`Context<'info, ExecuteAdvanced<'info>>`).
+
+**Testen: 8 nieuwe lokale Rust-tests in het nieuwe tests/policy.ts**, zelfde stijl/patroon als
+tests/spankwallet.ts en tests/recovery.ts (echte p256-handtekeningen via webauthnTestHelper.ts,
+geen gemockte crypto):
+- happy-path add_allowed_program (incl. init_if_needed-creatie van het policy-account)
+- SelfCpiNotAllowed bij toevoegen van het eigen programma-ID
+- ProgramAlreadyAllowed bij een duplicaat
+- happy-path remove_allowed_program (bevestigt swap-remove houdt de lijst aaneengesloten)
+- ProgramNotAllowed bij remove van een niet-toegevoegd programma
+- ProgramNotAllowed bij execute_advanced tegen een niet-toegestaan programma
+- **execute_advanced met een echte CPI naar System Program (`Assign`)** - bewijst de
+  basis-CPI-dispatch + policy-gate + volledige challenge-binding met een gewoon signende
+  account
+- **execute_advanced met een echte SPL Token::transfer-CPI, vault als GEFORCEERDE
+  PDA-signer-autoriteit** - bewijst het kernmechanisme van execute_advanced (de vault mag
+  namens zichzelf tekenen bij een willekeurig toegestaan extern programma), zonder een nieuwe
+  npm-dependency: de Token-instructielay-outs (InitializeMint/InitializeAccount/MintTo/
+  Transfer) zijn handmatig opgebouwd, zelfde aanpak als de bestaande
+  secp256r1-precompile-helper in webauthnTestHelper.ts. Lokaal bevestigd dat SPL Token
+  standaard aanwezig is op de solana-test-validator-genesis, geen aparte deploy/clone nodig.
+
+**Subtiele testbug onderweg gevonden en opgelost:** de eerste versie van de
+SPL-Token-CPI-test gaf de vault `isWritable: false` mee in `remainingAccounts`, en kreeg
+`WebAuthnChallengeMismatch`. Oorzaak: vault staat in DEZELFDE instructie ook als het
+mut-gedeclareerde, met-naam-genoemde `vault`-account - Solana's transactie-compilatie merget
+de schrijf-vlag van eenzelfde sleutel over alle voorkomens binnen een instructie, dus het
+Rust-programma zag `is_writable = true` ongeacht wat de TS-test in `remainingAccounts` opgaf.
+De TS-challenge-berekening moet daarom exact weerspiegelen wat on-chain daadwerkelijk
+waargenomen wordt, niet alleen wat de aanroeper "bedoelt" mee te geven - les die aansluit bij
+het steeds terugkerende principe in dit project (zie de sed-valkuilen in sectie 21/22/32): elke
+aanname verifiëren tegen wat er werkelijk gebeurt, niet tegen wat logisch zou moeten gebeuren.
+
+**Resultaat: 15/16 relevante lokale tests groen** (8 nieuw + 7 bestaand). De ene falende test
+(`finalize_recovery slaagt ná het tijdslot`, recovery.ts) is een vooraf al bestaande,
+omgevingsgebonden flaky timing-test (raakt de on-chain klok van de lokale validator, niet iets
+in dit project se code) - expliciet bevestigd door `git stash` en dezelfde test op ongewijzigde
+`main` te draaien: faalt daar identiek, dus aantoonbaar niet veroorzaakt door deze wijziging.
+
+Gecommit en gepusht naar main (9adc77a). Devnet-deploy en live-browsertest bewust nog NIET
+gedaan vandaag - volgt als aparte, losse stap na bevestiging dat de Rust-laag klopt (in lijn
+met de afspraak voor deze sessie).

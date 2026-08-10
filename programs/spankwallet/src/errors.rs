@@ -82,4 +82,7 @@ pub enum SpankWalletError {
 
     #[msg("De authenticator heeft geen User Verification (biometrie/PIN) bevestigd voor deze handtekening")]
     UserVerificationRequired,
+
+    #[msg("clientDataJSON bevat geen \"type\":\"webauthn.get\" - vereist om cross-ceremony-typeverwarring te voorkomen")]
+    InvalidWebAuthnType,
 }

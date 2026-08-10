@@ -124,6 +124,31 @@ fn extract_webauthn_challenge(client_data_json: &[u8]) -> Result<Vec<u8>> {
     base64url_decode(&client_data_json[start..end])
 }
 
+/// Verifieert dat clientDataJSON "type":"webauthn.get" bevat (WebAuthn spec
+/// §7.2, stap 3 van de assertion-verificatieprocedure) - voorkomt
+/// cross-ceremony-typeverwarring, bijv. het (theoretisch) hergebruiken van
+/// een attestation-ceremony-artefact ("webauthn.create") als assertie.
+///
+/// Zelfde substring-techniek en veiligheidsargument als
+/// extract_webauthn_challenge hierboven, niet toevallig maar bewust: geen
+/// volledige JSON-parser nodig, want client_data_json is al cryptografisch
+/// gebonden aan wat de secp256r1-precompile daadwerkelijk ondertekende
+/// (SHA-256-preimage-weerstand - zie verify_passkey_signature). "type" en
+/// "origin" zijn bovendien nooit developer-controleerbaar (door de browser
+/// zelf gezet, niet door de aanroepende pagina), en een correct
+/// geserialiseerde JSON-string kan nooit een on-escaped aanhalingsteken
+/// bevatten - er is dus geen manier om een vervalste "type":"..."-substring
+/// te smokkelen via een andere veldwaarde in een legitiem geproduceerde
+/// clientDataJSON. Zie STATUS.md voor de volledige analyse.
+fn verify_webauthn_type(client_data_json: &[u8]) -> Result<()> {
+    const NEEDLE: &[u8] = b"\"type\":\"webauthn.get\"";
+
+    let found = client_data_json.windows(NEEDLE.len()).any(|w| w == NEEDLE);
+    require!(found, SpankWalletError::InvalidWebAuthnType);
+
+    Ok(())
+}
+
 // init_wallet
 
 #[derive(Accounts)]
@@ -366,6 +391,12 @@ fn verify_passkey_signature(
         flags & AUTHENTICATOR_DATA_UV_FLAG != 0,
         SpankWalletError::UserVerificationRequired
     );
+
+    // "type":"webauthn.get" afdwingen - voorkomt cross-ceremony-
+    // typeverwarring (WebAuthn spec §7.2 stap 3). Zie verify_webauthn_type
+    // hierboven voor de volledige toelichting waarom de substring-techniek
+    // hier veilig is.
+    verify_webauthn_type(client_data_json)?;
 
     let actual_challenge = extract_webauthn_challenge(client_data_json)?;
     require!(

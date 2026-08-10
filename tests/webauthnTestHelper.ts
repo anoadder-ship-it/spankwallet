@@ -53,17 +53,21 @@ export interface SignedTestChallenge {
 // aangevraagd (zie client/src/webauthnSign.ts). Dit is de default voor alle
 // gewone happy-path-tests; signTestChallenge accepteert een override zodat
 // de UV-hardening (STATUS.md) ook expliciet getest kan worden met een vlag
-// die UV NIET zet.
+// die UV NIET zet. Idem voor het optionele webauthnType-argument: default
+// "webauthn.get" (de enige geldige waarde voor een assertie), met een
+// override zodat de "type"-hardening ook expliciet getest kan worden met
+// een verkeerde/ontbrekende waarde.
 export const AUTHENTICATOR_FLAGS_UP_UV = 0x05;
 
 export function signTestChallenge(
   passkey: TestPasskey,
   expectedChallenge: Buffer,
-  authenticatorFlags: number = AUTHENTICATOR_FLAGS_UP_UV
+  authenticatorFlags: number = AUTHENTICATOR_FLAGS_UP_UV,
+  webauthnType: string = "webauthn.get"
 ): SignedTestChallenge {
   const challengeB64url = base64url(expectedChallenge);
   const clientData = {
-    type: "webauthn.get",
+    type: webauthnType,
     challenge: challengeB64url,
     origin: "https://spankwallet-tests.local",
     crossOrigin: false,

@@ -50,7 +50,8 @@ describe("spankwallet: init_wallet", () => {
     walletSeedHash: number[],
     backupAuthority: PublicKey,
     recoveryTimelockSeconds: BN | null,
-    authenticatorFlags?: number
+    authenticatorFlags?: number,
+    webauthnType?: string
   ) {
     const payload = Buffer.concat([
       backupAuthority.toBuffer(),
@@ -65,7 +66,8 @@ describe("spankwallet: init_wallet", () => {
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       passkey,
       expectedChallenge,
-      authenticatorFlags
+      authenticatorFlags,
+      webauthnType
     );
     const secp256r1Ix = buildSecp256r1Instruction(
       passkey.compressedPublicKey,
@@ -187,6 +189,40 @@ describe("spankwallet: init_wallet", () => {
     assert.isTrue(
       threw,
       "init_wallet met een UV-loze handtekening had moeten falen"
+    );
+  });
+
+  // type-hardening (STATUS.md): verify_webauthn_type moet clientDataJSON
+  // weigeren als "type" niet exact "webauthn.get" is - voorkomt
+  // cross-ceremony-typeverwarring (bijv. een attestation-artefact
+  // "webauthn.create" hergebruikt als assertie). De check is een pure
+  // substring-aanwezigheidstest zonder aparte logica voor "veld aanwezig
+  // met verkeerde waarde" versus "veld ontbreekt volledig" - dit ene geval
+  // (verkeerde waarde) oefent dus hetzelfde codepad uit als een volledig
+  // ontbrekend type-veld zou doen.
+  it("faalt als clientDataJSON een verkeerd \"type\" heeft (InvalidWebAuthnType)", async () => {
+    const passkey = generateTestPasskey();
+    const backupAuthority = Keypair.generate();
+    const { walletPda, vaultPda, walletSeedHash } = derivePdas(passkey.compressedPublicKey);
+
+    let threw = false;
+    try {
+      await callInitWallet(
+        passkey,
+        walletPda,
+        vaultPda,
+        walletSeedHash,
+        backupAuthority.publicKey,
+        null,
+        undefined,
+        "webauthn.create"
+      );
+    } catch (err) {
+      threw = true;
+    }
+    assert.isTrue(
+      threw,
+      "init_wallet met clientDataJSON.type=webauthn.create had moeten falen"
     );
   });
 });

@@ -1484,3 +1484,84 @@ daadwerkelijk respecteert - wat voor de meeste platform-authenticators en hardwa
 geldt - zet de UV-bit toch al), maar dit is nog niet tegen een echte hardware-passkey op
 devnet bevestigd sinds de wijziging. Devnet-deploy en een nieuwe live-bevestiging (zelfde
 niveau van bewijs als sectie 35) blijven een bewust aparte, losse vervolgstap.
+
+## 37. WebAuthn-hardeningstraject afgerond: punt 3 alsnog gebouwd, gedeployed en herbevestigd op devnet
+
+Sluitstuk van het traject uit sectie 36. Twee dingen tegelijk opgepakt: alsnog punt 3
+(type-validatie) bouwen, en de complete set fixes (UV uit sectie 36 + de nieuwe
+type-validatie) daadwerkelijk naar het live devnet-programma deployen en herbevestigen met
+een echte hardware-passkey.
+
+**Punt 3 alsnog gebouwd: expliciete `"type":"webauthn.get"`-validatie.** Nieuwe
+`verify_webauthn_type()`-helper in instructions.rs, bewust dezelfde substring-techniek als
+het bestaande `extract_webauthn_challenge()` - geen volledige JSON-parser nodig, om exact
+dezelfde reden als destijds beargumenteerd voor de challenge-extractie: `client_data_json`
+is al cryptografisch gebonden aan wat de secp256r1-precompile daadwerkelijk ondertekende
+(SHA-256-preimage-weerstand), en `type`/`origin` zijn nooit developer-controleerbaar (door
+de browser zelf gezet). Aangeroepen vanuit `verify_passkey_signature`, dus automatisch
+geldig voor alle acht instructies die een passkey-handtekening verifieren. Nieuwe foutcode
+`InvalidWebAuthnType`.
+
+Testhelper-uitbreiding: `signTestChallenge` accepteert nu ook een optioneel
+`webauthnType`-argument (default `"webauthn.get"`, volledig backwards-compatibel met alle
+bestaande aanroepen - alleen een nieuw, laatste positioneel argument). Nieuwe negatieve test
+in tests/spankwallet.ts bevestigt dat een verder cryptografisch volledig geldige
+handtekening (echt keypair, correcte challenge, correcte clientDataHash) met
+`clientDataJSON.type = "webauthn.create"` daadwerkelijk geweigerd wordt met
+`InvalidWebAuthnType` - zelfde bewijsprincipe als de UV-test uit sectie 36: elke
+beveiligingscontrole moet aantoonbaar iets tegenhouden, niet alleen aantoonbaar iets
+doorlaten. **17/18 lokale tests groen** (dezelfde vooraf al bekende, omgevingsgebonden
+flaky timing-test in recovery.ts als in sectie 34-36, ongewijzigd).
+
+**Devnet-deploy uitgevoerd, met de drie sectie-35-valkuilen bewust vermeden:**
+1. Expliciete `--keypair ~/.config/solana/id.json` bij de deploy zelf (niet geleund op de
+   globale `solana config`-default, die op deze machine nog steeds naar het ongerelateerde
+   `solana_darkpool`-project wijst).
+2. `anchor keys sync` volledig overgeslagen - niet nodig voor een upgrade van een bestaand
+   programma (alleen de upgrade-authority en het publieke adres zijn nodig), en het is
+   precies deze stap die eerder een nieuw, ongewenst programma-ID genereerde.
+3. Bouwvolgorde bewust: `anchor build` (voor IDL/types) EERST, `cargo-build-sbf --arch v3`
+   (voor de daadwerkelijk te deployen `.so`) LAATST - en na afloop bevestigd door de rauwe
+   32 bytes van het verwachte programma-ID (`9ma6...`, handmatig base58-gedecodeerd)
+   daadwerkelijk en precies één keer terug te vinden in het gecompileerde binary-bestand.
+
+Resultaat, bevestigd via `solana program show` vóór en ná:
+- Voor: slot 482681670, data length 299056 bytes.
+- Na: slot 482693421, data length 309296 bytes (groter - logisch, twee nieuwe checks +
+  bijbehorende constanten/foutcodes toegevoegd).
+- Programma-ID (`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) en authority
+  (`G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`) ongewijzigd - een upgrade, geen nieuw
+  programma.
+- Deploy-transactiehandtekening:
+  `45kcuNidxjXKtfkr6uinuaD1bkhgEAqZLhdhhSndzsQwaGHsZS36Fa4QfQatb92Axhoznyk9L5x2WoNLoAYbqgUg`.
+
+**Herbevestiging op devnet met echte hardware-passkey - stap 1-3, bevestigd voldoende
+omdat `verify_passkey_signature` de EEN gedeelde functie is die alle acht
+passkey-geverifieerde instructies gebruiken** (init_wallet, execute, transfer_token,
+add_allowed_program, remove_allowed_program, execute_advanced, hunt, cancel_recovery -
+letterlijk nagelopen via de call sites in instructions.rs) - stap 2 (init_wallet) en stap 3
+(execute) raken dus allebei onafhankelijk zowel de UV-check als de nieuwe type-check op het
+zojuist geupgradede, live programma:
+
+- Passkey: `02f1890f8caf08762dda7fee8d2637537ab5cbe8135ac7730db078c7095052fcf1`
+- wallet PDA: `61EHnUwRb7J3oU71Z4YuUmDbJwSYeYbDY4Ezxxkb17u9`, vault PDA:
+  `AALh78VjtJkMqNR8yAtLoqnE9xvo69QPBoEJ5XsvVqrt`
+- init_wallet: `4BX8Gf9qs2jhz8bXeYG1k4yLqLfvFSmjJfmw6F67Mmna6qtQy6WF4ofHD7HpSBye8njqgGzJ2LSupeVzQsitPfLX`
+  - simulatielogs: `Instruction: InitWallet`, 23085/400000 compute units, `success` - geen
+    `UserVerificationRequired`/`InvalidWebAuthnType`-fout, dus de echte
+    biometrie-/PIN-bevestigde, correct getypeerde handtekening van de hardware-passkey
+    voldeed meteen aan beide nieuwe eisen.
+- execute (transfer_sol, 1000 lamports terug naar de payer):
+  `PQ2zjRHM6DgsgVTBV4pvaMWkQSZPNzJeFgCs88DiVKexpCA4p3hRhDeybu6yLLPVEeoFtPbdfUMSqSqqLG1vyfY`
+  - simulatielogs: `Instruction: Execute`, 10651/400000 compute units, `success`.
+- Geen console-fouten gerapporteerd tijdens de volledige run.
+
+**Resultaat: het volledige WebAuthn-hardeningstraject (sectie 36-37) is nu afgesloten.** Alle
+drie de oorspronkelijk gevraagde punten zijn doorlopen: UV-vlag (ontbrak, gefixt, herbevestigd
+op devnet), laag-S-malleability (bleek al volledig afgedwongen door Solana's eigen
+secp256r1-precompile, uitsluitend gedocumenteerd), en type-validatie (aanvankelijk bewust
+uitgesteld, deze sessie alsnog gebouwd, getest en herbevestigd op devnet). Het live
+devnet-programma draait nu de volledig geharde `verify_passkey_signature`, bevestigd
+werkend met een echte hardware-passkey, zonder enige regressie in de bestaande
+functionaliteit (init_wallet en execute beide nog steeds probleemloos, zelfde niveau van
+bewijs als alle eerdere devnet-bevestigingen in dit project).

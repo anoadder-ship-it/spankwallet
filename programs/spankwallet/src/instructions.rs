@@ -10,6 +10,23 @@ use solana_keccak_hasher::hashv;
 use crate::errors::SpankWalletError;
 use crate::state::*;
 
+/// De ECDSA-verificatie zelf (inclusief r/s-rangecontrole) gebeurt volledig
+/// IN dit precompile-programma, voordat onze instructie ooit draait - zie
+/// verify_passkey_signature hieronder voor wat WIJ daarna nog controleren
+/// (dat de aanroep daadwerkelijk gebeurd is, met de juiste sleutel/bericht).
+/// Van belang: Solana's secp256r1-precompile weigert ZELF elke handtekening
+/// met een hoge S-waarde (s > curve_order/2) - de klassieke
+/// signature-malleability-vector (dezelfde geldige handtekening in twee
+/// vormen, s en n-s) bestaat hier dus structureel niet, afgedwongen door de
+/// Solana-runtime zelf, niet door onze code. Geverifieerd in de daadwerkelijke
+/// precompile-broncode (agave/precompiles/src/secp256r1.rs: `s_bignum <=
+/// half_order` als harde eis, met een dedicated test `test_secp256r1_high_s`
+/// die een hoge-S-handtekening laat falen met InvalidSignature). Dit geldt
+/// voor ELKE transactie die deze precompile gebruikt, ongeacht clientgedrag -
+/// client/src/secp256r1.ts's normalizeS() is daarom GEEN beveiligingsmaatregel
+/// maar een functionele noodzaak (WebAuthn-assertions zijn niet gegarandeerd
+/// laag-S, en zonder normalisatie zou ~50% van overigens geldige
+/// handtekeningen simpelweg geweigerd worden door de precompile).
 pub const SECP256R1_PROGRAM_ID: Pubkey = pubkey!("Secp256r1SigVerify1111111111111111111111111");
 
 /// Solana's algemeen erkende "dead address" - off-curve, geen bekende
@@ -217,6 +234,19 @@ const OFFSETS_STRUCT_LEN: usize = 14;
 const HEADER_LEN: usize = 2;
 const NO_OWN_INSTRUCTION: u16 = u16::MAX;
 
+/// WebAuthn authenticatorData-layout (spec §6.1): rpIdHash(32) + flags(1) +
+/// signCount(4) + [attestedCredentialData] + [extensions]. Voor een .get()-
+/// assertie (geen attestedCredentialData/extensions) is dit de minimale
+/// lengte - te kort betekent een misvormd of vervalst bericht, nooit een
+/// echte assertie.
+const AUTHENTICATOR_DATA_MIN_LEN: usize = 37;
+/// Offset van de flags-byte binnen authenticatorData (direct na rpIdHash).
+const AUTHENTICATOR_DATA_FLAGS_OFFSET: usize = 32;
+/// User Verified-bit binnen de flags-byte (spec §6.1) - gezet zodra de
+/// authenticator daadwerkelijk biometrie/PIN heeft geverifieerd, niet
+/// slechts "aanwezigheid" (UP, bit 0x01).
+const AUTHENTICATOR_DATA_UV_FLAG: u8 = 0x04;
+
 struct ParsedOffsets {
     signature_offset: u16,
     signature_instruction_index: u16,
@@ -305,8 +335,15 @@ fn verify_passkey_signature(
         .get(msg_start..msg_end)
         .ok_or(SpankWalletError::InvalidPasskeySignature)?;
 
+    // Ondertekend bericht = authenticatorData || SHA-256(clientDataJSON)
+    // (WebAuthn §6.3.3, hetzelfde als client/src/webauthnSign.ts opbouwt).
+    // authenticatorData is minimaal AUTHENTICATOR_DATA_MIN_LEN (37) bytes bij
+    // een .get()-assertie, dus het volledige bericht minimaal 37 + 32 = 69.
+    // De oude grens (enkel >= 32) liet in theorie een LEGE authenticatorData
+    // toe zolang er nog 32 bytes voor de hash overbleven - te zwak om
+    // hieronder veilig de flags-byte op offset 32 uit te lezen.
     require!(
-        actual_message.len() >= 32,
+        actual_message.len() >= AUTHENTICATOR_DATA_MIN_LEN + 32,
         SpankWalletError::WebAuthnMessageHashMismatch
     );
     let client_data_hash = sha256_32(client_data_json);
@@ -316,12 +353,31 @@ fn verify_passkey_signature(
         SpankWalletError::WebAuthnMessageHashMismatch
     );
 
+    // User Verification (UV) afdwingen op de authenticatorData-flags-byte.
+    // Zonder deze check zou een authenticator die geen echte biometrie-/
+    // PIN-bevestiging afdwingt alsnog een geldige handtekening kunnen
+    // leveren voor elke spend- of policy-wijzigende actie - de client vraagt
+    // userVerification: "required" aan (webauthnSign.ts), maar dat is een
+    // client-side hint die dit programma zelf nooit kan vertrouwen; de
+    // daadwerkelijke garantie moet hier, on-chain, uit het ondertekende
+    // bericht zelf komen.
+    let flags = actual_message[AUTHENTICATOR_DATA_FLAGS_OFFSET];
+    require!(
+        flags & AUTHENTICATOR_DATA_UV_FLAG != 0,
+        SpankWalletError::UserVerificationRequired
+    );
+
     let actual_challenge = extract_webauthn_challenge(client_data_json)?;
     require!(
         actual_challenge == expected_challenge,
         SpankWalletError::WebAuthnChallengeMismatch
     );
 
+    // De daadwerkelijke ECDSA-r/s-verificatie (inclusief de laag-S-eis, zie
+    // de toelichting bij SECP256R1_PROGRAM_ID hierboven) gebeurt volledig in
+    // de precompile zelf, niet hier - deze check bevestigt uitsluitend dat
+    // er genoeg bytes op de opgegeven offset staan voor de ruwe 64-byte
+    // signature, geen herverificatie van de signature-waarden zelf nodig.
     let sig_source =
         resolve_instruction_data(ix_sysvar, offsets.signature_instruction_index, &precompile_ix.data)?;
     let sig_start = offsets.signature_offset as usize;

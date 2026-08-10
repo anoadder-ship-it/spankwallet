@@ -79,4 +79,7 @@ pub enum SpankWalletError {
 
     #[msg("Het opgegeven CPI-doelaccount is geen uitvoerbaar (executable) programma-account")]
     CpiTargetNotExecutable,
+
+    #[msg("De authenticator heeft geen User Verification (biometrie/PIN) bevestigd voor deze handtekening")]
+    UserVerificationRequired,
 }

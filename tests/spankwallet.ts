@@ -49,7 +49,8 @@ describe("spankwallet: init_wallet", () => {
     vaultPda: PublicKey,
     walletSeedHash: number[],
     backupAuthority: PublicKey,
-    recoveryTimelockSeconds: BN | null
+    recoveryTimelockSeconds: BN | null,
+    authenticatorFlags?: number
   ) {
     const payload = Buffer.concat([
       backupAuthority.toBuffer(),
@@ -63,7 +64,8 @@ describe("spankwallet: init_wallet", () => {
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       passkey,
-      expectedChallenge
+      expectedChallenge,
+      authenticatorFlags
     );
     const secp256r1Ix = buildSecp256r1Instruction(
       passkey.compressedPublicKey,
@@ -153,6 +155,38 @@ describe("spankwallet: init_wallet", () => {
     assert.isTrue(
       threw,
       "een tweede init_wallet-aanroep met dezelfde seed_key had moeten falen (PDA bestaat al)"
+    );
+  });
+
+  // UV-hardening (STATUS.md): verify_passkey_signature moet een handtekening
+  // weigeren waarvan de authenticatorData-flags-byte de UV-bit (0x04) niet
+  // zet, ook al is de handtekening zelf verder cryptografisch geldig (echt
+  // keypair, correcte challenge, correcte clientDataHash). 0x01 = UP
+  // (User Present) zonder UV (User Verified) - een realistisch scenario
+  // voor een authenticator die geen echte biometrie-/PIN-bevestiging
+  // afdwingt.
+  it("faalt als de authenticatorData-flags UV niet zetten (UserVerificationRequired)", async () => {
+    const passkey = generateTestPasskey();
+    const backupAuthority = Keypair.generate();
+    const { walletPda, vaultPda, walletSeedHash } = derivePdas(passkey.compressedPublicKey);
+
+    let threw = false;
+    try {
+      await callInitWallet(
+        passkey,
+        walletPda,
+        vaultPda,
+        walletSeedHash,
+        backupAuthority.publicKey,
+        null,
+        0x01
+      );
+    } catch (err) {
+      threw = true;
+    }
+    assert.isTrue(
+      threw,
+      "init_wallet met een UV-loze handtekening had moeten falen"
     );
   });
 });

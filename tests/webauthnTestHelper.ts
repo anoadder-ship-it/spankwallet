@@ -48,9 +48,18 @@ export interface SignedTestChallenge {
   clientDataJSON: Buffer;
 }
 
+// UP (User Present, bit 0x01) | UV (User Verified, bit 0x04) - de vlaggen
+// die een echte authenticator zet wanneer userVerification: "required" is
+// aangevraagd (zie client/src/webauthnSign.ts). Dit is de default voor alle
+// gewone happy-path-tests; signTestChallenge accepteert een override zodat
+// de UV-hardening (STATUS.md) ook expliciet getest kan worden met een vlag
+// die UV NIET zet.
+export const AUTHENTICATOR_FLAGS_UP_UV = 0x05;
+
 export function signTestChallenge(
   passkey: TestPasskey,
-  expectedChallenge: Buffer
+  expectedChallenge: Buffer,
+  authenticatorFlags: number = AUTHENTICATOR_FLAGS_UP_UV
 ): SignedTestChallenge {
   const challengeB64url = base64url(expectedChallenge);
   const clientData = {
@@ -62,7 +71,19 @@ export function signTestChallenge(
   const clientDataJSON = Buffer.from(JSON.stringify(clientData), "utf-8");
   const clientDataHash = createHash("sha256").update(clientDataJSON).digest();
 
-  const authenticatorData = randomBytes(37);
+  // authenticatorData-layout (WebAuthn spec §6.1): rpIdHash(32) + flags(1) +
+  // signCount(4). rpIdHash/signCount worden door dit programma niet
+  // gecontroleerd (willekeurige bytes volstaan voor tests) - de flags-byte
+  // WEL sinds de UV-hardening, vandaar hier expliciet en niet langer
+  // onderdeel van volledig willekeurige bytes (de oude `randomBytes(37)`
+  // had ~50% kans om de UV-bit NIET te zetten en zou nu willekeurig falen).
+  const rpIdHash = randomBytes(32);
+  const signCount = randomBytes(4);
+  const authenticatorData = Buffer.concat([
+    rpIdHash,
+    Buffer.from([authenticatorFlags]),
+    signCount,
+  ]);
 
   const signedMessage = Buffer.concat([authenticatorData, clientDataHash]);
   const messageHash = createHash("sha256").update(signedMessage).digest();

@@ -22,7 +22,7 @@ Non-custodial Solana wallet met **passkey-authenticatie** (WebAuthn / secp256r1)
 | Browser-testpagina                  | Werkend (Vite + Wallet Standard), 7 teststappen                 |
 | Open CPI / arbitrary instructions   | Bewust verwijderd (zie STATUS.md sectie 25-26)                  |
 
-**Program ID (devnet):** ERAEjxMgxserGuj8hc6v7LVy6ZaXaVxwDtXFLbsxj8wY
+**Program ID (devnet):** 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9
 
 ### execute naar transfer_sol (belangrijke ontwerpwijziging)
 

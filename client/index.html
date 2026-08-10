@@ -30,6 +30,14 @@
       hunter en Solana's incinerator-adres (permanent uit omloop).
     </p>
     <p>
+      Stap 8-10: de programma-allowlist. Stap 8 voegt System Program toe aan
+      de wallet-eigen allowlist (add_allowed_program). Stap 9 bewijst beide
+      kanten van execute_advanced - een niet-toegestaan programma wordt
+      geweigerd, een toegestaan programma krijgt een echte CPI. Stap 10
+      verwijdert System Program weer (remove_allowed_program) en bevestigt
+      dat de CPI daarna weer geweigerd wordt.
+    </p>
+    <p>
       Werkt alleen als je browser een platform-authenticator of
       hardware-security-key heeft, en een Wallet Standard-conforme
       wallet-extensie geinstalleerd is. Vereist een secure context -
@@ -42,6 +50,9 @@
     <button id="step5-btn" disabled>5. Hunt: spam-token opruimen (burn + 50/50-rentsplitsing)</button>
     <button id="step6-btn" disabled>6. Hunt: echt extern devnet-USDC-token (Circle)</button>
     <button id="step7-btn" disabled>7. transfer_token: SPL-token versturen (echte devnet-USDC)</button>
+    <button id="step8-btn" disabled>8. add_allowed_program: System Program toevoegen</button>
+    <button id="step9-btn" disabled>9. execute_advanced: geweigerd + echte CPI</button>
+    <button id="step10-btn" disabled>10. remove_allowed_program: verwijderen + herbevestig weigering</button>
     <div id="output"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

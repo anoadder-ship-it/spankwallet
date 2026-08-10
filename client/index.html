@@ -52,6 +52,24 @@
       na elkaar voor.
     </p>
     <p>
+      Stap 16-20: session keys (slot-gebonden expiry, LazorKit-geinspireerd).
+      Een sessiesleutel is een GEWONE Ed25519-Solana-Keypair, geen passkey -
+      add_session_key blijft wel passkey-gated. Stap 16 maakt een
+      sessiesleutel aan met een beperkte scope (alleen execute) en een korte,
+      slot-gebonden expiry, en registreert hem. Stap 17 is het eigenlijke
+      bewijs: de sessiesleutel ondertekent ZELFSTANDIG execute_via_session,
+      ZONDER enige passkey- of wallet-extensie-prompt - een gewone, stille
+      Ed25519-handtekening. Stap 18 bewijst het negatieve scope-pad:
+      execute_advanced_via_session met deze sessie moet geweigerd worden
+      (SessionInstructionNotAllowed). Stap 19 wacht tot de sessie
+      daadwerkelijk verlopen is (on-chain slot voorbij expiry_slot) en
+      bewijst SessionExpired. Stap 20 bewijst dat close_expired_session
+      permissionless is: een compleet willekeurige derde partij ruimt de
+      verlopen sessie op en claimt de rent. Elke stap-log geeft expliciet aan
+      of er een passkey-prompt hoort te verschijnen ([PASSKEY]) of juist
+      NIET (dat is het hele punt van stap 17-20).
+    </p>
+    <p>
       Werkt alleen als je browser een platform-authenticator of
       hardware-security-key heeft, en een Wallet Standard-conforme
       wallet-extensie geinstalleerd is. Vereist een secure context -
@@ -72,6 +90,11 @@
     <button id="step13-btn" disabled>13. Bewijs: PASSKEY 2 ondertekent zelfstandig add_allowed_program</button>
     <button id="step14-btn" disabled>14. remove_passkey: PASSKEY 1 intrekken (ondertekend door PASSKEY 2)</button>
     <button id="step15-btn" disabled>15. Lockout-bescherming: PASSKEY 2 verwijderen moet falen</button>
+    <button id="step16-btn" disabled>16. Sessiesleutel aanmaken + registreren (add_session_key, beperkte scope + korte expiry)</button>
+    <button id="step17-btn" disabled>17. Bewijs: sessiesleutel ondertekent zelfstandig execute_via_session, GEEN prompt</button>
+    <button id="step18-btn" disabled>18. Negatief: execute_advanced_via_session moet falen (SessionInstructionNotAllowed)</button>
+    <button id="step19-btn" disabled>19. Wachten op expiry + bewijs SessionExpired</button>
+    <button id="step20-btn" disabled>20. close_expired_session: permissionless opruiming door een derde</button>
     <div id="output"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

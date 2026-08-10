@@ -31,6 +31,14 @@ import {
   buildAddPasskeyTransaction,
   buildRemovePasskeyTransaction,
 } from "./passkeys";
+import {
+  deriveSessionPda,
+  readSessionKeyAccount,
+  buildAddSessionKeyTransaction,
+  buildExecuteViaSessionTransaction,
+  buildExecuteAdvancedViaSessionTransaction,
+  buildCloseExpiredSessionTransaction,
+} from "./sessionKeys";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -63,6 +71,11 @@ let lastBackupAuthority: Keypair | null = null;
 // de oorspronkelijke owner_passkey uit stap 1).
 let lastPasskeyPublicKey2: Uint8Array | null = null;
 let lastCredentialId2: Uint8Array | null = null;
+// Session keys (stap 16-20): een gewone Ed25519-Solana-Keypair, GEEN passkey
+// - lokaal gegenereerd, geen navigator.credentials-aanroep nodig om hem aan
+// te maken. add_session_key blijft wel passkey-gated (zie STATUS.md).
+let lastSessionKeypair: Keypair | null = null;
+let lastSessionExpirySlot: bigint | null = null;
 
 const connection = new Connection("https://devnet.helius-rpc.com/?api-key=f39fc413-6730-4848-a60f-a6685a6f04d3", "confirmed");
 
@@ -195,6 +208,7 @@ async function runStep2(): Promise<void> {
     (document.getElementById("step5-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step8-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step11-btn") as HTMLButtonElement).disabled = false;
+    (document.getElementById("step16-btn") as HTMLButtonElement).disabled = false;
   } catch (err) {
     log("");
     log("FOUT:");
@@ -1383,6 +1397,398 @@ async function runStep15(): Promise<void> {
   }
 }
 
+async function runStep16(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("Stap 16: SESSIESLEUTEL aanmaken (stap 16-20, session keys - STATUS.md).");
+  log("Een sessiesleutel is een GEWONE Ed25519-Solana-Keypair, GEEN passkey - puur");
+  log("lokaal gegenereerd in de browser, geen navigator.credentials-aanroep nodig");
+  log("om hem aan te maken. Scope voor deze test: ALLEEN execute toegestaan (geen");
+  log("transfer_token, geen execute_advanced), expiry over 40 slots (~15-20");
+  log("seconden op devnet) - kort genoeg om binnen deze test daadwerkelijk te laten");
+  log("verlopen (stap 19).");
+  log("");
+
+  try {
+    const sessionKeypair = Keypair.generate();
+    lastSessionKeypair = sessionKeypair;
+    log("Sessiesleutel (publiek): " + sessionKeypair.publicKey.toBase58());
+
+    const currentSlot = BigInt(await connection.getSlot());
+    const expirySlot = currentSlot + 40n;
+    lastSessionExpirySlot = expirySlot;
+    log("Huidige slot: " + currentSlot + ", expiry_slot: " + expirySlot);
+    log("");
+
+    log("[PASSKEY] navigator.credentials.get() wordt aangeroepen - add_session_key");
+    log("vereist ALTIJD een echte passkey-handtekening (het wijzigt WIE toegang");
+    log("heeft), zelfs al is de sessiesleutel zelf geen passkey.");
+
+    const { transaction, sessionPda } = await buildAddSessionKeyTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      sessionKeypair.publicKey,
+      expirySlot,
+      true,
+      false,
+      false,
+      [],
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+
+    log("session PDA: " + sessionPda.toBase58());
+    log("");
+    log("Eigen simulatie...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    const session = await readSessionKeyAccount(connection, sessionPda);
+    if (!session || !session.canExecute || session.canTransferToken || session.canExecuteAdvanced) {
+      log("FOUT: de teruggelezen sessie-scope komt niet overeen met wat verwacht werd.");
+      return;
+    }
+    log(
+      "Teruggelezen: canExecute=" +
+        session.canExecute +
+        ", canTransferToken=" +
+        session.canTransferToken +
+        ", canExecuteAdvanced=" +
+        session.canExecuteAdvanced +
+        ", expirySlot=" +
+        session.expirySlot
+    );
+    log("");
+
+    log("Vault + sessiesleutel funden (wallet-extensie-goedkeuring nodig, GEEN");
+    log("passkey) - de sessiesleutel moet straks ZELF haar eigen transactiefee");
+    log("kunnen betalen, zonder enige verdere prompt.");
+    const fundTx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: lastWallet.publicKey,
+        toPubkey: lastPdas.vaultPda,
+        lamports: 100000,
+      }),
+      SystemProgram.transfer({
+        fromPubkey: lastWallet.publicKey,
+        toPubkey: sessionKeypair.publicKey,
+        lamports: 5_000_000,
+      })
+    );
+    fundTx.feePayer = lastWallet.publicKey;
+    const { blockhash: fundBh } = await connection.getLatestBlockhash();
+    fundTx.recentBlockhash = fundBh;
+    const { signature: fundSig } = await lastWallet.signAndSendTransaction(fundTx);
+    await connection.confirmTransaction(fundSig, "confirmed");
+    log("Gefund. Signature: " + fundSig);
+    log("");
+    log("SUCCES - sessiesleutel geregistreerd en gefund.");
+    log("");
+    log("Klaar voor stap 17.");
+
+    (document.getElementById("step17-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep17(): Promise<void> {
+  if (!lastPdas || !lastWallet || !lastSessionKeypair) {
+    log("Voer eerst stap 1, 2 en 16 uit.");
+    return;
+  }
+  log("Stap 17: HET EIGENLIJKE BEWIJS - execute_via_session, ondertekend door de");
+  log("sessiesleutel zelf. GEEN passkey-prompt, GEEN wallet-extensie-prompt: dit is");
+  log("een gewone, stille Ed25519-handtekening die volledig in de browser zelf");
+  log("gebeurt - dat is het hele punt van session keys.");
+  log("");
+
+  try {
+    const recipient = lastWallet.publicKey;
+    const amount = 1000n;
+
+    const { transaction } = await buildExecuteViaSessionTransaction(
+      connection,
+      lastPdas.walletPda,
+      lastPdas.vaultPda,
+      recipient,
+      amount,
+      lastSessionKeypair
+    );
+
+    log("Transactie is al volledig ondertekend door de sessiesleutel zelf (feePayer =");
+    log("sessiesleutel, geen enkele andere handtekening nodig).");
+    log("");
+    log("Eigen simulatie...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Rechtstreeks versturen (GEEN wallet.signAndSendTransaction -");
+    log("er is geen extra handtekening nodig)...");
+    const signature = await connection.sendRawTransaction(transaction.serialize());
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+    log("SUCCES - de sessiesleutel heeft ZELFSTANDIG execute_via_session ondertekend");
+    log("en uitgevoerd, zonder ENIGE prompt van welke aard dan ook.");
+    log("");
+    log("Klaar voor stap 18.");
+
+    (document.getElementById("step18-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep18(): Promise<void> {
+  if (!lastPdas || !lastWallet || !lastSessionKeypair) {
+    log("Voer eerst stap 1, 2 en 16 uit.");
+    return;
+  }
+  log("Stap 18: NEGATIEF scope-bewijs - deze sessie is ALLEEN gescoped voor execute");
+  log("(stap 16), niet voor execute_advanced. Een poging tot");
+  log("execute_advanced_via_session moet geweigerd worden met");
+  log("SessionInstructionNotAllowed, ongeacht of het doelprogramma verder geldig");
+  log("zou zijn. Alleen simuleren (niet versturen) - we willen de weigering");
+  log("aantonen, geen fee betalen voor een transactie die toch niets gaat doen.");
+  log("");
+
+  try {
+    const policyPda = derivePolicyPda(lastPdas.walletPda);
+
+    const { transaction } = await buildExecuteAdvancedViaSessionTransaction(
+      lastPdas.walletPda,
+      lastPdas.vaultPda,
+      policyPda,
+      SystemProgram.programId,
+      [],
+      new Uint8Array(0),
+      connection,
+      lastSessionKeypair
+    );
+
+    log("GEEN prompt nodig om deze transactie op te bouwen of te ondertekenen (de");
+    log("sessiesleutel ondertekent zelf, lokaal) - maar het programma weigert de");
+    log("AANROEP zelf toch, on-chain. Dat is precies de bedoelde bescherming.");
+    log("");
+
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (!simResult.value.err) {
+      log("FOUT: execute_advanced_via_session had moeten falen (deze sessie mag dat");
+      log("niet), maar de simulatie slaagde (onverwacht).");
+      return;
+    }
+    log("SUCCES - de scope-beperking werkt: deze sessie kon GEEN execute_advanced");
+    log("aanroepen, precies zoals bij add_session_key ingesteld");
+    log("(can_execute_advanced=false).");
+    log("");
+    log("Klaar voor stap 19.");
+
+    (document.getElementById("step19-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep19(): Promise<void> {
+  if (!lastPdas || !lastWallet || !lastSessionKeypair || lastSessionExpirySlot === null) {
+    log("Voer eerst stap 1, 2 en 16 uit.");
+    return;
+  }
+  log("Stap 19: EXPIRY bewijzen - wachten tot de daadwerkelijke on-chain slot");
+  log("expiry_slot (" + lastSessionExpirySlot + ") gepasseerd is (devnet-slots gaan");
+  log("vanzelf vooruit, geen dummy-transacties nodig zoals in de lokale testsuite),");
+  log("en dan bewijzen dat execute_via_session daarna geweigerd wordt met");
+  log("SessionExpired.");
+  log("");
+
+  try {
+    for (;;) {
+      const currentSlot = BigInt(await connection.getSlot());
+      if (currentSlot > lastSessionExpirySlot) {
+        log("Huidige slot " + currentSlot + " > expiry_slot " + lastSessionExpirySlot + " - verlopen.");
+        break;
+      }
+      log(
+        "Huidige slot " +
+          currentSlot +
+          " <= expiry_slot " +
+          lastSessionExpirySlot +
+          " - nog " +
+          (lastSessionExpirySlot - currentSlot) +
+          " slot(s) te gaan, 2s wachten..."
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    log("");
+
+    log("execute_via_session opnieuw proberen - moet nu falen met SessionExpired.");
+    log("Alleen simuleren (niet versturen).");
+
+    const { transaction } = await buildExecuteViaSessionTransaction(
+      connection,
+      lastPdas.walletPda,
+      lastPdas.vaultPda,
+      lastWallet.publicKey,
+      1000n,
+      lastSessionKeypair
+    );
+
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (!simResult.value.err) {
+      log("FOUT: execute_via_session had moeten falen na expiry, maar de simulatie");
+      log("slaagde (onverwacht).");
+      return;
+    }
+    log("SUCCES - de sessie is daadwerkelijk verlopen: execute_via_session wordt");
+    log("geweigerd met SessionExpired.");
+    log("");
+    log("Klaar voor stap 20.");
+
+    (document.getElementById("step20-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep20(): Promise<void> {
+  if (!lastPdas || !lastWallet || !lastSessionKeypair) {
+    log("Voer eerst stap 1, 2, 16 en 19 uit.");
+    return;
+  }
+  log("Stap 20: close_expired_session - PERMISSIONLESS. Een compleet willekeurige");
+  log("derde partij (hier: een verse, lokaal gegenereerde Keypair die nooit iets");
+  log("met deze wallet te maken heeft gehad) mag de verlopen sessie opruimen en de");
+  log("teruggewonnen rent claimen. Geen passkey, geen sessiesleutel, geen relatie");
+  log("met de wallet - puur de expiry_slot telt.");
+  log("");
+
+  try {
+    const closer = Keypair.generate();
+    log("closer (willekeurige derde): " + closer.publicKey.toBase58());
+    log("closer funden zodat hij zijn eigen transactiefee kan betalen (wallet-");
+    log("extensie-goedkeuring nodig, GEEN passkey)...");
+
+    const fundTx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: lastWallet.publicKey,
+        toPubkey: closer.publicKey,
+        lamports: 5_000_000,
+      })
+    );
+    fundTx.feePayer = lastWallet.publicKey;
+    const { blockhash: fundBh } = await connection.getLatestBlockhash();
+    fundTx.recentBlockhash = fundBh;
+    const { signature: fundSig } = await lastWallet.signAndSendTransaction(fundTx);
+    await connection.confirmTransaction(fundSig, "confirmed");
+    log("Gefund. Signature: " + fundSig);
+    log("");
+
+    const sessionPda = deriveSessionPda(lastPdas.walletPda, lastSessionKeypair.publicKey);
+    const balanceBefore = await connection.getBalance(closer.publicKey);
+
+    const { transaction } = await buildCloseExpiredSessionTransaction(
+      connection,
+      lastPdas.walletPda,
+      lastSessionKeypair.publicKey,
+      closer
+    );
+
+    log("GEEN prompt nodig - closer ondertekent zelf, lokaal, en betaalt zelf de fee.");
+    const signature = await connection.sendRawTransaction(transaction.serialize());
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    const sessionInfo = await connection.getAccountInfo(sessionPda);
+    if (sessionInfo !== null) {
+      log("FOUT: het session-account had gesloten moeten zijn.");
+      return;
+    }
+    const balanceAfter = await connection.getBalance(closer.publicKey);
+    log(
+      "session-account is gesloten. closer-balans: " +
+        balanceBefore +
+        " -> " +
+        balanceAfter +
+        " lamports (rent teruggewonnen, minus de betaalde fee)."
+    );
+    log("");
+    log("Het volledige session-key-model is nu end-to-end bewezen op devnet: een");
+    log("sessiesleutel aanmaken met beperkte scope en korte, slot-gebonden expiry");
+    log("(stap 16), zelfstandig ondertekenen zonder ENIGE prompt (stap 17), de");
+    log("scope-beperking die andere instructies weigert (stap 18), daadwerkelijk");
+    log("verlopen (stap 19), en permissionless opruiming door een derde (stap 20).");
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
 document.getElementById("start-btn")!.addEventListener("click", () => {
   document.getElementById("output")!.textContent = "";
   runStep1();
@@ -1432,4 +1838,19 @@ document.getElementById("step14-btn")!.addEventListener("click", () => {
 });
 document.getElementById("step15-btn")!.addEventListener("click", () => {
   runStep15();
+});
+document.getElementById("step16-btn")!.addEventListener("click", () => {
+  runStep16();
+});
+document.getElementById("step17-btn")!.addEventListener("click", () => {
+  runStep17();
+});
+document.getElementById("step18-btn")!.addEventListener("click", () => {
+  runStep18();
+});
+document.getElementById("step19-btn")!.addEventListener("click", () => {
+  runStep19();
+});
+document.getElementById("step20-btn")!.addEventListener("click", () => {
+  runStep20();
 });

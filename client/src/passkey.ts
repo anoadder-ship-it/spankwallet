@@ -100,6 +100,19 @@ export async function createSpankWalletPasskey(
         name: userName,
         displayName: userName,
       },
+      // Uitsluitend ES256 (-7, secp256r1/P-256) - GEEN RS256 erbij, ondanks
+      // Chrome's console-waarschuwing dat pubKeyCredParams "at least one of
+      // ES256 and RS256" mist. Dit is bewust, niet vergeten: het on-chain
+      // programma kan uitsluitend secp256r1-handtekeningen verifieren (via
+      // Solana's secp256r1-precompile, zie SECP256R1_PROGRAM_ID in
+      // instructions.rs) - er bestaat geen RSA-verificatie-precompile op
+      // Solana, en owner_passkey/seed_key zijn altijd exact een 33-byte
+      // gecomprimeerde secp256r1-sleutel (PASSKEY_PUBKEY_LEN in state.rs).
+      // RS256 toevoegen zou een authenticator die RSA prefereert een
+      // credential kunnen laten aanmaken die dit programma NOOIT kan
+      // verifieren - coseKeyToCompressedPublicKey hieronder zou dat direct
+      // met een duidelijke fout afvangen, maar beter om de browser al bij
+      // create() nooit die keuze aan te bieden.
       pubKeyCredParams: [{ type: "public-key", alg: -7 }],
       authenticatorSelection: {
         residentKey: "preferred",

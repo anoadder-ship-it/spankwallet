@@ -1387,3 +1387,100 @@ add_allowed_program, remove_allowed_program, execute_advanced) - alleen de recov
 (initiate/cancel/finalize) staat nog met een losse, oudere live-bevestiging uit sectie 16/30.
 De programma-allowlist-architectuur uit sectie 26/27 is hiermee volledig van ontwerp tot
 bewezen werking op devnet doorlopen.
+
+## 36. WebAuthn-hardeningscheck op de al-live signature-verificatie: UV-vlag gefixt, laag-S al gedekt
+
+Op verzoek een gerichte hardeningscheck op `verify_passkey_signature` in instructions.rs -
+de EEN gedeelde functie die execute, transfer_token, add_allowed_program,
+remove_allowed_program EN execute_advanced allemaal gebruiken om een echte
+passkey-handtekening te verifieren. Dit raakt code die al met echte devnet-fondsen werkt,
+dus eerst grondig onderzocht en gerapporteerd per punt, pas na expliciete goedkeuring
+gewijzigd.
+
+**Punt 1 - UV-vlag (User Verified): ONTBRAK, nu gefixt.** De functie controleerde nooit de
+authenticatorData-flags-byte. De client vraagt wel `userVerification: "required"` aan
+(`client/src/webauthnSign.ts`), maar dat is een client-side hint - exact het soort ding dat
+dit hele architectuurprincipe (niet de client vertrouwen) juist wil vermijden. Een
+authenticator die geen echte biometrie-/PIN-bevestiging afdwingt zou zonder deze check
+alsnog een geldige handtekening kunnen leveren voor elke spend- of policy-actie.
+
+Fix: twee nieuwe constanten (`AUTHENTICATOR_DATA_MIN_LEN=37`,
+`AUTHENTICATOR_DATA_FLAGS_OFFSET=32`, `AUTHENTICATOR_DATA_UV_FLAG=0x04`) en een expliciete
+`flags & 0x04 != 0`-check, direct na de bestaande message-hash-check. Bijkomende,
+noodzakelijke correctheidsfix om dit veilig te kunnen doen: de oude berichtlengte-eis
+(`>= 32`) liet in theorie een LEGE authenticatorData toe zolang er nog 32 bytes voor de hash
+overbleven - te zwak om straks veilig byte 32 (de flags-byte) uit te lezen. Nu `>= 69`
+(37 voor een geldige .get()-authenticatorData + 32 voor de hash).
+
+**Testgevolg, direct meegenomen (anders had dit de testsuite flaky gemaakt):**
+`tests/webauthnTestHelper.ts` genereerde authenticatorData voorheen als 37 volledig
+willekeurige bytes - ~50% kans dat de UV-bit toevallig niet gezet was, wat zonder aanpassing
+willekeurig test-falen had veroorzaakt na de Rust-fix. `signTestChallenge` bouwt de
+flags-byte nu expliciet op (default `0x05` = UP|UV, met een optionele override-parameter;
+rpIdHash/signCount blijven willekeurig, worden door dit programma toch niet gecontroleerd).
+Nieuwe negatieve test in `tests/spankwallet.ts` ("faalt als de authenticatorData-flags UV
+niet zetten") bevestigt expliciet dat een verder cryptografisch volledig geldige
+handtekening (echt keypair, correcte challenge, correcte clientDataHash) zonder de UV-bit
+daadwerkelijk geweigerd wordt met de nieuwe `UserVerificationRequired`-foutcode - hetzelfde
+principe dat dit hele project consequent toepast: elke beveiligingscontrole moet ook
+aantoonbaar iets tegenhouden, niet alleen aantoonbaar iets doorlaten.
+
+**Punt 2 - P-256-malleability (laag-S-eis): AL VOLLEDIG AFGEDWONGEN, niet door onze code.**
+Onderzocht in de daadwerkelijke Solana-precompile-broncode (lokale checkout onder
+`~/projects/agave/precompiles/src/secp256r1.rs`, regel 107):
+`s_bignum >= one && s_bignum <= half_order` als onvoorwaardelijke eis, met een dedicated
+test (`test_secp256r1_high_s`) die expliciet bevestigt dat een hoge-S-handtekening met
+`InvalidSignature` faalt. Dit betekent dat de Solana-runtime zelf ELKE transactie met een
+hoge-S-secp256r1-handtekening al weigert tijdens precompile-verificatie, vóórdat ons
+programma ooit draait - niets wat ons programma zou kunnen omzeilen zelfs als het wilde, en
+onafhankelijk van clientgedrag. `client/src/secp256r1.ts`'s `normalizeS()` is dus GEEN
+beveiligingsmaatregel maar een functionele noodzaak (WebAuthn-assertions zijn niet
+gegarandeerd laag-S; zonder normalisatie zou ~50% van overigens geldige handtekeningen
+simpelweg door de precompile geweigerd worden). Geen codewijziging nodig - uitgebreide
+toelichtende comment toegevoegd bij `SECP256R1_PROGRAM_ID` en bij de signature-lengte-check
+onderaan `verify_passkey_signature`, zodat een latere sessie dit niet als ontbrekend
+aanmerkt (zelfde patroon als de ES256-comment uit sectie 35).
+
+**Punt 3 - challengeIndex/typeIndex-validatie in clientDataJSON: beoordeeld, NIET
+aangepast op verzoek van de gebruiker.** `extract_webauthn_challenge` doet een rauwe
+substring-zoektocht naar `"challenge":"` i.p.v. clientDataJSON structureel te parsen.
+Grondig getraceerd of dit daadwerkelijk exploiteerbaar is: `client_data_json` is een
+client-aangeleverd instructieargument, maar cryptografisch gebonden - de laatste 32 bytes
+van het ondertekende precompile-bericht moeten exact `SHA-256(client_data_json)` zijn.
+Gegeven SHA-256-preimage-weerstand moet elke on-chain geaccepteerde `client_data_json`
+byte-identiek zijn aan wat een echte authenticator daadwerkelijk hashte en ondertekende.
+Browsers bouwen clientDataJSON via hun eigen interne serializer (nooit developer-
+string-concatenatie), `type`/`origin` zijn nooit developer-controleerbaar, en de
+`challenge`-waarde zelf (base64url-alfabet) kan nooit een aanhalingsteken bevatten - er is
+dus geen manier om een vervalste `"challenge":"..."`-substring te smokkelen via een andere
+veldwaarde in een legitiem geproduceerde clientDataJSON. Wel geconstateerd: `"type":
+"webauthn.get"` wordt nergens expliciet gecontroleerd (een WebAuthn-spec-verplichte
+verificatiestap, bedoeld om cross-ceremony-typeverwarring te voorkomen) - in deze codebase
+niet praktisch exploiteerbaar (attestation wordt met `"none"` aangevraagd in `passkey.ts`,
+wat sowieso geen bruikbare handtekening van de credential-sleutel zelf oplevert), maar wel
+een echte, spec-verplichte check die ontbreekt. Voorgelegd aan de gebruiker als expliciete
+optie; NIET gekozen deze sessie - blijft openstaand als bewust uitgestelde, goedkoop toe te
+voegen defense-in-depth-maatregel voor een latere sessie.
+
+**Zijdelings geconstateerd, niet een van de drie gevraagde punten, apart gerapporteerd maar
+niet aangepast:** `rpIdHash` (de eerste 32 bytes van authenticatorData) wordt nergens
+vergeleken met `SHA-256(rpId)`. In de praktijk laag risico (WebAuthn-credentials zijn
+OS/browser-gescoped aan één rpId, een browser biedt een credential nooit aan voor een
+andere site se ceremonie), maar net als punt 3 een spec-verplichte check die ontbreekt.
+Beschikbaar voor dezelfde soort rapporteer-en-beslis-behandeling in een latere sessie,
+indien gewenst.
+
+**Resultaat: 16/17 lokale tests groen** (alle bestaande tests, inclusief alle 8
+allowlist-tests uit sectie 34/35, blijven groen na de fix - geen regressie. De ene falende
+test, `finalize_recovery slaagt ná het tijdslot`, is dezelfde vooraf al bekende,
+omgevingsgebonden flaky timing-test uit sectie 34/35 - recovery.ts en de recovery-
+instructies zijn deze sessie niet aangeraakt).
+
+**Belangrijk, expliciet: dit is gecommit maar NOG NIET GEDEPLOYD naar devnet.** Het live
+programma op `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` draait nog de OUDE
+verificatiecode (zonder de UV-check). Voor bestaande, eerlijke gebruikers zou een deploy
+geen breaking change moeten zijn (elke authenticator die `userVerification: "required"`
+daadwerkelijk respecteert - wat voor de meeste platform-authenticators en hardware-sleutels
+geldt - zet de UV-bit toch al), maar dit is nog niet tegen een echte hardware-passkey op
+devnet bevestigd sinds de wijziging. Devnet-deploy en een nieuwe live-bevestiging (zelfde
+niveau van bewijs als sectie 35) blijven een bewust aparte, losse vervolgstap.

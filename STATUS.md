@@ -1086,3 +1086,58 @@ Gedeployed op devnet: 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9.
 Met transfer_sol en transfer_token nu beide bewezen, dekt SpankWallet de twee meest
 fundamentele wallet-acties (native SOL en willekeurige SPL-tokens, inclusief zBTC/BTCSOL)
 volledig, zonder ooit een generieke CPI-doorgeefluik te hebben geintroduceerd.
+
+## 33. UI-veiligheidsroadmap stap 1 afgerond: strikte Content-Security-Policy
+
+Eerste, hoogste-prioriteit stap uit sectie 28 uitgevoerd: client/index.html heeft nu een
+CSP via een `<meta http-equiv="Content-Security-Policy">`-tag, zo strikt mogelijk voor een
+wallet-UI:
+
+- `script-src 'self'` - geen `unsafe-inline`, geen `unsafe-eval`. Was al haalbaar zonder
+  compromis: de enige script-inhoud is de module-import van /src/main.ts, geen inline
+  `<script>`-blokken aanwezig.
+- `style-src 'self'` - ook zonder `unsafe-inline`. index.html had wel een inline
+  `<style>`-blok (alle CSS voor de testpagina); dat is verplaatst naar een nieuw bestand
+  client/src/style.css en via `<link rel="stylesheet">` ingeladen, zodat er geen enkele
+  inline-uitzondering nodig was. Bewuste keuze: liever de styling-bron verplaatsen dan de
+  CSP verzwakken voor iets dat net zo goed extern kan.
+- `connect-src 'self' https://devnet.helius-rpc.com` - de enige externe host die de
+  pagina zelf aanspreekt (client/src/main.ts's Connection, devnet). Wallet-extensies
+  (Phantom) doen hun eigen RPC-verkeer vanuit hun eigen extensiecontext, niet vanuit de
+  pagina zelf, dus die vallen buiten de CSP van de pagina.
+- Overige directives zo strikt mogelijk: `default-src 'self'`, `img-src 'self'`,
+  `font-src 'self'` (geen externe afbeeldingen/fonts aanwezig), `object-src 'none'`,
+  `base-uri 'self'`, `form-action 'self'`, `frame-ancestors 'none'`, `frame-src 'none'`.
+
+**Bekende beperking, bewust zo gelaten:** `frame-ancestors` (en `report-uri`/`sandbox`)
+worden door de CSP-spec NIET gehandhaafd wanneer ze via een `<meta>`-tag afgeleverd worden
+- alleen via een echte HTTP-response-header. Chromium bevestigt dit letterlijk in de
+console: "The Content Security Policy directive 'frame-ancestors' is ignored when
+delivered via a `<meta>` element." De directive blijft staan als documentatie van de
+intentie (en werkt automatisch zodra dit ooit achter een eigen server met headers draait),
+maar de daadwerkelijke clickjacking-bescherming (roadmap-punt 3 uit sectie 28) is dus nog
+NIET gerealiseerd - vereist X-Frame-Options of een CSP-header vanaf een echte server, niet
+mogelijk vanuit een statische meta-tag alleen. Voor nu draait dit project via Vite's
+dev-server zonder eigen response-header-laag, dus dit blijft openstaand tot een eventuele
+eigen hosting-opzet.
+
+**Getest:** `npm run dev` gestart, pagina opgehaald en gecontroleerd met headless Chromium
+(`chromium --headless=new --dump-dom` + `--enable-logging=stderr` om de browserconsole te
+vangen, aangezien er geen interactieve browser beschikbaar was in deze sessie). Resultaat:
+pagina laadt normaal (200 OK, alle content aanwezig), /src/style.css en /src/main.ts beide
+200, Vite's HMR-websocket verbindt gewoon ("[vite] connected."), en de ENIGE
+CSP-gerelateerde consoleregel is de hierboven genoemde, verwachte `frame-ancestors`-melding
+- geen "Refused to..."-violaties, geen geblokkeerde resources. Gebruiker heeft nog niet
+zelf in een normale browser gekeken; als daar alsnog iets afwijkt (bijvoorbeeld door een
+wallet-extensie die zelf inline content in de pagina probeert te injecteren) is dat de
+volgende plek om te kijken.
+
+Gecommit en gepusht naar main (1d980ce). npm-audit-supply-chain-verharding (roadmap-punt 2:
+npm ci in build, versies pinnen) en de overige punten uit sectie 28 blijven bewust
+openstaand voor een volgende sessie, zoals daar al aangegeven.
+
+**Zijdelings, tijdens dezelfde sessie bekeken maar NIET gemerged:** de openstaande
+Dependabot-PR #1 (npm_and_yarn-groep, /client) bumpt vite 5.4.21 -> 6.4.3 en esbuild 0.21.5
+-> 0.25.12. Dit is exact de major-upgrade die in sectie 20 bewust werd uitgesteld ("een
+aparte, bewust geplande taak, geen tussendoortje") - blijft op verzoek van de gebruiker
+onaangeraakt tot een expliciete, apart geplande test van die upgrade.

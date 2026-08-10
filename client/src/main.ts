@@ -11,6 +11,7 @@ import { createSpankWalletPasskey } from "./passkey";
 import { connectWallet, ConnectedWallet } from "./wallet";
 import { buildInitWalletTransaction, InitWalletPdas } from "./initWallet";
 import { buildExecuteTransaction } from "./execute";
+import { buildTransferTokenTransaction } from "./transferToken";
 import {
   readWalletAccount,
   buildInitiateRecoveryTransaction,
@@ -170,6 +171,7 @@ async function runStep2(): Promise<void> {
     (document.getElementById("step3-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step4-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step6-btn") as HTMLButtonElement).disabled = false;
+    (document.getElementById("step7-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step5-btn") as HTMLButtonElement).disabled = false;
   } catch (err) {
     log("");
@@ -579,6 +581,100 @@ async function runStep6(): Promise<void> {
     console.error(err);
   }
 }
+
+async function runStep7(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("Stap 7: transfer_token - SPL-token versturen vanuit de vault met een");
+  log("ECHTE passkey-handtekening (echte devnet-USDC, zelfde patroon als");
+  log("transfer_sol maar dan voor tokens).");
+  log("");
+  try {
+    const usdcMint = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+    const payerAta = getAssociatedTokenAddressSync(usdcMint, lastWallet.publicKey);
+    const vaultAta = getAssociatedTokenAddressSync(usdcMint, lastPdas.vaultPda, true);
+
+    log("7a. Vault-USDC-ATA aanmaken + 1 USDC ernaartoe sturen (voorbereiding -");
+    log("zonder saldo in de vault is er niets om transfer_token mee te testen)...");
+    log("Dit vraagt om 2 goedkeuringen in je wallet-extensie (ATA-aanmaak, dan transfer).");
+
+    const createAtaTx = new Transaction().add(
+      createAssociatedTokenAccountInstruction(
+        lastWallet.publicKey,
+        vaultAta,
+        lastPdas.vaultPda,
+        usdcMint
+      )
+    );
+    createAtaTx.feePayer = lastWallet.publicKey;
+    const { blockhash: ataBh } = await connection.getLatestBlockhash();
+    createAtaTx.recentBlockhash = ataBh;
+    const { signature: ataSig } = await lastWallet.signAndSendTransaction(createAtaTx);
+    await connection.confirmTransaction(ataSig, "confirmed");
+    log("Vault-USDC-ATA aangemaakt: " + vaultAta.toBase58());
+
+    const fundTx = new Transaction().add(
+      createTransferInstruction(payerAta, vaultAta, lastWallet.publicKey, 1_000_000)
+    );
+    fundTx.feePayer = lastWallet.publicKey;
+    const { blockhash: fundBh } = await connection.getLatestBlockhash();
+    fundTx.recentBlockhash = fundBh;
+    const { signature: fundSig } = await lastWallet.signAndSendTransaction(fundTx);
+    await connection.confirmTransaction(fundSig, "confirmed");
+    log("1 USDC naar de vault gestuurd. Signature: " + fundSig);
+    log("");
+
+    log("7b. transfer_token aanroepen: 0.5 USDC (500000 units) van de vault");
+    log("terug naar de payer zelf...");
+    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+    const { transaction } = await buildTransferTokenTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      vaultAta,
+      payerAta,
+      usdcMint,
+      500_000n,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+    log("");
+    log("Eigen simulatie (dit is de daadwerkelijke test van verify_passkey_signature");
+    log("+ de nieuwe SPL-token-CPI-logica)...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+    log("SUCCES - transfer_token heeft 0.5 USDC daadwerkelijk verplaatst van de");
+    log("vault terug naar de payer, met een ECHTE passkey-handtekening. Bewijst");
+    log("dat de tweede getypeerde actie (na transfer_sol) end-to-end werkt op");
+    log("devnet, inclusief de vault-PDA-ondertekende SPL-Token-CPI.");
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
 document.getElementById("start-btn")!.addEventListener("click", () => {
   document.getElementById("output")!.textContent = "";
   runStep1();
@@ -601,4 +697,7 @@ document.getElementById("step5-btn")!.addEventListener("click", () => {
 });
 document.getElementById("step6-btn")!.addEventListener("click", () => {
   runStep6();
+});
+document.getElementById("step7-btn")!.addEventListener("click", () => {
+  runStep7();
 });

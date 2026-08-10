@@ -7,7 +7,7 @@ mod state;
 use instructions::*;
 use state::PASSKEY_PUBKEY_LEN;
 
-declare_id!("ERAEjxMgxserGuj8hc6v7LVy6ZaXaVxwDtXFLbsxj8wY");
+declare_id!("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
 
 #[program]
 pub mod spankwallet {
@@ -37,6 +37,14 @@ pub mod spankwallet {
         client_data_json: Vec<u8>,
     ) -> Result<()> {
         instructions::execute(ctx, amount, client_data_json)
+    }
+
+    pub fn transfer_token(
+        ctx: Context<TransferToken>,
+        amount: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::transfer_token(ctx, amount, client_data_json)
     }
 
     pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {

@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Burn, CloseAccount, Token, TokenAccount};
+use anchor_spl::token::{self, Burn, CloseAccount, Token, TokenAccount, Transfer};
 use solana_instructions_sysvar::{
     load_current_index_checked, load_instruction_at_checked, ID as IX_SYSVAR_ID,
 };
@@ -423,6 +423,93 @@ pub fn execute(
         .checked_add(amount)
         .ok_or(SpankWalletError::ExecuteTransferOverflow)?;
     **recipient_ai.try_borrow_mut_lamports()? = new_recipient_balance;
+
+    Ok(())
+}
+
+
+// transfer_token
+
+#[derive(Accounts)]
+pub struct TransferToken<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    #[account(
+        mut,
+        constraint = vault_token_account.owner == vault.key() @ SpankWalletError::InvalidVaultTokenAccount,
+        constraint = vault_token_account.mint == token_mint.key() @ SpankWalletError::InvalidVaultTokenAccount,
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: willekeurige ontvanger-token-account - geen eigendomsbeperking
+    /// nodig (zelfde principe als recipient in execute, sectie 25), maar WEL
+    /// een mint-check zodat de overdracht niet per ongeluk naar een
+    /// token-account van een andere mint kan gaan.
+    #[account(
+        mut,
+        constraint = recipient_token_account.mint == token_mint.key() @ SpankWalletError::InvalidRecipientTokenAccount,
+    )]
+    pub recipient_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: alleen doorgegeven aan de SPL Token-CPI en gebruikt in de
+    /// eigendoms-/mint-constraints hierboven, zelfde patroon als hunt.
+    pub token_mint: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+/// transfer_token: tweede getypeerde actie na transfer_sol (sectie 25),
+/// zelfde ontwerpprincipe - gesloten, expliciet, geen generieke CPI. Dekt
+/// automatisch elke SPL-token (zBTC, BTCSOL, USDC, etc.) zonder per-munt-
+/// configuratie, zie STATUS.md sectie 27.
+pub fn transfer_token(
+    ctx: Context<TransferToken>,
+    amount: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let mut payload = Vec::with_capacity(32 + 32 + 8);
+    payload.extend_from_slice(ctx.accounts.recipient_token_account.key().as_ref());
+    payload.extend_from_slice(ctx.accounts.token_mint.key().as_ref());
+    payload.extend_from_slice(&amount.to_le_bytes());
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"transfer_token", &payload);
+    verify_passkey_signature(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    let wallet_key = ctx.accounts.wallet.key();
+    let seeds = &[b"vault".as_ref(), wallet_key.as_ref(), &[ctx.accounts.vault.bump]];
+    let signer_seeds = &[&seeds[..]];
+
+    let transfer_ctx = CpiContext::new_with_signer(
+        Token::id(),
+        Transfer {
+            from: ctx.accounts.vault_token_account.to_account_info(),
+            to: ctx.accounts.recipient_token_account.to_account_info(),
+            authority: ctx.accounts.vault.to_account_info(),
+        },
+        signer_seeds,
+    );
+    token::transfer(transfer_ctx, amount)?;
 
     Ok(())
 }

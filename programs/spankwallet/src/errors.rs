@@ -56,6 +56,12 @@ pub enum SpankWalletError {
     #[msg("Deze overdracht zou de vault onder zijn rent-exempte minimum laten zakken")]
     VaultWouldFallBelowRentExempt,
 
+    #[msg("vault_token_account is geen Associated Token Account van deze vault voor deze mint")]
+    InvalidVaultTokenAccount,
+
+    #[msg("recipient_token_account hoort niet bij de opgegeven mint")]
+    InvalidRecipientTokenAccount,
+
     #[msg("Onverwachte tijdstempel-overflow bij het berekenen van verstreken recovery-tijd")]
     TimestampOverflow,
 }

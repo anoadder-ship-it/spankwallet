@@ -1262,3 +1262,128 @@ in dit project se code) - expliciet bevestigd door `git stash` en dezelfde test 
 Gecommit en gepusht naar main (9adc77a). Devnet-deploy en live-browsertest bewust nog NIET
 gedaan vandaag - volgt als aparte, losse stap na bevestiging dat de Rust-laag klopt (in lijn
 met de afspraak voor deze sessie).
+
+## 35. Programma-allowlist bewezen end-to-end op devnet, inclusief een CSP-regressie gevonden en gefixed
+
+Vervolg op sectie 34 (on-chain laag + lokale tests) - vandaag devnet-deploy, browser-
+uitbreiding (stappen 8-10), en een volledige live-test met echte hardware-passkey.
+
+**Devnet-deploy - een landmine ontdekt in het bestaande build-script:** `./scripts/
+build-and-deploy.sh --clean` bleek TWEE problemen te hebben zodra die letterlijk tegen
+devnet gedraaid zou worden op deze machine:
+
+1. **Verkeerde signer.** Het script se `solana program deploy` heeft geen `--keypair`-vlag,
+   dus leunt het op de globale `solana config`-default. Die stond op deze machine op
+   `/home/michel/solana_darkpool/heartbeat.json` - een keypair van een compleet ANDER,
+   ongerelateerd project dat toevallig dezelfde machine deelt, niet de upgrade-authority
+   van SpankWallet (`~/.config/solana/id.json`, G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp,
+   bevestigd via `solana program show`). Blindweg draaien had een mislukte transactie
+   vanuit een volledig verkeerde, ongerelateerde wallet oncost. Opgelost door de globale
+   config NIET aan te raken (voorkomt zij-effecten op het andere project) en in plaats
+   daarvan expliciet `--keypair ~/.config/solana/id.json` te gebruiken bij de deploy-stap
+   zelf, zoals README.md se eigen devnet-sectie al voorschreef.
+2. **`--clean` + `anchor keys sync` is destructief voor een bestaand devnet-programma.**
+   `rm -rf target` verwijdert `target/deploy/spankwallet-keypair.json` - de LOKALE kopie van
+   de keypair die het adres `9ma6...` ooit geclaimd heeft. Zonder dat bestand genereerde
+   `anchor keys sync` een GEHEEL NIEUWE, willekeurige keypair en herschreef `declare_id!`
+   in lib.rs EN Anchor.toml naar dat nieuwe adres (`BAbTe7HWMfGXvd7ifP1cXLETs1h2hTHi6cY1EGg9r3Sj`)
+   - zonder ooit te deployen zou dit het al-werkende, live devnet-programma stilletjes
+   verweesd hebben achtergelaten. Direct herkend via `git diff` (beide bestanden zijn
+   getrackt) VOORDAT er gebouwd of gedeployed werd, en teruggedraaid met `git checkout`.
+   Voor een UPGRADE van een bestaand programma is die keypair sowieso niet nodig - alleen de
+   upgrade-authority en het publieke adres, dus `anchor keys sync` is simpelweg overgeslagen.
+   Vermoedelijk exact het mechanisme achter eerdere programma-ID-wijzigingen in dit project
+   (ERAEjx... -> 9ma6..., zie sectie 32) - nu voor het eerst expliciet doorzien en bewust
+   vermeden voor een upgrade.
+3. **`anchor build` overschrijft stilletjes een --arch v3-build.** Precies het gedrag dat het
+   script se eigen commentaar al waarschuwt (gotcha #2) - moest `anchor build` (voor IDL/types)
+   VOOR `cargo-build-sbf --arch v3` (voor het daadwerkelijk te deployen .so-bestand) draaien,
+   in die volgorde, anders wordt de v3-build stilletjes vervangen door een default-arch-build.
+   Elke keer geverifieerd door de rauwe 32 bytes van het verwachte programma-ID (`9ma6...`,
+   handmatig base58-gedecodeerd) daadwerkelijk in het gecompileerde `.so`-bestand terug te
+   zoeken - `strings` alleen is hiervoor nutteloos (Pubkey wordt als ruwe bytes ingebed, niet
+   als leesbare base58-tekst).
+
+Na deze drie correcties: gedeployed als upgrade naar het BESTAANDE adres
+`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` (zelfde programma-ID, ongewijzigd). Bevestigd
+via `solana program show`: data length 282272 -> 299056 bytes (matcht exact de nieuwe
+lokale build), authority ongewijzigd, nieuwe deploy-slot. README.md se "Program ID (devnet)"-
+regel bleek daarnaast al stale te staan (nog de oude sectie-30-waarde, nooit bijgewerkt na de
+sectie-32-redeploy) - in dezelfde beurt gecorrigeerd.
+
+**Client uitgebreid met stappen 8-10**, zelfde patroon als de bestaande 7 (handmatig
+Borsh-geencodeerd, discriminators uit `target/idl/spankwallet.json`, geen gegenereerde
+Anchor-TS-client). Nieuwe bestanden `client/src/policy.ts` (add/remove_allowed_program +
+`readPolicyAccount`, een ruwe-bytes-parser zoals `readWalletAccount` in recovery.ts) en
+`client/src/executeAdvanced.ts` (de challenge-payload-opbouw exact zoals
+`instructions.rs::execute_advanced` verwacht, inclusief de geforceerde-vault-signer-regel).
+Stap 8: System Program toevoegen. Stap 9: EERST het negatieve pad (TOKEN_PROGRAM_ID, nooit
+toegevoegd, alleen gesimuleerd om een onnodige fee te vermijden), DAARNA het positieve pad
+(een echte, ongevaarlijke CPI - System::Assign op een vers gefund testaccount, verandert
+alleen de eigenaar naar ons eigen programma-ID, geen echte waarde in het spel). Stap 10:
+System Program weer verwijderen, en herbevestigen via simulatie dat de CPI daarna weer
+geweigerd wordt - sluit de volledige add/gebruik/remove-cyclus.
+
+**CSP-regressie gevonden tijdens de eerste live-testpoging, direct gefixed.** De gebruiker se
+eerste testrun liep vast bij stap 2 (init_wallet): transactie verstuurd, maar
+`confirmTransaction()` liep na 30s vast op een timeout. Browserconsole wees het exact aan:
+"Connecting to 'wss://devnet.helius-rpc.com/...' violates the Content-Security-Policy
+directive: connect-src 'self' https://devnet.helius-rpc.com." De CSP uit sectie 33 stond
+alleen het https-scheme toe naar het Helius-devnet-endpoint; `@solana/web3.js`'s Connection
+gebruikt daarnaast standaard een wss-websocket (voor confirmTransaction/subscriptions) op
+HETZELFDE endpoint met alleen het scheme gewisseld - bevestigd door de daadwerkelijke
+`makeWebsocketUrl()`-broncode in `node_modules/@solana/web3.js` te lezen (https-> wss, geen
+poort-verschuiving zonder expliciete poort in de originele URL, dus geen ander
+subdomein/pad om nog te missen). Fix: `wss://devnet.helius-rpc.com` toegevoegd aan
+`connect-src` in `client/index.html`.
+
+**Belangrijk, en gerustellend:** de mislukte eerste poging bleek GEEN inconsistente
+on-chain state te hebben achtergelaten. De wallet-PDA van die poging
+(`4iz9tFLxiBNuetFDrvHmBc4srXFv8JCWUHD2bDP2dR9c`) bleek bij controle (`solana account`) een
+volledig geldig, succesvol geinitialiseerd WalletAccount - 231 bytes, exact
+`WalletAccount::LEN`, eigendom van ons programma. De transactie was daadwerkelijk al
+bevestigd op devnet voordat de websocket-timeout de CLIENT liet denken dat het mislukt was
+- een pure false-negative in de bevestigingswaarneming, geen echte mislukking. Geen opruiming
+nodig; de tweede testpoging begon toch weer bij stap 1 (maakt sowieso altijd een nieuwe
+passkey/wallet aan, dit test-UI heeft nooit staat over reloads heen bewaard).
+
+**Twee andere console-meldingen uit dezelfde sessie, apart beoordeeld:**
+- `favicon.ico 404` - onschuldig, geen favicon-bestand aanwezig, genegeerd (puur cosmetisch,
+  niet de moeite voor een testpagina).
+- `pubKeyCredParams mist RS256` (Chrome-advieswaarschuwing) - BEWUST zo, geen gat. Het
+  on-chain programma kan uitsluitend secp256r1 (ES256) verifieren via Solana's
+  secp256r1-precompile; er bestaat geen RSA-verificatie-precompile op Solana, en
+  owner_passkey/seed_key zijn altijd exact een 33-byte gecomprimeerde secp256r1-sleutel.
+  RS256 toevoegen zou een authenticator die RSA prefereert een credential kunnen laten
+  aanmaken die dit programma NOOIT kan verifieren. Toelichtende code-comment toegevoegd in
+  `client/src/passkey.ts` zodat dit niet per ongeluk als "gefixed" wordt beschouwd in een
+  latere sessie.
+
+**Resultaat: volledig end-to-end bevestigd op devnet met echte hardware-passkey**, na de
+CSP-fix, in een tweede testpoging zonder verdere problemen:
+
+- Passkey: `037391fa3b6d55b999edcf24bb6fc6ee8a4c36113bcfff75c01b0a87ee5577e95e`
+- wallet PDA: `Dsc1UNY1t8saH5rTfLBP6ZeMCrDDJxMeoox5mUKjqY1x`, vault PDA:
+  `BV599j59gpPYcCYjF5GxEuP7eochr9oFsxr3DSq5LtEa`
+- init_wallet: `55aFvnUafZ4oQVCbLxTnNgdqA31P8VSQTyp8umeXA7BFSiFcfmsCSN5Hsay6Cm8HhLy5McHddSJv8Ep6JE99tuGY`
+- policy PDA: `5A3mpkAwsxsm9MSV6hqSYTSQCuY5KiztHFqw9RXdkSHo`
+- add_allowed_program (stap 8): `5ZBs2KFz8moTRu5ziC5sQunSWPQ3r9Ki5PeRwqw2kzXYN6UKHBEJUGeoe5FHrs4jCKbQvRSV7uBu4fcDPysNzAnM`
+  - policy-account teruggelezen: `count: 1`, `allowed_programs: [11111111111111111111111111111111]`
+- execute_advanced negatief (stap 9a): simulatie tegen TOKEN_PROGRAM_ID geweigerd met
+  `ProgramNotAllowed` (Error Number 6022, `custom program error: 0x1786`) - zoals verwacht.
+- execute_advanced positief (stap 9b): echte System::Assign-CPI,
+  `Wp9hEAyrPTzjy1ePei2RfBiav6oBWZ9cGb7tugkAeN139aWQQkjPoD7DHSsCn9ppk4g3hpXCR1RLjQr1DrhJZk1`
+  - testaccount `5VT3xfFMyfv9MJGdAT876VFGSbEQqeao9DKcGpkChaDE`, eigenaar na de CPI bevestigd
+    gewijzigd naar `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` (ons eigen programma-ID).
+- remove_allowed_program (stap 10): `Zxd2uJXJC3oGVqFEMLhLgk5m4Kk9kts9w8S6zyFibHuKwgn6wUk6pda1sF1tScYWCu8k2Dvid6ff1LVxRCP5ZF4`
+  - policy-account teruggelezen: `count: 0`, lege allowlist.
+  - herbevestiging: simulatie tegen (het zojuist verwijderde) System Program opnieuw
+    geweigerd met `ProgramNotAllowed` - de volledige add/gebruik/remove-cyclus is aantoonbaar
+    effectief, in beide richtingen, met echte handtekeningen, op devnet.
+
+Met dit bewezen dekt SpankWallet nu zeven van de acht on-chain instructies end-to-end met
+een echte hardware-passkey op devnet (init_wallet, execute, transfer_token, hunt,
+add_allowed_program, remove_allowed_program, execute_advanced) - alleen de recovery-flow
+(initiate/cancel/finalize) staat nog met een losse, oudere live-bevestiging uit sectie 16/30.
+De programma-allowlist-architectuur uit sectie 26/27 is hiermee volledig van ontwerp tot
+bewezen werking op devnet doorlopen.

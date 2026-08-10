@@ -1692,3 +1692,84 @@ incidenteel geluk - bevestigd via meerdere herhaalde volledige runs.
 altijd-flaky recovery-timing-tests. Gecommit lokaal, NOG NIET gepusht of gedeployed -
 devnet-deploy en een live-hardware-passkey-herbevestiging (zelfde niveau van bewijs als
 sectie 35/37) blijven een bewust aparte, losse vervolgstap.
+
+## 39. Multi-passkey-model gedeployed en end-to-end bewezen op devnet met echte hardware-passkeys
+
+Vervolgstap op sectie 38: de twee lokale commits gepusht, het devnet-programma opnieuw
+gedeployed, de browser-testpagina uitgebreid met vijf nieuwe stappen die het
+multi-passkey-model daadwerkelijk bewijzen (niet enkel dat bestaande stappen nog werken),
+en dat alles live herbevestigd met echte hardware-passkeys.
+
+**Devnet-deploy, zelfde beproefde proces als sectie 35/37, alle drie bekende valkuilen
+opnieuw expliciet vermeden** (geen `anchor keys sync` voor een upgrade, `anchor build`
+altijd eerst voor de IDL, `cargo-build-sbf --arch v3` altijd als laatste voor het
+daadwerkelijk te deployen binary). Programma-ID-byte-offset vooraf geverifieerd (exact één
+treffer, offset 4880 in het gecompileerde `.so`-bestand) voordat er gedeployed werd.
+Deploy-signature
+`XU11LJH2w9o1htx1HTVUGs2fPiiPzhMvgCPqq1escukeEKg6qH52rtfNQeTDLBAdBZdgGYR8QfaJiE2dHV6DAET`.
+Slot vóór deploy 482693421 (databytes 309296) -> slot na deploy 482705049 (databytes
+351416, exact gelijk aan de lokale build). Zelfde programma-ID en upgrade-authority
+(`G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`) als voorheen - een upgrade, geen nieuwe
+deploy.
+
+**Onderweg een tot nu toe onopgemerkt lek in de eigen sessie gevonden en gerepareerd,
+losstaand van de deploy zelf.** Bij het verplicht controleren dat lokale tests nog groen
+waren na de client-wijzigingen (steeds vereiste stap voor commit), faalde `anchor test`
+plotseling op 28 van de 30 tests met `This program may not be used for executing
+instructions`. Root cause: `target/deploy/spankwallet-keypair.json` - het bestand dat
+bepaalt op welk adres `anchor test` het programma LOKAAL deployt - was een restant van de
+eerdere `anchor keys sync`-misser (sectie 37/38-traject): destijds waren `declare_id!` en
+Anchor.toml met `git checkout` teruggedraaid naar `9ma6...`, maar het keypair-bestand zelf
+nooit vervangen, dus wees het nog naar een oud, fout adres
+(`5KDuUu6TcmxcAWq6hDSSfbvXxSEr2hCK8a25ZgdF24o7`). Bevestigd via
+`solana program show 9ma6... --url http://127.0.0.1:8899` -> "Unable to find the account":
+er stond lokaal helemaal niets op het adres waar de tests naar zochten. Omdat lokale
+testvalidator-state altijd wegwerpbaar is en losstaat van devnet, en omdat alle testbestanden
+`program.programId` dynamisch uit de IDL lezen (nooit hardcoded), was de veilige fix:
+`target/` volledig wissen, `anchor keys sync` LATEN draaien om een vers, lokaal-only
+keypair te genereren (dit keer bewust, in een schone map, puur voor lokaal testen), de
+volledige suite draaien (30/30 groen, opnieuw ~3s dankzij de sectie-38-klokfix), en
+DAARNA `declare_id!`/Anchor.toml weer terugzetten naar `9ma6...` met `git checkout` voordat
+er iets anders gebeurde. Geverifieerd dat dit geen enkele invloed had op de al bevestigde,
+correcte devnet-deploy (die stond al vast voordat dit lek ontdekt werd).
+
+**Vijf nieuwe browserstappen (11-15) in `client/index.html` +
+`client/src/main.ts`**, ontworpen om het model zelf te bewijzen, niet enkel dat de
+onderliggende instructies bestaan:
+
+- **Stap 11** - maakt PASSKEY 2 aan: een tweede, cryptografisch onafhankelijke passkey
+  (`createSpankWalletPasskey`, apart `user.id`). Nog nergens geregistreerd.
+- **Stap 12** - `add_passkey`, ondertekend door PASSKEY 1: registreert PASSKEY 2 op de
+  wallet. Leest het `PasskeysAccount` terug en controleert `count === 1` en dat
+  `additional_passkeys[0]` daadwerkelijk PASSKEY 2's publieke sleutel is.
+- **Stap 13 - het eigenlijke bewijs.** PASSKEY 2 ondertekent ZELFSTANDIG een volledig
+  andere instructie (`add_allowed_program`, met `TOKEN_PROGRAM_ID`), zonder PASSKEY 1 er
+  op enige manier bij te betrekken. Dit toont daadwerkelijke, onafhankelijke zeggenschap
+  aan - niet enkel een geslaagde registratie.
+- **Stap 14** - `remove_passkey`, ondertekend door PASSKEY 2: trekt PASSKEY 1 in
+  (`owner_passkey_revoked -> true`). Bewijst zowel dat een nieuwe sleutel de originele kan
+  opvolgen, als dat de wallet daarna nog bereikbaar blijft via PASSKEY 2.
+- **Stap 15 - lockout-bescherming.** Probeert PASSKEY 2 (nu de enige geldige sleutel) te
+  verwijderen. Alleen gesimuleerd, nooit verstuurd - het doel is de weigering aantonen,
+  geen fee betalen voor een transactie die sowieso zou falen.
+
+Elke stap-log labelt expliciet `[PASSKEY 1]` of `[PASSKEY 2]` vlak vóór de bijbehorende
+`navigator.credentials.get()/create()`-aanroep, om verwarring te voorkomen nu er meerdere
+prompts na elkaar voorkomen voor verschillende sleutels.
+
+**Live herbevestigd op devnet met echte hardware-passkeys, volledig succesvol.** Stap 12:
+`count: 1`, `owner_passkey_revoked: false`, `additional_passkeys[0]` matcht PASSKEY 2 exact
+(signature `2FjJWvvy7TV9s6WQCGQYWsb4dfGiMQeVRTn7N98CUjNmJpsvEPyEnYAPAETzttTKhh3FMztmTYt6mAHPynKKxttT`).
+Stap 13: PASSKEY 2 alleen ondertekende `add_allowed_program`, `TOKEN_PROGRAM_ID`
+daadwerkelijk toegevoegd aan de allowlist
+(signature `63puyVLhyynaDYumUPPnBYhmbYuzv1cfNsApSBGkVVRZfoFYZMkqra1TPtdZdKRcVTneMM62dzBuLeEPZvdVqkNx`).
+Stap 14: `owner_passkey_revoked: true` na intrekking door PASSKEY 2
+(signature `4kRWoSDorCYYVsiDFxcmWWeMZfHr72WJVJrRZ2Fejo81D1gG6L3ujPy4r7XP1tZNpfzgsn3mYx1xFL51EyrxnMex`).
+Stap 15: simulatie faalde zoals bedoeld met `Custom(6031)` / `CannotRemoveLastPasskey`
+("Kan de laatste geldige passkey van deze wallet niet verwijderen - zou de wallet
+onbereikbaar maken") - de lockout-bescherming werkt daadwerkelijk on-chain, niet enkel in
+de lokale testsuite. Geen console- of CSP-fouten. Het volledige model is nu bewezen met
+echte hardware-cryptografie, niet enkel met testvalidator-keypairs: een tweede sleutel
+toevoegen, zelfstandige, volledige zeggenschap van die sleutel over een willekeurige
+andere instructie, de oorspronkelijke sleutel intrekken zodra een vervanger bestaat, en de
+onmogelijkheid om de wallet per ongeluk permanent op slot te zetten.

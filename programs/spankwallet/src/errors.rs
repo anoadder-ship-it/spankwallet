@@ -85,4 +85,16 @@ pub enum SpankWalletError {
 
     #[msg("clientDataJSON bevat geen \"type\":\"webauthn.get\" - vereist om cross-ceremony-typeverwarring te voorkomen")]
     InvalidWebAuthnType,
+
+    #[msg("Deze passkey staat al geregistreerd op deze wallet")]
+    PasskeyAlreadyRegistered,
+
+    #[msg("Deze passkey staat niet geregistreerd op deze wallet")]
+    PasskeyNotRegistered,
+
+    #[msg("Het maximum aantal extra passkeys op deze wallet is bereikt")]
+    AdditionalPasskeysFull,
+
+    #[msg("Kan de laatste geldige passkey van deze wallet niet verwijderen - zou de wallet onbereikbaar maken")]
+    CannotRemoveLastPasskey,
 }

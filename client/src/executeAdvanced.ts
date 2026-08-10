@@ -10,6 +10,7 @@ import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
 import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
+import { derivePasskeysPda } from "./passkeys";
 
 const EXECUTE_ADVANCED_DISCRIMINATOR = Uint8Array.from([
   94, 218, 17, 226, 51, 145, 100, 203,
@@ -96,6 +97,7 @@ export async function buildExecuteAdvancedTransaction(
     { pubkey: vaultPda, isSigner: false, isWritable: true },
     { pubkey: policyPda, isSigner: false, isWritable: false },
     { pubkey: cpiProgramId, isSigner: false, isWritable: false },
+    { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
     { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
     ...remainingAccounts.map((a) => ({
       pubkey: a.pubkey,

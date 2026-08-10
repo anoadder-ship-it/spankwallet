@@ -75,6 +75,22 @@ pub mod spankwallet {
         instructions::hunt(ctx, client_data_json)
     }
 
+    pub fn add_passkey(
+        ctx: Context<AddPasskey>,
+        new_passkey: [u8; PASSKEY_PUBKEY_LEN],
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::add_passkey(ctx, new_passkey, client_data_json)
+    }
+
+    pub fn remove_passkey(
+        ctx: Context<RemovePasskey>,
+        target_passkey: [u8; PASSKEY_PUBKEY_LEN],
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::remove_passkey(ctx, target_passkey, client_data_json)
+    }
+
     pub fn initiate_recovery(
         ctx: Context<InitiateRecovery>,
         new_owner_passkey: [u8; PASSKEY_PUBKEY_LEN],

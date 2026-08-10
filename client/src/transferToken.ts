@@ -10,6 +10,7 @@ import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
 import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
+import { derivePasskeysPda } from "./passkeys";
 
 const TRANSFER_TOKEN_DISCRIMINATOR = Uint8Array.from([
   0xdb, 0x11, 0x7a, 0x35, 0xed, 0xab, 0xe8, 0xde,
@@ -79,6 +80,7 @@ export async function buildTransferTokenTransaction(
       { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
       { pubkey: recipientTokenAccount, isSigner: false, isWritable: true },
       { pubkey: tokenMint, isSigner: false, isWritable: false },
+      { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],

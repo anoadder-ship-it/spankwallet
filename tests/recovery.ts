@@ -16,6 +16,7 @@ import {
   signTestChallenge,
   buildSecp256r1Instruction,
   encodeOptionalI64,
+  advanceOnChainClockPast,
 } from "./webauthnTestHelper";
 
 describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize zelf vereisen geen passkey, init_wallet erin wel)", () => {
@@ -100,10 +101,6 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       walletPda,
       vaultPda,
     };
-  }
-
-  function sleep(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   it("initiate_recovery zet recovery_state met de juiste new_owner_passkey", async () => {
@@ -197,7 +194,7 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
     try {
       await program.methods
         .finalizeRecovery()
-        .accounts({ wallet: walletPda })
+        .accounts({ wallet: walletPda, passkeys: program.programId })
         .rpc();
     } catch (err) {
       threw = true;
@@ -219,11 +216,16 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       .signers([backupAuthority])
       .rpc();
 
-    await sleep((timelockSeconds + 2) * 1000);
+    const afterInitiate = await program.account.walletAccount.fetch(walletPda);
+    await advanceOnChainClockPast(
+      provider.connection,
+      (provider.wallet as anchor.Wallet).payer,
+      afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
+    );
 
     await program.methods
       .finalizeRecovery()
-      .accounts({ wallet: walletPda })
+      .accounts({ wallet: walletPda, passkeys: program.programId })
       .rpc();
 
     const wallet = await program.account.walletAccount.fetch(walletPda);

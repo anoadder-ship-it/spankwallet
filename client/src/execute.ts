@@ -9,6 +9,7 @@ import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
 import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
+import { derivePasskeysPda } from "./passkeys";
 
 const EXECUTE_DISCRIMINATOR = Uint8Array.from([
   0x82, 0xdd, 0xf2, 0x9a, 0x0d, 0xc1, 0xbd, 0x1d,
@@ -68,6 +69,7 @@ export async function buildExecuteTransaction(
       { pubkey: walletPda, isSigner: false, isWritable: false },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
       { pubkey: recipient, isSigner: false, isWritable: true },
+      { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
     ],
     data: Buffer.from(executeData),

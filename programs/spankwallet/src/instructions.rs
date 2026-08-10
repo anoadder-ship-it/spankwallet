@@ -323,12 +323,21 @@ fn resolve_instruction_data<'a>(
     }
 }
 
-fn verify_passkey_signature(
+/// Kernverificatie van de secp256r1-precompile-aanroep, ONAFHANKELIJK van
+/// welke specifieke sleutel(s) toegestaan zijn - controleert uitsluitend dat
+/// de precompile daadwerkelijk is aangeroepen, met een bericht dat
+/// authenticatorData || SHA-256(clientDataJSON) is, met de juiste UV-vlag,
+/// het juiste WebAuthn-type en de juiste challenge. Retourneert de
+/// daadwerkelijk ondertekenende publieke sleutel zodat de aanroeper zelf
+/// bepaalt of die geautoriseerd is: verify_passkey_signature hieronder doet
+/// dat via een exacte match (init_wallet, waar nog geen WalletAccount/
+/// PasskeysAccount bestaat), verify_passkey_signature_multi via de
+/// meervoudige-sleutel-set (elke andere instructie, zie STATUS.md).
+fn verify_passkey_signature_core(
     ix_sysvar: &AccountInfo<'_>,
-    expected_pubkey: &[u8; PASSKEY_PUBKEY_LEN],
     expected_challenge: &[u8],
     client_data_json: &[u8],
-) -> Result<()> {
+) -> Result<[u8; PASSKEY_PUBKEY_LEN]> {
     let current_index = load_current_index_checked(ix_sysvar)?;
     require!(current_index > 0, SpankWalletError::InvalidPasskeySignature);
 
@@ -344,13 +353,11 @@ fn verify_passkey_signature(
         resolve_instruction_data(ix_sysvar, offsets.public_key_instruction_index, &precompile_ix.data)?;
     let pk_start = offsets.public_key_offset as usize;
     let pk_end = pk_start + PASSKEY_PUBKEY_LEN;
-    let actual_pubkey = pubkey_source
+    let actual_pubkey_slice = pubkey_source
         .get(pk_start..pk_end)
         .ok_or(SpankWalletError::InvalidPasskeySignature)?;
-    require!(
-        actual_pubkey == expected_pubkey.as_ref(),
-        SpankWalletError::InvalidPasskeySignature
-    );
+    let mut actual_pubkey = [0u8; PASSKEY_PUBKEY_LEN];
+    actual_pubkey.copy_from_slice(actual_pubkey_slice);
 
     let message_source =
         resolve_instruction_data(ix_sysvar, offsets.message_instruction_index, &precompile_ix.data)?;
@@ -417,6 +424,82 @@ fn verify_passkey_signature(
         SpankWalletError::InvalidPasskeySignature
     );
 
+    Ok(actual_pubkey)
+}
+
+/// Enkelvoudige-sleutel-variant - uitsluitend gebruikt door init_wallet,
+/// waar per definitie nog geen WalletAccount (en dus geen PasskeysAccount)
+/// bestaat om tegen te verifieren: de enige mogelijke geldige sleutel is de
+/// seed_key waarmee de wallet wordt aangemaakt. Elke andere instructie
+/// gebruikt verify_passkey_signature_multi hieronder.
+fn verify_passkey_signature(
+    ix_sysvar: &AccountInfo<'_>,
+    expected_pubkey: &[u8; PASSKEY_PUBKEY_LEN],
+    expected_challenge: &[u8],
+    client_data_json: &[u8],
+) -> Result<()> {
+    let actual_pubkey = verify_passkey_signature_core(ix_sysvar, expected_challenge, client_data_json)?;
+    require!(
+        &actual_pubkey == expected_pubkey,
+        SpankWalletError::InvalidPasskeySignature
+    );
+    Ok(())
+}
+
+/// Leest PasskeysAccount ALS het al bestaat, geeft None terug als het nog
+/// nooit is aangemaakt (owner != ons programma-ID, of een discriminator-
+/// mismatch) i.p.v. te falen. Elke wallet begint zonder PasskeysAccount (lui
+/// aangemaakt via add_passkey, zie STATUS.md) - alle instructies die een
+/// passkey-handtekening verifieren moeten dus overweg kunnen met "bestaat
+/// nog niet" als een volkomen normale, geldige staat (= alleen
+/// owner_passkey is geldig), niet als een fout.
+fn read_passkeys_account(account_info: &AccountInfo) -> Option<PasskeysAccount> {
+    if account_info.owner != &crate::ID {
+        return None;
+    }
+    let data = account_info.try_borrow_data().ok()?;
+    PasskeysAccount::try_deserialize(&mut &data[..]).ok()
+}
+
+/// Meervoudige-sleutel-variant - gebruikt door elke instructie NA
+/// init_wallet die een passkey-handtekening verifieert. Accepteert een
+/// geldige handtekening van OFWEL wallet.owner_passkey (tenzij ingetrokken
+/// via PasskeysAccount.owner_passkey_revoked) OFWEL een van de extra
+/// geregistreerde sleutels in PasskeysAccount.additional_passkeys. Het
+/// `passkeys`-account hoeft niet te bestaan (zie read_passkeys_account) -
+/// een wallet die nooit add_passkey heeft aangeroepen gedraagt zich exact
+/// als voorheen (alleen owner_passkey geldig, zero-migratie).
+fn verify_passkey_signature_multi(
+    ix_sysvar: &AccountInfo<'_>,
+    owner_passkey: &[u8; PASSKEY_PUBKEY_LEN],
+    passkeys_account_info: &AccountInfo<'_>,
+    expected_challenge: &[u8],
+    client_data_json: &[u8],
+) -> Result<()> {
+    let actual_pubkey = verify_passkey_signature_core(ix_sysvar, expected_challenge, client_data_json)?;
+
+    let passkeys = read_passkeys_account(passkeys_account_info);
+
+    let owner_active = passkeys
+        .as_ref()
+        .map(|p| !p.owner_passkey_revoked)
+        .unwrap_or(true);
+    let is_owner = owner_active && &actual_pubkey == owner_passkey;
+
+    let is_additional = passkeys
+        .as_ref()
+        .map(|p| {
+            p.additional_passkeys[..p.count as usize]
+                .iter()
+                .any(|k| *k == actual_pubkey)
+        })
+        .unwrap_or(false);
+
+    require!(
+        is_owner || is_additional,
+        SpankWalletError::InvalidPasskeySignature
+    );
+
     Ok(())
 }
 
@@ -450,6 +533,15 @@ pub struct Execute<'info> {
     #[account(mut)]
     pub recipient: UncheckedAccount<'info>,
 
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
     pub instructions_sysvar: UncheckedAccount<'info>,
@@ -480,9 +572,10 @@ pub fn execute(
     payload.extend_from_slice(&amount.to_le_bytes());
 
     let expected_challenge = build_expected_challenge(&ctx.accounts.wallet.key(), b"execute", &payload);
-    verify_passkey_signature(
+    verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
         &expected_challenge,
         &client_data_json,
     )?;
@@ -555,6 +648,15 @@ pub struct TransferToken<'info> {
     /// eigendoms-/mint-constraints hierboven, zelfde patroon als hunt.
     pub token_mint: UncheckedAccount<'info>,
 
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
     pub instructions_sysvar: UncheckedAccount<'info>,
@@ -578,9 +680,10 @@ pub fn transfer_token(
 
     let expected_challenge =
         build_expected_challenge(&ctx.accounts.wallet.key(), b"transfer_token", &payload);
-    verify_passkey_signature(
+    verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
         &expected_challenge,
         &client_data_json,
     )?;
@@ -659,6 +762,15 @@ pub struct AddAllowedProgram<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
     pub instructions_sysvar: UncheckedAccount<'info>,
@@ -676,9 +788,10 @@ pub fn add_allowed_program(
         b"add_allowed_program",
         program_id.as_ref(),
     );
-    verify_passkey_signature(
+    verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
         &expected_challenge,
         &client_data_json,
     )?;
@@ -729,6 +842,15 @@ pub struct RemoveAllowedProgram<'info> {
     )]
     pub policy: Account<'info, PolicyAccount>,
 
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
     pub instructions_sysvar: UncheckedAccount<'info>,
@@ -744,9 +866,10 @@ pub fn remove_allowed_program(
         b"remove_allowed_program",
         program_id.as_ref(),
     );
-    verify_passkey_signature(
+    verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
         &expected_challenge,
         &client_data_json,
     )?;
@@ -796,6 +919,15 @@ pub struct ExecuteAdvanced<'info> {
     /// CHECK: het CPI-doelprogramma - moet expliciet op policy.allowed_programs
     /// staan EN executable zijn (beide gecontroleerd in execute_advanced hieronder).
     pub cpi_program: UncheckedAccount<'info>,
+
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
 
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
@@ -876,9 +1008,10 @@ pub fn execute_advanced<'info>(
 
     let expected_challenge =
         build_expected_challenge(&ctx.accounts.wallet.key(), b"execute_advanced", &payload);
-    verify_passkey_signature(
+    verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
         &expected_challenge,
         &client_data_json,
     )?;
@@ -933,6 +1066,14 @@ pub struct Hunt<'info> {
     /// zie de toelichting bij de INCINERATOR-constante bovenaan dit bestand.
     #[account(mut, address = INCINERATOR @ SpankWalletError::InvalidIncineratorAccount)]
     pub incinerator: UncheckedAccount<'info>,
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: zie Execute - passkey-verificatie via precompile.
     pub instructions_sysvar: UncheckedAccount<'info>,
@@ -944,9 +1085,10 @@ pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
         b"hunt",
         ctx.accounts.target_token_account.key().as_ref(),
     );
-    verify_passkey_signature(
+    verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
         &expected_challenge,
         &client_data_json,
     )?;
@@ -1029,6 +1171,196 @@ pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
 
     Ok(())
 }
+
+// multi-passkey (add_passkey / remove_passkey)
+//
+// LazorKit-geinspireerd (eigen PDA per geautoriseerde sleutel, met rollen),
+// maar bewust een andere account-layout: een satellite-list-account
+// (PasskeysAccount, zie state.rs) i.p.v. LazorKits per-sleutel-PDA, en
+// bewust GEEN rollen - elke geregistreerde passkey heeft gelijke, volledige
+// zeggenschap, exact zoals wallet.owner_passkey dat vandaag al heeft. Zie
+// STATUS.md voor de volledige afweging (rent/eenvoud t.o.v. per-sleutel-
+// PDA's, en waarom rollen bewust wachten op de gelaagde-privileges-roadmap
+// uit sectie 26 i.p.v. hier meegenomen te worden).
+//
+// Zero-migratie: wallet.owner_passkey blijft ongewijzigd de "oorspronkelijke"
+// sleutel (WalletAccount's layout wordt nooit aangeraakt). PasskeysAccount
+// is puur additief en lui aangemaakt (init_if_needed, zelfde patroon als
+// PolicyAccount) - bestaande wallets werken ongewijzigd door totdat hun
+// eigenaar zelf voor het eerst add_passkey aanroept.
+//
+// Relatie met recovery: add_passkey/remove_passkey is de EERSTE
+// verdedigingslinie (één apparaat kwijt, andere werken nog) - de bestaande
+// backup_authority-recovery-flow (initiate/cancel/finalize hieronder) blijft
+// het LAATSTE redmiddel (alle passkeys tegelijk kwijt). finalize_recovery is
+// daarom aangepast om bij een geslaagde recovery de VOLLEDIGE passkey-set te
+// wissen (alle extra sleutels weg, owner_passkey_revoked terug naar false) -
+// geen stale, mogelijk-gecompromitteerde extra sleutels overleven een
+// recovery, zelfde principe als de bestaande volledige owner_passkey-
+// vervanging.
+
+#[derive(Accounts)]
+pub struct AddPasskey<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// init_if_needed is hier veilig: passkeys is een PDA die deterministisch
+    /// en uitsluitend van wallet.key() afhangt, dus er kan nooit een ANDER
+    /// accounttype op dat adres bestaan - zelfde argument als bij
+    /// PolicyAccount (zie AddAllowedProgram hierboven).
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = PasskeysAccount::LEN,
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump
+    )]
+    pub passkeys: Account<'info, PasskeysAccount>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn add_passkey(
+    ctx: Context<AddPasskey>,
+    new_passkey: [u8; PASSKEY_PUBKEY_LEN],
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    validate_passkey_prefix(&new_passkey)?;
+
+    let expected_challenge = build_expected_challenge(
+        &ctx.accounts.wallet.key(),
+        b"add_passkey",
+        new_passkey.as_ref(),
+    );
+    verify_passkey_signature_multi(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    let passkeys = &mut ctx.accounts.passkeys;
+
+    // Zelfde eerste-gebruik-sentinel als PolicyAccount: een net door
+    // init_if_needed aangemaakt account heeft wallet == default(), wat een
+    // echte WalletAccount-PDA nooit is.
+    if passkeys.wallet == Pubkey::default() {
+        passkeys.wallet = ctx.accounts.wallet.key();
+        passkeys.bump = ctx.bumps.passkeys;
+        passkeys.owner_passkey_revoked = false;
+        passkeys.count = 0;
+        passkeys.additional_passkeys = [[0u8; PASSKEY_PUBKEY_LEN]; MAX_ADDITIONAL_PASSKEYS];
+    }
+
+    require!(
+        new_passkey != ctx.accounts.wallet.owner_passkey,
+        SpankWalletError::PasskeyAlreadyRegistered
+    );
+    let already_present = passkeys.additional_passkeys[..passkeys.count as usize]
+        .iter()
+        .any(|p| *p == new_passkey);
+    require!(!already_present, SpankWalletError::PasskeyAlreadyRegistered);
+    require!(
+        (passkeys.count as usize) < MAX_ADDITIONAL_PASSKEYS,
+        SpankWalletError::AdditionalPasskeysFull
+    );
+
+    let index = passkeys.count as usize;
+    passkeys.additional_passkeys[index] = new_passkey;
+    passkeys.count += 1;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct RemovePasskey<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// Bewust GEEN init_if_needed: een geldige remove_passkey-aanroep is
+    /// altijd voorafgegaan door minstens één add_passkey (de lockout-
+    /// bescherming hieronder verbiedt sowieso ooit de allerlaatste geldige
+    /// sleutel te verwijderen, dus "verwijderen terwijl er nog nooit iets
+    /// is toegevoegd" kan nooit een geldige aanroep zijn) - zelfde patroon
+    /// als RemoveAllowedProgram.
+    #[account(
+        mut,
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump = passkeys.bump,
+    )]
+    pub passkeys: Account<'info, PasskeysAccount>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+pub fn remove_passkey(
+    ctx: Context<RemovePasskey>,
+    target_passkey: [u8; PASSKEY_PUBKEY_LEN],
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let expected_challenge = build_expected_challenge(
+        &ctx.accounts.wallet.key(),
+        b"remove_passkey",
+        target_passkey.as_ref(),
+    );
+    verify_passkey_signature_multi(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    let owner_passkey = ctx.accounts.wallet.owner_passkey;
+    let passkeys = &mut ctx.accounts.passkeys;
+
+    // Lockout-bescherming: het totaal aantal geldige sleutels NA deze
+    // verwijdering moet minstens 1 blijven - anders zou geen enkele
+    // handtekening verify_passkey_signature_multi ooit nog accepteren en is
+    // de wallet permanent onbereikbaar (behalve via de 72u-recovery-flow).
+    let owner_active_now = !passkeys.owner_passkey_revoked;
+    let total_before = (owner_active_now as u8) + passkeys.count;
+
+    if target_passkey == owner_passkey {
+        require!(owner_active_now, SpankWalletError::PasskeyNotRegistered);
+        require!(total_before > 1, SpankWalletError::CannotRemoveLastPasskey);
+        passkeys.owner_passkey_revoked = true;
+    } else {
+        let count = passkeys.count as usize;
+        let index = passkeys.additional_passkeys[..count]
+            .iter()
+            .position(|p| *p == target_passkey)
+            .ok_or(SpankWalletError::PasskeyNotRegistered)?;
+        require!(total_before > 1, SpankWalletError::CannotRemoveLastPasskey);
+
+        // Swap-remove, zelfde patroon als RemoveAllowedProgram.
+        let last = count - 1;
+        passkeys.additional_passkeys[index] = passkeys.additional_passkeys[last];
+        passkeys.additional_passkeys[last] = [0u8; PASSKEY_PUBKEY_LEN];
+        passkeys.count -= 1;
+    }
+
+    Ok(())
+}
+
 // recovery-flow
 
 #[derive(Accounts)]
@@ -1068,8 +1400,17 @@ pub struct CancelRecovery<'info> {
     )]
     pub wallet: Account<'info, WalletAccount>,
 
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
     #[account(address = IX_SYSVAR_ID)]
-    /// CHECK: veto door de HUIDIGE owner_passkey - via precompile, net als execute.
+    /// CHECK: veto door een van de HUIDIGE geldige passkeys - via precompile, net als execute.
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
@@ -1085,9 +1426,10 @@ pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) 
 
     let expected_challenge =
         build_expected_challenge(&ctx.accounts.wallet.key(), b"cancel_recovery", &payload);
-    verify_passkey_signature(
+    verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
         &expected_challenge,
         &client_data_json,
     )?;
@@ -1104,6 +1446,21 @@ pub struct FinalizeRecovery<'info> {
         constraint = wallet.recovery_state.is_some() @ SpankWalletError::NoRecoveryInProgress
     )]
     pub wallet: Account<'info, WalletAccount>,
+
+    /// Optioneel: PasskeysAccount van deze wallet, ALLEEN meegeven als het
+    /// al bestaat (anders het programma-ID zelf als sentinel meegeven -
+    /// Anchors ingebouwde optionele-account-patroon). Een geslaagde recovery
+    /// is een volledige reset: als dit account bestaat, wordt het hier
+    /// volledig gewist (alle extra sleutels weg, owner_passkey_revoked terug
+    /// naar false) zodat de nieuwe owner_passkey na recovery de ENIGE
+    /// geldige sleutel is - geen stale, mogelijk-gecompromitteerde extra
+    /// sleutels overleven een recovery. Zie STATUS.md voor de motivatie.
+    #[account(
+        mut,
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: Option<Account<'info, PasskeysAccount>>,
 }
 
 pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
@@ -1124,5 +1481,12 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
 
     wallet.owner_passkey = recovery.new_owner_passkey;
     wallet.recovery_state = None;
+
+    if let Some(passkeys) = ctx.accounts.passkeys.as_mut() {
+        passkeys.owner_passkey_revoked = false;
+        passkeys.count = 0;
+        passkeys.additional_passkeys = [[0u8; PASSKEY_PUBKEY_LEN]; MAX_ADDITIONAL_PASSKEYS];
+    }
+
     Ok(())
 }

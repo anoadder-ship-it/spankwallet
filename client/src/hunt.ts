@@ -21,6 +21,7 @@ import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
 import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
+import { derivePasskeysPda } from "./passkeys";
 
 const HUNT_DISCRIMINATOR = Uint8Array.from([
   0x94, 0x1e, 0x1c, 0x39, 0x31, 0xf9, 0x1d, 0x41,
@@ -127,6 +128,7 @@ export async function buildHuntTransaction(
       { pubkey: tokenMint, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: false, isWritable: true },
       { pubkey: INCINERATOR, isSigner: false, isWritable: true },
+      { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],

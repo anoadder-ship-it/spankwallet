@@ -10,6 +10,7 @@ import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
 import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
+import { derivePasskeysPda } from "./passkeys";
 
 const INITIATE_RECOVERY_DISCRIMINATOR = Uint8Array.from([
   0x84, 0x94, 0x3c, 0x4a, 0x31, 0xb2, 0xeb, 0xbb,
@@ -130,6 +131,7 @@ export async function buildCancelRecoveryTransaction(
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
       { pubkey: walletPda, isSigner: false, isWritable: true },
+      { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
     ],
     data: Buffer.from(data),

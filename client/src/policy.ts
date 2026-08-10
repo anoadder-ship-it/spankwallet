@@ -10,6 +10,7 @@ import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
 import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
+import { derivePasskeysPda } from "./passkeys";
 
 const ADD_ALLOWED_PROGRAM_DISCRIMINATOR = Uint8Array.from([
   81, 202, 134, 129, 247, 211, 122, 99,
@@ -108,6 +109,7 @@ export async function buildAddAllowedProgramTransaction(
       { pubkey: walletPda, isSigner: false, isWritable: false },
       { pubkey: policyPda, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -172,6 +174,7 @@ export async function buildRemoveAllowedProgramTransaction(
     keys: [
       { pubkey: walletPda, isSigner: false, isWritable: false },
       { pubkey: policyPda, isSigner: false, isWritable: true },
+      { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
     ],
     data: Buffer.from(data),

@@ -1,7 +1,15 @@
 import { p256 } from "@noble/curves/p256";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { createHash, randomBytes } from "crypto";
-import { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+  sendAndConfirmTransaction,
+} from "@solana/web3.js";
 
 export const SECP256R1_PROGRAM_ID = new PublicKey(
   "Secp256r1SigVerify1111111111111111111111111"
@@ -142,6 +150,51 @@ export function buildSecp256r1Instruction(
     keys: [],
     data,
   });
+}
+
+/**
+ * Forceert het produceren van nieuwe slots (en dus klok-voortgang) op de
+ * lokale test-validator door herhaaldelijk kleine, echte transacties te
+ * versturen, totdat de on-chain klok (Clock-sysvar, via getBlockTime)
+ * `targetUnixTime` gepasseerd is. Nodig omdat een pure `sleep()` NIET
+ * betrouwbaar is: de lokale solana-test-validator produceert nieuwe slots
+ * primair naar aanleiding van transactie-activiteit, niet puur op basis van
+ * verstreken werkelijke tijd - tijdens een idle sleep kan de on-chain klok
+ * daardoor ver achterblijven bij de werkelijke tijd (empirisch bevestigd
+ * tijdens het debuggen hiervan: 11 seconden slapen leverde slechts ~1
+ * seconde on-chain klokvooruitgang op). Dit is de daadwerkelijke oorzaak
+ * achter de al langer bekende flaky recovery-timing-tests (STATUS.md sectie
+ * 34-37) - een grotere sleep-marge verhelpt het niet structureel, actief
+ * nieuwe transacties forceren wel.
+ */
+export async function advanceOnChainClockPast(
+  connection: Connection,
+  payer: Keypair,
+  targetUnixTime: number,
+  maxRealMs: number = 60000
+): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: 1,
+      })
+    );
+    await sendAndConfirmTransaction(connection, tx, [payer], { commitment: "confirmed" });
+
+    const slot = await connection.getSlot();
+    const chainNow = await connection.getBlockTime(slot);
+    if (chainNow !== null && chainNow > targetUnixTime) {
+      return;
+    }
+    if (Date.now() - start > maxRealMs) {
+      throw new Error(
+        "advanceOnChainClockPast: on-chain klok bereikte targetUnixTime niet binnen maxRealMs"
+      );
+    }
+  }
 }
 
 /**

@@ -120,3 +120,37 @@ impl PolicyAccount {
     // discriminator (8) + wallet (32) + bump (1) + count (1) + allowed_programs (32 * MAX)
     pub const LEN: usize = 8 + 32 + 1 + 1 + (32 * MAX_ALLOWED_PROGRAMS);
 }
+
+/// Maximum aantal EXTRA passkeys (naast wallet.owner_passkey) dat een wallet
+/// tegelijk mag registreren. Net als MAX_ALLOWED_PROGRAMS een vast array
+/// i.p.v. een dynamische Vec - zelfde rent-/eenvoud-afweging (STATUS.md):
+/// passkeys zijn fysieke apparaten die een persoon bezit (telefoon, laptop,
+/// losse hardware-sleutel, back-up) - niemand registreert er honderden. 8
+/// extra (9 in totaal met owner_passkey) is ruim voldoende.
+pub const MAX_ADDITIONAL_PASSKEYS: usize = 8;
+
+#[account]
+pub struct PasskeysAccount {
+    /// De WalletAccount waarbij deze extra-passkeys-set hoort.
+    pub wallet: Pubkey,
+    pub bump: u8,
+    /// Of de OORSPRONKELIJKE passkey (wallet.owner_passkey) nog geldig is.
+    /// Laat toe die passkey op enig moment in te trekken (bijv. het
+    /// oorspronkelijke apparaat kwijtgeraakt/gestolen) zonder
+    /// WalletAccount's layout ooit aan te raken - zie STATUS.md voor de
+    /// volledige motivatie (geen migratie-instructie nodig).
+    pub owner_passkey_revoked: bool,
+    /// Aantal actief gevulde slots in additional_passkeys, altijd
+    /// aaneengesloten vanaf index 0 (geen gaten) - remove_passkey gebruikt
+    /// swap-remove om dit invariant te bewaren, zelfde patroon als
+    /// PolicyAccount.
+    pub count: u8,
+    pub additional_passkeys: [[u8; PASSKEY_PUBKEY_LEN]; MAX_ADDITIONAL_PASSKEYS],
+}
+
+impl PasskeysAccount {
+    // discriminator(8) + wallet(32) + bump(1) + owner_passkey_revoked(1) + count(1)
+    // + additional_passkeys(33 * MAX_ADDITIONAL_PASSKEYS)
+    pub const LEN: usize =
+        8 + 32 + 1 + 1 + 1 + (PASSKEY_PUBKEY_LEN * MAX_ADDITIONAL_PASSKEYS);
+}

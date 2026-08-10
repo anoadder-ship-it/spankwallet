@@ -1867,3 +1867,66 @@ Geen console- of CSP-fouten. Het volledige session-key-model is nu bewezen met e
 hardware-cryptografie: een tijdelijke, smal-gescopede sleutel zelfstandig laten ondertekenen
 zonder enige prompt, de scope-beperking die andere instructies weigert, daadwerkelijk
 verlopen, en permissionless opruiming.
+
+## 41. Externe security-review ontvangen + devnet-generale-repetitie voor upgrade-authority-migratie gestart
+
+Een externe security-review van het project kwam binnen: de kernconclusie is dat de
+fundamentele laag (passkeys, recovery, typed actions, allowlist, multi-passkey, session
+keys - secties 1-40) solide en goed gedocumenteerd is, "boven gemiddeld voor een
+solo/kleine inspanning". Drie concrete, niet-acuut-kritieke gaps genoemd voor een
+volgende fase: (1) de programma-upgrade-authority is een single-key restrisico, (2) de
+client is nog een testpagina, geen productie-UI (clickjacking-header, supply-chain-
+pinning, human-readable tx-previews ontbreken), (3) de gelaagde-privileges/spend-limits-
+roadmap (sectie 26, bewust tweemaal uitgesteld tijdens multi-passkey en session keys)
+staat nog open. Beoordeeld en gekozen: punt (1) eerst, omdat het de enige van de drie is
+die met de tijd erger wordt naarmate er meer waarde achter de huidige single-key-authority
+opgestapeld wordt, en omdat een gecompromitteerde upgrade-authority letterlijk elke andere
+beveiligingseigenschap in dit project (secties 21-40) in één stap ongedaan kan maken - een
+kwaadwillende upgrade kan simpelweg alle checks verwijderen.
+
+**Ontwerp goedgekeurd**: Squads Protocol V4 (formeel geverifieerd, geaudit door OtterSec/
+Neodyme/Trail of Bits/Certora, beveiligt >$10 miljard aan waarde, native timelock +
+dedicated program-upgrade-tooling) als multisig-implementatie, boven Snowflake Safe
+(kleinere schaal, timelock-ondersteuning niet bevestigd) en een zelfgebouwde n-of-m-
+implementatie (afgewezen: precies op het meest kritieke punt nieuwe, ongeteste
+autorisatiecode toevoegen is het tegenovergestelde van het doel). Bevestigd: dit raakt
+geen custody van gebruikersfondsen (STATUS.md sectie 27's non-custodial-principe gaat
+over WalletAccount/VaultAccount, niet over wie de programma-bytecode mag vervangen - een
+orthogonale as). Signer-configuratie definitief vastgelegd door de gebruiker: 2-of-3, drie
+fysiek gescheiden apparaten (telefoon, hoofd-pc, koude/backup-Windows-pc), elke keypair
+onafhankelijk gegenereerd, geen seed-hergebruik. Timelock: 72u voor de uiteindelijke
+SpankWallet-migratie (consistent met `recovery_timelock_seconds`'s eigen 72u-default),
+bewust GEEN noodgeval-bypass (zou de hele bescherming ondermijnen - dezelfde reden als bij
+recovery).
+
+**Niet-onderhandelbare eerste stap: een devnet-generale-repetitie op een volledig
+onafhankelijk wegwerpprogramma - NIET SpankWallet zelf.** Fase 1 (deze sectie) afgerond:
+een triviaal Anchor-"hello world"-tellerprogramma (standaard `anchor init`-template,
+`initialize`/`increment`, geen enkele functionele relatie met SpankWallet) opgezet in een
+volledig aparte workspace (buiten deze repository, buiten elke Cargo-workspace die met
+SpankWallet te maken heeft) en gedeployed naar devnet:
+- Programma-ID: `6hzVvPNHxVCW4aMECXW92GWHdRsCzcZkDXmY6k9zUmEU`
+- Deploy-signature: `hPrupkNbswYP7jPxuRBfgKzPLnaNcjgSy9E3p6jChcQ7fzuMoxW3mADfNF49aZ9J8PwJRLs1mUbcSGT6R9Tifd4`
+- Slot 482758337, data length 129456 bytes
+- Initiele authority: dezelfde `G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp` als
+  SpankWallet's huidige authority (puur voor het gemak - het enige devnet-gefunde
+  sleutelbestand dat beschikbaar is; wordt in een latere fase overgedragen aan de
+  Squads-multisig, exact het mechanisme dat we willen bewijzen)
+
+Vooraf onderzocht en bevestigd (niet aangenomen): Squads V4's `time_lock`-parameter is een
+plain `u32` in seconden, met een expliciete "Custom (in seconden)"-optie in de UI - er is
+geen protocolbeperking die een korte testduur verbiedt. Besluit: de repetitie gebruikt een
+verkorte timelock (minuten, niet 72u) - dit test exact hetzelfde codepad/dezelfde
+state-transities als een lange timelock (wacht-tot-vervaldatum, dan uitvoerbaar), dus
+verzwakt dit de repetitie niet voor haar daadwerkelijke doel (het MECHANISME bewijzen). De
+uiteindelijke SpankWallet-migratie gebruikt nog steeds de volle 72u - deze verkorting geldt
+uitsluitend voor de wegwerp-repetitie.
+
+**Nog te doen (vervolgfases, wachten op acties van de gebruiker op de drie fysieke
+apparaten)**: per-apparaat Squads-lid/keypair aanmaken, de 2-of-3-multisig met verkorte
+testtimelock inrichten voor het wegwerpprogramma, de upgrade-authority van het
+wegwerpprogramma overdragen aan de Squads-vault, een echte testupgrade door de volledige
+voorstel-/goedkeurings-/timelock-/uitvoeringsflow heen halen, en het resultaat verifiëren
+met `solana program show`. SpankWallet's eigen upgrade-authority (`9ma6...`) wordt pas
+aangeraakt na expliciete bevestiging van de gebruiker dat deze volledige repetitie
+succesvol is afgerond.

@@ -1035,3 +1035,54 @@ uitvoering, niet de directe balansquery.
 **Hiermee is de volledige testdekking uit "stap 1" van deze sessie afgerond:**
 init_wallet, execute/transfer_sol, en hunt (zowel tegen eigen als tegen extern-aangemaakte
 tokens) zijn nu allemaal end-to-end bewezen met echte hardware-passkeys op devnet.
+
+## 32. transfer_token geimplementeerd: tweede getypeerde actie
+
+Eerste concrete bouwstap na de volledige testdekking uit sectie 30-31, precies volgens de
+roadmap uit sectie 26/27 - transfer_token als tweede getypeerde actie na transfer_sol,
+zelfde ontwerpprincipe: gesloten, expliciet, geen generieke CPI.
+
+**Nieuwe on-chain instructie transfer_token(amount: u64, client_data_json: Vec<u8>):**
+- Accounts: wallet, vault (beide read-only, geen mut nodig - de vault zelf muteert niet,
+  alleen de token-accounts), vault_token_account (mut, met owner+mint-constraints, zelfde
+  patroon als target_token_account in hunt), recipient_token_account (mut, met alleen een
+  mint-constraint - willekeurige ontvanger toegestaan, zelfde principe als execute's
+  recipient), token_mint (UncheckedAccount, alleen doorgegeven aan de CPI), instructions_sysvar,
+  token_program.
+- Challenge-payload bindt recipient_token_account + token_mint + amount (32+32+8 bytes) -
+  een onderschepte handtekening is dus specifiek geldig voor precies dat bedrag, die
+  ontvanger, EN die mint, niets anders.
+- Implementatie: ECHTE SPL-Token-CPI (token::transfer), ondertekend door de vault-PDA via
+  invoke_signed met dezelfde seeds als hunt gebruikt - in tegenstelling tot transfer_sol
+  (directe lamport-manipulatie, geen CPI nodig) MOET transfer_token wel een CPI doen, omdat
+  SPL-token-overdrachten altijd een owner-autoriteit-handtekening vereisen die de runtime
+  zelf controleert, niet iets wat met directe accountmanipulatie te omzeilen is.
+- Nieuwe foutcodes: InvalidVaultTokenAccount, InvalidRecipientTokenAccount.
+
+Client: nieuw bestand client/src/transferToken.ts (buildTransferTokenTransaction, zelfde
+structuur als execute.ts), nieuwe teststap 7 (runStep7) in main.ts - gebruikt opnieuw
+Circle's devnet-USDC (zelfde aanpak als sectie 31: een echt, extern token i.p.v. een
+zelf-aangemaakt testtoken).
+
+**Belangrijke les herhaald en dit keer meteen goed toegepast:** na de programma-ID-fout uit
+sectie 30 (verouderd ID in programId.ts na een eerdere refactor) is programId.ts deze keer
+METEEN bijgewerkt na de nieuwe deploy, voordat er client-code tegen getest werd - geen
+herhaling van die specifieke fout.
+
+**Kleine, herkenbare sed-valkuil tijdens het invoegen:** bij het invoegen van zowel
+runStep7 (na runStep6) als het transfer_token-Rust-blok (in lib.rs, na hunt) ontstonden
+kortstondig dubbele/ontbrekende sluit-accolades door een verkeerd ingeschat invoegpunt -
+in beide gevallen direct herkend (via de daaropvolgende sed -n-controle die een dubbele of
+ontbrekende `}` liet zien) en gericht hersteld voordat er gebouwd werd. Consistent met de
+in deze hele sessie gehanteerde werkwijze: elke wijziging direct verifieren, nooit
+aannemen dat een sed-invoeging is gelukt zoals bedoeld.
+
+**Resultaat: 8/8 Rust-tests groen, en volledig end-to-end bevestigd op devnet** met echte
+hardware-passkey: 0.5 USDC (500000 units) succesvol verplaatst van de vault-token-account
+terug naar de payer. Signature:
+4f8R67UdRJuUNqodQLJs5sVP83HWzcsgkwKd1aezYqqnydVQnMvyZr4CbajG337gybRJhxCf6bKrQiPzx3BnBDS7.
+Gedeployed op devnet: 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9.
+
+Met transfer_sol en transfer_token nu beide bewezen, dekt SpankWallet de twee meest
+fundamentele wallet-acties (native SOL en willekeurige SPL-tokens, inclusief zBTC/BTCSOL)
+volledig, zonder ooit een generieke CPI-doorgeefluik te hebben geintroduceerd.

@@ -154,3 +154,67 @@ impl PasskeysAccount {
     pub const LEN: usize =
         8 + 32 + 1 + 1 + 1 + (PASSKEY_PUBKEY_LEN * MAX_ADDITIONAL_PASSKEYS);
 }
+
+/// Maximum aantal programma-ID's dat een sessiesleutel tegelijk in zijn
+/// EIGEN sub-scope mag hebben. Bewust kleiner dan MAX_ALLOWED_PROGRAMS (32):
+/// een sessie hoort smal te zijn (een specifiek dApp/game-doel), niet de
+/// volledige wallet-brede allowlist te herhalen - zie STATUS.md, ontwerppunt 2.
+pub const MAX_SESSION_PROGRAMS: usize = 8;
+
+/// Eigen PDA per sessie (`[b"session", wallet, session_key]`), bewust NIET
+/// een satellite-lijst zoals PasskeysAccount/PolicyAccount - zie STATUS.md,
+/// ontwerppunt 1. Sessies zijn kortlevend en potentieel talrijk (elke
+/// dApp/game-visit), het omgekeerde profiel van passkeys/allowlist-entries:
+/// een eigen PDA geeft rent die daadwerkelijk teruggewonnen wordt bij sluiten
+/// (close_session/close_expired_session), O(1)-lookup via de sessiesleutel
+/// zelf, en geen vooraf vastgelegd maximum aantal gelijktijdige sessies.
+#[account]
+pub struct SessionKeyAccount {
+    /// De WalletAccount waarbij deze sessie hoort.
+    pub wallet: Pubkey,
+    /// De Ed25519-publieke sleutel van de sessie zelf (zie ontwerppunt 5) -
+    /// impliciet al onderdeel van de PDA-seeds, maar hier expliciet ook
+    /// opgeslagen t.b.v. client-side auditeerbaarheid (getProgramAccounts +
+    /// memcmp op `wallet` geeft de adressen, niet de seeds zelf terug - een
+    /// PDA-adres is niet terug te rekenen naar zijn seed-input).
+    pub session_key: Pubkey,
+    pub bump: u8,
+    /// Absolute slot-hoogte waarna deze sessie niet meer geldig is
+    /// (LazorKit-geinspireerd, zie ontwerppunt 1/5) - bewust een slot-hoogte,
+    /// niet een unix-timestamp zoals recovery_timelock_seconds elders: een
+    /// sessie-expiry meet een MAXIMALE geldigheidsvenster gekoppeld aan
+    /// daadwerkelijke chain-progressie, geen minimale wachttijd in wall-clock
+    /// tijd - goedkoper te vergelijken (Clock::get()?.slot is direct
+    /// beschikbaar, geen afgeleide rekensom) en ongevoelig voor
+    /// validator-klokdrift.
+    pub expiry_slot: u64,
+    /// Instructiesoort-scope (ontwerppunt 3) - een sessie mag NOOIT
+    /// add_passkey/remove_passkey/add_allowed_program/remove_allowed_program/
+    /// initiate_recovery/cancel_recovery/hunt/add_session_key/
+    /// remove_session_key ondertekenen, uitsluitend de drie "spend"-acties
+    /// hieronder, en dan nog alleen de acties waarvoor de eigenaar dit
+    /// specifieke vlag expliciet heeft aangezet bij add_session_key.
+    pub can_execute: bool,
+    pub can_transfer_token: bool,
+    pub can_execute_advanced: bool,
+    /// Aantal actief gevulde slots in allowed_programs, altijd aaneengesloten
+    /// vanaf index 0 - alleen relevant/gevuld als can_execute_advanced true
+    /// is (add_session_key eist een lege lijst als can_execute_advanced
+    /// false is, zie instructions.rs).
+    pub count: u8,
+    /// Sub-scope voor execute_advanced_via_session (ontwerppunt 2) - moet bij
+    /// aanmaak een subset zijn van de op dat moment geldende
+    /// PolicyAccount.allowed_programs, EN wordt bij elk gebruik OPNIEUW
+    /// herverifieerd tegen de dan geldende PolicyAccount (niet gecached) -
+    /// een programma van de wallet-brede allowlist verwijderen moet
+    /// onmiddellijk ook bestaande sessies raken.
+    pub allowed_programs: [Pubkey; MAX_SESSION_PROGRAMS],
+}
+
+impl SessionKeyAccount {
+    // discriminator(8) + wallet(32) + session_key(32) + bump(1) + expiry_slot(8)
+    // + can_execute(1) + can_transfer_token(1) + can_execute_advanced(1) + count(1)
+    // + allowed_programs(32 * MAX_SESSION_PROGRAMS)
+    pub const LEN: usize =
+        8 + 32 + 32 + 1 + 8 + 1 + 1 + 1 + 1 + (32 * MAX_SESSION_PROGRAMS);
+}

@@ -198,6 +198,41 @@ export async function advanceOnChainClockPast(
 }
 
 /**
+ * Slot-tegenhanger van advanceOnChainClockPast hierboven - voor
+ * session-key-expiry (STATUS.md), die bewust slot-hoogte gebruikt, geen
+ * unix-timestamp (zie ontwerppunt 1/5). Zelfde aanpak: actief kleine, echte
+ * transacties versturen totdat de on-chain slot de gewenste hoogte
+ * daadwerkelijk gepasseerd is, i.p.v. blind wachten - een idle lokale
+ * validator produceert nauwelijks nieuwe slots uit zichzelf.
+ */
+export async function advanceSlotPast(
+  connection: Connection,
+  payer: Keypair,
+  targetSlot: number,
+  maxRealMs: number = 60000
+): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: payer.publicKey,
+        lamports: 1,
+      })
+    );
+    await sendAndConfirmTransaction(connection, tx, [payer], { commitment: "confirmed" });
+
+    const slot = await connection.getSlot();
+    if (slot > targetSlot) {
+      return;
+    }
+    if (Date.now() - start > maxRealMs) {
+      throw new Error("advanceSlotPast: on-chain slot bereikte targetSlot niet binnen maxRealMs");
+    }
+  }
+}
+
+/**
  * Exacte TS-tegenhanger van encode_optional_i64() in instructions.rs - voor
  * de init_wallet-challenge-payload (bindt backup_authority en
  * recovery_timelock_seconds aan de handtekening, zie STATUS.md sectie 22).

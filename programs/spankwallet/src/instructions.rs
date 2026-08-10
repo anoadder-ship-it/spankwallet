@@ -461,6 +461,33 @@ fn read_passkeys_account(account_info: &AccountInfo) -> Option<PasskeysAccount> 
     PasskeysAccount::try_deserialize(&mut &data[..]).ok()
 }
 
+/// Leest PolicyAccount ALS het al bestaat, geeft None terug als het nog nooit
+/// is aangemaakt - zelfde tolerante patroon als read_passkeys_account.
+/// Gebruikt door add_session_key om de gevraagde execute_advanced-sub-scope
+/// bij aanmaak te valideren tegen de op dat moment geldende, wallet-brede
+/// allowlist (ontwerppunt 2): een wallet zonder PolicyAccount heeft een lege
+/// allowlist, dus elke aanvraag met >0 programma's hoort te falen, niet als
+/// fout maar simpelweg omdat er niets toegestaan is.
+fn read_policy_account(account_info: &AccountInfo) -> Option<PolicyAccount> {
+    if account_info.owner != &crate::ID {
+        return None;
+    }
+    let data = account_info.try_borrow_data().ok()?;
+    PolicyAccount::try_deserialize(&mut &data[..]).ok()
+}
+
+/// Verplichte (niet-tolerante) load van SessionKeyAccount - gebruikt door
+/// execute_advanced_via_session, waar `session` als UncheckedAccount
+/// gedeclareerd is (zie ExecuteAdvancedViaSession hierboven, BPF-stacklimiet).
+/// In tegenstelling tot read_passkeys_account/read_policy_account is er hier
+/// geen geldig "bestaat nog niet"-scenario - een sessie MOET al bestaan
+/// (aangemaakt via add_session_key) - dus faalt dit gewoon door als het
+/// account niet deserialiseert, i.p.v. None terug te geven.
+fn load_session_account(account_info: &AccountInfo) -> Result<SessionKeyAccount> {
+    let data = account_info.try_borrow_data()?;
+    SessionKeyAccount::try_deserialize(&mut &data[..])
+}
+
 /// Meervoudige-sleutel-variant - gebruikt door elke instructie NA
 /// init_wallet die een passkey-handtekening verifieert. Accepteert een
 /// geldige handtekening van OFWEL wallet.owner_passkey (tenzij ingetrokken
@@ -1487,6 +1514,562 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
         passkeys.count = 0;
         passkeys.additional_passkeys = [[0u8; PASSKEY_PUBKEY_LEN]; MAX_ADDITIONAL_PASSKEYS];
     }
+
+    Ok(())
+}
+
+// session keys (LazorKit-geinspireerd, slot-gebonden expiry, zie STATUS.md)
+//
+// Puur additief t.o.v. execute/transfer_token/execute_advanced hierboven:
+// GEEN van de drie bestaande instructies is voor dit traject gewijzigd (zie
+// STATUS.md, ontwerppunt 6). In plaats daarvan een parallelle set
+// "_via_session"-instructies met een eigen, structureel ander
+// autorisatiemechanisme: een sessiesleutel is een gewone Solana Ed25519
+// Signer (ontwerppunt 5), geen secp256r1/WebAuthn-passkey - Solana's eigen
+// transactie-ondertekening bindt de sessiesleutel al aan exact deze
+// instructie (programma-ID + accounts + data), dus is er GEEN
+// challenge/clientDataJSON/precompile-machinerie nodig zoals bij de
+// passkey-gated varianten. De kernlogica (lamport-verplaatsing,
+// SPL-transfer, CPI-dispatch) is bewust gedupliceerd i.p.v. gedeeld met
+// execute/transfer_token/execute_advanced - dat houdt de reeds live,
+// fondsen-rakende instructies volledig onaangeraakt (zie de expliciete
+// belofte in het goedgekeurde ontwerp), tegen de kosten van een kleine
+// hoeveelheid duplicatie.
+
+#[derive(Accounts)]
+#[instruction(session_key: Pubkey)]
+pub struct AddSessionKey<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// session_key is altijd een vers, door de client gegenereerd Ed25519-
+    /// keypair - bewust `init` (niet init_if_needed): een geldige aanroep
+    /// creeert altijd een NIEUWE sessie, hergebruik van een bestaande
+    /// session_key zou een bestaande sessie's scope/expiry stilzwijgend
+    /// overschrijven en hoort daarom hard te falen.
+    #[account(
+        init,
+        payer = payer,
+        space = SessionKeyAccount::LEN,
+        seeds = [b"session", wallet.key().as_ref(), session_key.as_ref()],
+        bump
+    )]
+    pub session: Account<'info, SessionKeyAccount>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// CHECK: alleen gelezen (read_policy_account, tolerant) om de gevraagde
+    /// execute_advanced-sub-scope te valideren tegen de LIVE wallet-brede
+    /// allowlist. Hoeft niet te bestaan - zie read_policy_account hierboven.
+    pub policy: UncheckedAccount<'info>,
+
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+/// add_session_key: elke op dat moment geldige passkey (owner of extra) mag
+/// een nieuwe sessie aanmaken, met een verse, challenge-gebonden handtekening
+/// die de VOLLEDIGE scope bindt (session_key, expiry_slot, de drie
+/// instructie-vlaggen, en de sub-allowlist) - een onderschepte handtekening
+/// voor "sta scope X toe" kan nooit hergebruikt worden voor een andere,
+/// bredere scope. Geen zelf-verlenging mogelijk: er is bewust geen aparte
+/// "extend"-instructie - elke verlenging is simpelweg een nieuwe
+/// add_session_key-aanroep, die net als de eerste keer een echte
+/// passkey-handtekening vereist (ontwerppunt 4).
+pub fn add_session_key(
+    ctx: Context<AddSessionKey>,
+    session_key: Pubkey,
+    expiry_slot: u64,
+    can_execute: bool,
+    can_transfer_token: bool,
+    can_execute_advanced: bool,
+    session_allowed_programs: Vec<Pubkey>,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    require!(
+        session_allowed_programs.len() <= MAX_SESSION_PROGRAMS,
+        SpankWalletError::SessionAllowlistFull
+    );
+
+    let current_slot = Clock::get()?.slot;
+    require!(
+        expiry_slot > current_slot,
+        SpankWalletError::SessionExpirySlotNotInFuture
+    );
+
+    if can_execute_advanced {
+        let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
+        for program_id in session_allowed_programs.iter() {
+            let allowed = policy
+                .as_ref()
+                .map(|p| {
+                    p.allowed_programs[..p.count as usize]
+                        .iter()
+                        .any(|a| a == program_id)
+                })
+                .unwrap_or(false);
+            require!(allowed, SpankWalletError::SessionProgramNotAllowed);
+        }
+    } else {
+        // Geen zinloze state opslaan: zonder can_execute_advanced is een
+        // sub-allowlist sowieso nooit bruikbaar (execute_advanced_via_session
+        // weigert al op de instructie-vlag zelf), dus wordt een niet-lege
+        // lijst hier al bij aanmaak geweigerd i.p.v. stilzwijgend genegeerd.
+        require!(
+            session_allowed_programs.is_empty(),
+            SpankWalletError::SessionInstructionNotAllowed
+        );
+    }
+
+    let mut payload = Vec::with_capacity(32 + 8 + 3 + 4 + session_allowed_programs.len() * 32);
+    payload.extend_from_slice(session_key.as_ref());
+    payload.extend_from_slice(&expiry_slot.to_le_bytes());
+    payload.push(can_execute as u8);
+    payload.push(can_transfer_token as u8);
+    payload.push(can_execute_advanced as u8);
+    payload.extend_from_slice(&(session_allowed_programs.len() as u32).to_le_bytes());
+    for program_id in session_allowed_programs.iter() {
+        payload.extend_from_slice(program_id.as_ref());
+    }
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"add_session_key", &payload);
+    verify_passkey_signature_multi(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    let session = &mut ctx.accounts.session;
+    session.wallet = ctx.accounts.wallet.key();
+    session.session_key = session_key;
+    session.bump = ctx.bumps.session;
+    session.expiry_slot = expiry_slot;
+    session.can_execute = can_execute;
+    session.can_transfer_token = can_transfer_token;
+    session.can_execute_advanced = can_execute_advanced;
+    session.count = session_allowed_programs.len() as u8;
+    session.allowed_programs = [Pubkey::default(); MAX_SESSION_PROGRAMS];
+    session.allowed_programs[..session_allowed_programs.len()]
+        .copy_from_slice(&session_allowed_programs);
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+#[instruction(session_key: Pubkey)]
+pub struct RemoveSessionKey<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// seeds/bump garanderen al dat dit EXACT de sessie van deze wallet +
+    /// deze session_key is - geen extra constraint nodig.
+    #[account(
+        mut,
+        close = payer,
+        seeds = [b"session", wallet.key().as_ref(), session_key.as_ref()],
+        bump = session.bump,
+    )]
+    pub session: Account<'info, SessionKeyAccount>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// CHECK: multi-passkey-set, zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+/// remove_session_key: vroegtijdige intrekking door een geldige passkey -
+/// nodig omdat een gecompromitteerde/kwaadwillende sessiesleutel zelf nooit
+/// vrijwillig close_session zal aanroepen. Onafhankelijk van
+/// close_session/close_expired_session hieronder.
+pub fn remove_session_key(
+    ctx: Context<RemoveSessionKey>,
+    session_key: Pubkey,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let expected_challenge = build_expected_challenge(
+        &ctx.accounts.wallet.key(),
+        b"remove_session_key",
+        session_key.as_ref(),
+    );
+    verify_passkey_signature_multi(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct CloseSession<'info> {
+    /// CHECK: alleen gebruikt om de PDA-seeds van `session` af te leiden -
+    /// geen eigen inhoudscontrole nodig, seeds+bump garanderen al dat
+    /// `session` EXACT bij deze wallet + deze session_key hoort. Geen
+    /// recovery_state-check hier (in tegenstelling tot elke ADD-actie in dit
+    /// programma): een sessie zelf sluiten VERSMALT bevoegdheid, verbreedt
+    /// nooit - er is geen scenario waarin dat tijdens een lopende recovery
+    /// gevaarlijker zou zijn dan daarbuiten.
+    pub wallet: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        close = session_key,
+        seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
+        bump = session.bump,
+    )]
+    pub session: Account<'info, SessionKeyAccount>,
+
+    /// De sessiesleutel zelf ondertekent haar eigen sluiting - het enige dat
+    /// een sessiesleutel zelfstandig, zonder passkey, mag doen (ontwerppunt
+    /// 4): eigen bevoegdheid intrekken is per definitie veilig, ongeacht wie
+    /// erom vraagt, omdat het nooit meer toegang geeft, alleen minder.
+    /// `mut` is vereist: de `close`-constraint hierboven crediteert de
+    /// teruggewonnen rent naar dit account, Anchor weigert een balanswijziging
+    /// op een niet-mut account ("instruction changed the balance of a
+    /// read-only account").
+    #[account(mut)]
+    pub session_key: Signer<'info>,
+}
+
+pub fn close_session(_ctx: Context<CloseSession>) -> Result<()> {
+    Ok(())
+}
+
+#[derive(Accounts)]
+#[instruction(session_key: Pubkey)]
+pub struct CloseExpiredSession<'info> {
+    /// CHECK: alleen gebruikt voor PDA-seeds-afleiding, zie CloseSession.
+    pub wallet: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        close = closer,
+        seeds = [b"session", wallet.key().as_ref(), session_key.as_ref()],
+        bump = session.bump,
+    )]
+    pub session: Account<'info, SessionKeyAccount>,
+
+    /// Permissionless: wie dan ook mag een verlopen sessie opruimen en de
+    /// rent claimen - een opruim-prikkel, anders blijven verlopen
+    /// sessie-accounts voor altijd als dode rent staan (ontwerppunt 4).
+    #[account(mut)]
+    pub closer: Signer<'info>,
+}
+
+pub fn close_expired_session(
+    ctx: Context<CloseExpiredSession>,
+    _session_key: Pubkey,
+) -> Result<()> {
+    let current_slot = Clock::get()?.slot;
+    require!(
+        current_slot > ctx.accounts.session.expiry_slot,
+        SpankWalletError::SessionNotYetExpired
+    );
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct ExecuteViaSession<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    /// CHECK: willekeurige ontvanger, zelfde principe als execute.
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+
+    #[account(
+        seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
+        bump = session.bump,
+    )]
+    pub session: Account<'info, SessionKeyAccount>,
+
+    /// De sessiesleutel ondertekent de Solana-transactie rechtstreeks (native
+    /// Ed25519-signer, ontwerppunt 5) - geen WebAuthn-challenge/precompile-
+    /// machinerie nodig: Solana's eigen transactie-ondertekening bindt de
+    /// sessiesleutel al aan exact deze instructie (programma-ID + accounts +
+    /// data), net zoals bij elke gewone walletsleutel.
+    pub session_key: Signer<'info>,
+}
+
+pub fn execute_via_session(ctx: Context<ExecuteViaSession>, amount: u64) -> Result<()> {
+    let session = &ctx.accounts.session;
+    let current_slot = Clock::get()?.slot;
+    require!(
+        current_slot <= session.expiry_slot,
+        SpankWalletError::SessionExpired
+    );
+    require!(
+        session.can_execute,
+        SpankWalletError::SessionInstructionNotAllowed
+    );
+
+    // Zelfde lamport-verplaatsing als execute() - bewust gedupliceerd, zie
+    // de toelichting bovenaan dit blok.
+    let rent = Rent::get()?;
+    let min_vault_balance = rent.minimum_balance(VaultAccount::LEN);
+
+    let vault_ai = ctx.accounts.vault.to_account_info();
+    let new_vault_balance = vault_ai
+        .lamports()
+        .checked_sub(amount)
+        .ok_or(SpankWalletError::ExecuteTransferOverflow)?;
+    require!(
+        new_vault_balance >= min_vault_balance,
+        SpankWalletError::VaultWouldFallBelowRentExempt
+    );
+    **vault_ai.try_borrow_mut_lamports()? = new_vault_balance;
+
+    let recipient_ai = ctx.accounts.recipient.to_account_info();
+    let new_recipient_balance = recipient_ai
+        .lamports()
+        .checked_add(amount)
+        .ok_or(SpankWalletError::ExecuteTransferOverflow)?;
+    **recipient_ai.try_borrow_mut_lamports()? = new_recipient_balance;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct TransferTokenViaSession<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    #[account(
+        mut,
+        constraint = vault_token_account.owner == vault.key() @ SpankWalletError::InvalidVaultTokenAccount,
+        constraint = vault_token_account.mint == token_mint.key() @ SpankWalletError::InvalidVaultTokenAccount,
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: willekeurige ontvanger-token-account, zelfde principe als transfer_token.
+    #[account(
+        mut,
+        constraint = recipient_token_account.mint == token_mint.key() @ SpankWalletError::InvalidRecipientTokenAccount,
+    )]
+    pub recipient_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: alleen doorgegeven aan de SPL Token-CPI en gebruikt in de
+    /// eigendoms-/mint-constraints hierboven, zelfde patroon als transfer_token.
+    pub token_mint: UncheckedAccount<'info>,
+
+    #[account(
+        seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
+        bump = session.bump,
+    )]
+    pub session: Account<'info, SessionKeyAccount>,
+
+    pub session_key: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+pub fn transfer_token_via_session(ctx: Context<TransferTokenViaSession>, amount: u64) -> Result<()> {
+    let session = &ctx.accounts.session;
+    let current_slot = Clock::get()?.slot;
+    require!(
+        current_slot <= session.expiry_slot,
+        SpankWalletError::SessionExpired
+    );
+    require!(
+        session.can_transfer_token,
+        SpankWalletError::SessionInstructionNotAllowed
+    );
+
+    // Zelfde SPL-CPI als transfer_token() - bewust gedupliceerd, zie de
+    // toelichting bovenaan dit blok.
+    let wallet_key = ctx.accounts.wallet.key();
+    let seeds = &[b"vault".as_ref(), wallet_key.as_ref(), &[ctx.accounts.vault.bump]];
+    let signer_seeds = &[&seeds[..]];
+
+    let transfer_ctx = CpiContext::new_with_signer(
+        Token::id(),
+        Transfer {
+            from: ctx.accounts.vault_token_account.to_account_info(),
+            to: ctx.accounts.recipient_token_account.to_account_info(),
+            authority: ctx.accounts.vault.to_account_info(),
+        },
+        signer_seeds,
+    );
+    token::transfer(transfer_ctx, amount)?;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct ExecuteAdvancedViaSession<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    #[account(
+        seeds = [b"policy", wallet.key().as_ref()],
+        bump = policy.bump,
+    )]
+    pub policy: Account<'info, PolicyAccount>,
+
+    /// CHECK: het CPI-doelprogramma, zelfde principe als execute_advanced -
+    /// moet expliciet op ZOWEL de sessie's eigen sub-scope ALS de live
+    /// policy staan EN executable zijn.
+    pub cpi_program: UncheckedAccount<'info>,
+
+    /// CHECK: bewust UncheckedAccount i.p.v. Account<SessionKeyAccount> - de
+    /// BPF-stack heeft een harde 4096-byte-limiet per frame, en deze
+    /// Accounts-struct bevat al een grote PolicyAccount (1024+ bytes voor
+    /// allowed_programs). Een typed SessionKeyAccount ERBOVENOP overschreed
+    /// die limiet (empirisch gevonden: "Access violation in stack frame"
+    /// tijdens try_accounts). seeds/bump garanderen nog steeds dat dit EXACT
+    /// de sessie van deze wallet + deze session_key is; de inhoud wordt
+    /// hieronder handmatig, verplicht gedeserialiseerd (load_session_account)
+    /// i.p.v. door Anchors macro - zelfde reden als waarom `passkeys` overal
+    /// elders ook al UncheckedAccount is, niet Account<PasskeysAccount>.
+    #[account(
+        seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
+        bump,
+    )]
+    pub session: UncheckedAccount<'info>,
+
+    pub session_key: Signer<'info>,
+}
+
+pub fn execute_advanced_via_session<'info>(
+    ctx: Context<'info, ExecuteAdvancedViaSession<'info>>,
+    cpi_instruction_data: Vec<u8>,
+) -> Result<()> {
+    let session = load_session_account(&ctx.accounts.session.to_account_info())?;
+    let cpi_program_id = ctx.accounts.cpi_program.key();
+
+    require!(cpi_program_id != crate::ID, SpankWalletError::SelfCpiNotAllowed);
+    require!(
+        ctx.accounts.cpi_program.executable,
+        SpankWalletError::CpiTargetNotExecutable
+    );
+
+    let current_slot = Clock::get()?.slot;
+    require!(
+        current_slot <= session.expiry_slot,
+        SpankWalletError::SessionExpired
+    );
+    require!(
+        session.can_execute_advanced,
+        SpankWalletError::SessionInstructionNotAllowed
+    );
+
+    // Ontwerppunt 2: BEIDE lijsten opnieuw gecontroleerd bij elk gebruik, niet
+    // gecached sinds add_session_key - de sessie's eigen sub-scope EN de
+    // live, wallet-brede PolicyAccount moeten allebei het doelprogramma
+    // toestaan.
+    let session_allows = session.allowed_programs[..session.count as usize]
+        .iter()
+        .any(|p| *p == cpi_program_id);
+    require!(session_allows, SpankWalletError::SessionProgramNotAllowed);
+
+    let policy = &ctx.accounts.policy;
+    let policy_allows = policy.allowed_programs[..policy.count as usize]
+        .iter()
+        .any(|p| *p == cpi_program_id);
+    require!(policy_allows, SpankWalletError::ProgramNotAllowed);
+
+    let vault_key = ctx.accounts.vault.key();
+
+    let mut account_metas = Vec::with_capacity(ctx.remaining_accounts.len());
+    let mut account_infos = Vec::with_capacity(ctx.remaining_accounts.len() + 1);
+
+    for account_info in ctx.remaining_accounts.iter() {
+        let is_vault = *account_info.key == vault_key;
+        let is_signer = is_vault || account_info.is_signer;
+        let is_writable = account_info.is_writable;
+
+        account_metas.push(AccountMeta {
+            pubkey: *account_info.key,
+            is_signer,
+            is_writable,
+        });
+        account_infos.push(account_info.clone());
+    }
+
+    account_infos.push(ctx.accounts.cpi_program.to_account_info());
+
+    let instruction = Instruction {
+        program_id: cpi_program_id,
+        accounts: account_metas,
+        data: cpi_instruction_data,
+    };
+
+    let wallet_key = ctx.accounts.wallet.key();
+    let seeds = &[
+        b"vault".as_ref(),
+        wallet_key.as_ref(),
+        &[ctx.accounts.vault.bump],
+    ];
+    let signer_seeds = &[&seeds[..]];
+
+    invoke_signed(&instruction, &account_infos, signer_seeds)?;
 
     Ok(())
 }

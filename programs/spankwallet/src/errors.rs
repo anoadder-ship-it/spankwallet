@@ -97,4 +97,22 @@ pub enum SpankWalletError {
 
     #[msg("Kan de laatste geldige passkey van deze wallet niet verwijderen - zou de wallet onbereikbaar maken")]
     CannotRemoveLastPasskey,
+
+    #[msg("Deze sessiesleutel is verlopen (voorbij expiry_slot)")]
+    SessionExpired,
+
+    #[msg("Deze sessiesleutel is nog niet verlopen - kan nog niet permissionless opgeruimd worden")]
+    SessionNotYetExpired,
+
+    #[msg("expiry_slot moet in de toekomst liggen (na de huidige slot)")]
+    SessionExpirySlotNotInFuture,
+
+    #[msg("Deze sessiesleutel is niet gescoped voor deze instructiesoort")]
+    SessionInstructionNotAllowed,
+
+    #[msg("Dit programma-ID staat niet in de eigen sub-allowlist van deze sessiesleutel")]
+    SessionProgramNotAllowed,
+
+    #[msg("De sub-allowlist van deze sessiesleutel zit vol (maximum aantal programma's bereikt)")]
+    SessionAllowlistFull,
 }

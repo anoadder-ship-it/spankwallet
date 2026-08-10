@@ -108,4 +108,63 @@ pub mod spankwallet {
     pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
         instructions::finalize_recovery(ctx)
     }
+
+    pub fn add_session_key(
+        ctx: Context<AddSessionKey>,
+        session_key: Pubkey,
+        expiry_slot: u64,
+        can_execute: bool,
+        can_transfer_token: bool,
+        can_execute_advanced: bool,
+        session_allowed_programs: Vec<Pubkey>,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::add_session_key(
+            ctx,
+            session_key,
+            expiry_slot,
+            can_execute,
+            can_transfer_token,
+            can_execute_advanced,
+            session_allowed_programs,
+            client_data_json,
+        )
+    }
+
+    pub fn remove_session_key(
+        ctx: Context<RemoveSessionKey>,
+        session_key: Pubkey,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::remove_session_key(ctx, session_key, client_data_json)
+    }
+
+    pub fn close_session(ctx: Context<CloseSession>) -> Result<()> {
+        instructions::close_session(ctx)
+    }
+
+    pub fn close_expired_session(
+        ctx: Context<CloseExpiredSession>,
+        session_key: Pubkey,
+    ) -> Result<()> {
+        instructions::close_expired_session(ctx, session_key)
+    }
+
+    pub fn execute_via_session(ctx: Context<ExecuteViaSession>, amount: u64) -> Result<()> {
+        instructions::execute_via_session(ctx, amount)
+    }
+
+    pub fn transfer_token_via_session(
+        ctx: Context<TransferTokenViaSession>,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::transfer_token_via_session(ctx, amount)
+    }
+
+    pub fn execute_advanced_via_session<'info>(
+        ctx: Context<'info, ExecuteAdvancedViaSession<'info>>,
+        cpi_instruction_data: Vec<u8>,
+    ) -> Result<()> {
+        instructions::execute_advanced_via_session(ctx, cpi_instruction_data)
+    }
 }

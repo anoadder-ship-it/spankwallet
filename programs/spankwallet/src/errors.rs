@@ -64,4 +64,19 @@ pub enum SpankWalletError {
 
     #[msg("Onverwachte tijdstempel-overflow bij het berekenen van verstreken recovery-tijd")]
     TimestampOverflow,
+
+    #[msg("Dit programma-ID staat al op de allowlist van deze wallet")]
+    ProgramAlreadyAllowed,
+
+    #[msg("Dit programma-ID staat niet op de allowlist van deze wallet")]
+    ProgramNotAllowed,
+
+    #[msg("De allowlist van deze wallet zit vol (maximum aantal programma's bereikt)")]
+    AllowlistFull,
+
+    #[msg("SpankWallet zelf mag nooit op de eigen allowlist staan of als CPI-doel dienen")]
+    SelfCpiNotAllowed,
+
+    #[msg("Het opgegeven CPI-doelaccount is geen uitvoerbaar (executable) programma-account")]
+    CpiTargetNotExecutable,
 }

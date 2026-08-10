@@ -1,4 +1,6 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::program::invoke_signed;
 use anchor_spl::token::{self, Burn, CloseAccount, Token, TokenAccount, Transfer};
 use solana_instructions_sysvar::{
     load_current_index_checked, load_instruction_at_checked, ID as IX_SYSVAR_ID,
@@ -510,6 +512,307 @@ pub fn transfer_token(
         signer_seeds,
     );
     token::transfer(transfer_ctx, amount)?;
+
+    Ok(())
+}
+
+// program-allowlist (add_allowed_program / remove_allowed_program) + execute_advanced
+//
+// Samen implementeren deze drie de programma-allowlist-architectuur uit
+// STATUS.md sectie 26/27: een klein, WalletAccount-gebonden PolicyAccount
+// met een door de gebruiker zelf beheerde lijst toegestane programma-ID's,
+// en een getypeerde execute_advanced-instructie die WEL een CPI naar een
+// extern programma mag doen maar UITSLUITEND naar een programma dat op die
+// eigen lijst staat. Bewust GEEN on-chain onderscheid tussen "aanbevolen"
+// en "handmatig toegevoegd" - dat verschil is puur clientside UI (sectie
+// 27); on-chain wordt elk toegevoegd programma-ID identiek behandeld, geen
+// enkele bevoorrechte partij (ook niet de ontwikkelaars) kan hier iets aan
+// toevoegen of van verwijderen namens de gebruiker.
+//
+// Bewust GEEN timelock op add_allowed_program/remove_allowed_program
+// (besproken en expliciet zo gekozen, zie STATUS.md): beide vereisen
+// sowieso elke keer een eigen, verse, domain-gebonden live
+// passkey-handtekening - er is geen "gestolen sessie" in dit ontwerp zoals
+// bij bijv. OAuth-sessies of browserextensie-permissies die hier gestolen
+// zou kunnen worden. Het risico "toevoegen + direct misbruiken" gebeurt
+// hoe dan ook atomair BINNEN dezelfde transactie als de add (blind-signing
+// via een gecompromitteerde/misleidende client, zie sectie 25) - een
+// timelock op remove verandert daar niets aan, de schade is al gebeurd
+// voordat remove ooit relevant wordt. De precies gerichte mitigatie (een
+// activatievertraging voordat een NIEUW toegevoegd programma door
+// execute_advanced gebruikt mag worden) hoort thuis in de al geplande
+// "gelaagde privileges"-roadmap (sectie 26), niet als blanket-timelock hier.
+
+#[derive(Accounts)]
+pub struct AddAllowedProgram<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// init_if_needed is hier veilig: policy is een PDA die deterministisch
+    /// en uitsluitend van wallet.key() afhangt, dus er kan nooit een ANDER
+    /// accounttype op dat adres bestaan om per ongeluk te "hergebruiken" -
+    /// het is ofwel nog nooit aangemaakt, ofwel altijd al precies deze
+    /// PolicyAccount-structuur. Dat is exact het scenario waarin Anchors
+    /// eigen documentatie init_if_needed als veilig aanmerkt, in
+    /// tegenstelling tot het bekende risico bij accounts die ook een ANDER
+    /// type/eigenaar zouden kunnen hebben.
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = PolicyAccount::LEN,
+        seeds = [b"policy", wallet.key().as_ref()],
+        bump
+    )]
+    pub policy: Account<'info, PolicyAccount>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn add_allowed_program(
+    ctx: Context<AddAllowedProgram>,
+    program_id: Pubkey,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let expected_challenge = build_expected_challenge(
+        &ctx.accounts.wallet.key(),
+        b"add_allowed_program",
+        program_id.as_ref(),
+    );
+    verify_passkey_signature(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    require!(program_id != crate::ID, SpankWalletError::SelfCpiNotAllowed);
+
+    let policy = &mut ctx.accounts.policy;
+
+    // policy.wallet == Pubkey::default() is uitsluitend waar direct na een
+    // net door init_if_needed aangemaakt account (een echte WalletAccount-
+    // PDA is nooit gelijk aan Pubkey::default()) - eerste-gebruik-init.
+    if policy.wallet == Pubkey::default() {
+        policy.wallet = ctx.accounts.wallet.key();
+        policy.bump = ctx.bumps.policy;
+        policy.count = 0;
+        policy.allowed_programs = [Pubkey::default(); MAX_ALLOWED_PROGRAMS];
+    }
+
+    let already_present = policy.allowed_programs[..policy.count as usize]
+        .iter()
+        .any(|p| *p == program_id);
+    require!(!already_present, SpankWalletError::ProgramAlreadyAllowed);
+    require!(
+        (policy.count as usize) < MAX_ALLOWED_PROGRAMS,
+        SpankWalletError::AllowlistFull
+    );
+
+    let index = policy.count as usize;
+    policy.allowed_programs[index] = program_id;
+    policy.count += 1;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct RemoveAllowedProgram<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"policy", wallet.key().as_ref()],
+        bump = policy.bump,
+    )]
+    pub policy: Account<'info, PolicyAccount>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+pub fn remove_allowed_program(
+    ctx: Context<RemoveAllowedProgram>,
+    program_id: Pubkey,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let expected_challenge = build_expected_challenge(
+        &ctx.accounts.wallet.key(),
+        b"remove_allowed_program",
+        program_id.as_ref(),
+    );
+    verify_passkey_signature(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    let policy = &mut ctx.accounts.policy;
+    let count = policy.count as usize;
+    let index = policy.allowed_programs[..count]
+        .iter()
+        .position(|p| *p == program_id)
+        .ok_or(SpankWalletError::ProgramNotAllowed)?;
+
+    // Swap-remove: de lijst is een ongeordende set, geen geordende
+    // geschiedenis - de laatste actieve entry naar het gat verplaatsen is
+    // O(1) en houdt de actieve slots aaneengesloten vanaf index 0 (nodig
+    // omdat add_allowed_program/execute_advanced simpelweg
+    // allowed_programs[..count] doorzoeken).
+    let last = count - 1;
+    policy.allowed_programs[index] = policy.allowed_programs[last];
+    policy.allowed_programs[last] = Pubkey::default();
+    policy.count -= 1;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct ExecuteAdvanced<'info> {
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    #[account(
+        seeds = [b"policy", wallet.key().as_ref()],
+        bump = policy.bump,
+    )]
+    pub policy: Account<'info, PolicyAccount>,
+
+    /// CHECK: het CPI-doelprogramma - moet expliciet op policy.allowed_programs
+    /// staan EN executable zijn (beide gecontroleerd in execute_advanced hieronder).
+    pub cpi_program: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+/// execute_advanced is de bewust apart gehouden mogelijkheid uit STATUS.md
+/// sectie 26/27 om wél een CPI naar een extern programma te doen (in
+/// tegenstelling tot execute/transfer_token, die structureel GEEN CPI naar
+/// willekeurige programma's toestaan, zie sectie 25) - maar UITSLUITEND
+/// naar een programma-ID dat de gebruiker zelf, met zijn eigen passkey,
+/// vooraf via add_allowed_program op zijn eigen PolicyAccount heeft gezet.
+/// De vault (PDA, eigendom van dit programma) mag als CPI-autoriteit
+/// optreden: elke account in remaining_accounts wiens sleutel overeenkomt
+/// met de vault wordt via invoke_signed als signer doorgegeven, verder
+/// ongewijzigd t.o.v. wat de aanroeper aanlevert - zelfde mechanisme als in
+/// transfer_token/hunt, nu voor een willekeurig toegestaan programma i.p.v.
+/// uitsluitend het SPL Token-programma.
+///
+/// De challenge bindt het VOLLEDIGE CPI-target: het programma-ID, elke
+/// meegegeven account (sleutel + schrijf-/signer-vlag) EN de instructiedata
+/// zelf - zelfde principe als transfer_sol/transfer_token (sectie 25/32):
+/// een onderschepte handtekening is uitsluitend geldig voor precies deze
+/// ene, volledig gespecificeerde CPI-aanroep, niet voor iets anders tegen
+/// hetzelfde toegestane programma.
+pub fn execute_advanced<'info>(
+    ctx: Context<'info, ExecuteAdvanced<'info>>,
+    cpi_instruction_data: Vec<u8>,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let cpi_program_id = ctx.accounts.cpi_program.key();
+
+    require!(
+        cpi_program_id != crate::ID,
+        SpankWalletError::SelfCpiNotAllowed
+    );
+    require!(
+        ctx.accounts.cpi_program.executable,
+        SpankWalletError::CpiTargetNotExecutable
+    );
+
+    let policy = &ctx.accounts.policy;
+    let is_allowed = policy.allowed_programs[..policy.count as usize]
+        .iter()
+        .any(|p| *p == cpi_program_id);
+    require!(is_allowed, SpankWalletError::ProgramNotAllowed);
+
+    let vault_key = ctx.accounts.vault.key();
+
+    let mut payload = Vec::with_capacity(
+        32 + 2 + ctx.remaining_accounts.len() * 34 + 4 + cpi_instruction_data.len(),
+    );
+    payload.extend_from_slice(cpi_program_id.as_ref());
+    payload.extend_from_slice(&(ctx.remaining_accounts.len() as u16).to_le_bytes());
+
+    let mut account_metas = Vec::with_capacity(ctx.remaining_accounts.len());
+    let mut account_infos = Vec::with_capacity(ctx.remaining_accounts.len() + 1);
+
+    for account_info in ctx.remaining_accounts.iter() {
+        let is_vault = *account_info.key == vault_key;
+        let is_signer = is_vault || account_info.is_signer;
+        let is_writable = account_info.is_writable;
+
+        payload.extend_from_slice(account_info.key.as_ref());
+        payload.push(is_writable as u8);
+        payload.push(is_signer as u8);
+
+        account_metas.push(AccountMeta {
+            pubkey: *account_info.key,
+            is_signer,
+            is_writable,
+        });
+        account_infos.push(account_info.clone());
+    }
+
+    payload.extend_from_slice(&(cpi_instruction_data.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&cpi_instruction_data);
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"execute_advanced", &payload);
+    verify_passkey_signature(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    account_infos.push(ctx.accounts.cpi_program.to_account_info());
+
+    let instruction = Instruction {
+        program_id: cpi_program_id,
+        accounts: account_metas,
+        data: cpi_instruction_data,
+    };
+
+    let wallet_key = ctx.accounts.wallet.key();
+    let seeds = &[
+        b"vault".as_ref(),
+        wallet_key.as_ref(),
+        &[ctx.accounts.vault.bump],
+    ];
+    let signer_seeds = &[&seeds[..]];
+
+    invoke_signed(&instruction, &account_infos, signer_seeds)?;
 
     Ok(())
 }

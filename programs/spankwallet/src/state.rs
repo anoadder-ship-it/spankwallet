@@ -92,3 +92,31 @@ pub struct VaultAccount {
 impl VaultAccount {
     pub const LEN: usize = 8 + 32 + 1;
 }
+
+/// Maximum aantal programma-ID's dat een enkele wallet tegelijk op zijn
+/// allowlist mag hebben (STATUS.md sectie 27). Vast array i.p.v. een
+/// dynamische Vec: een dynamische lijst zou bij elke add_allowed_program
+/// een Anchor `realloc` vereisen (extra rent-topup, en op remove geeft een
+/// Vec geen rent terug zonder aparte, foutgevoelige boekhouding). Voor een
+/// persoonlijke wallet-allowlist (een handvol gecureerde + handmatig
+/// toegevoegde programma's, geen honderden) is een vast aantal slots
+/// simpelweg goedkoper EN eenvoudiger: 32 * 32 bytes is triviale,
+/// eenmalige rent (~0.008 SOL), zonder enige realloc-complexiteit.
+pub const MAX_ALLOWED_PROGRAMS: usize = 32;
+
+#[account]
+pub struct PolicyAccount {
+    /// De WalletAccount waarbij deze allowlist hoort.
+    pub wallet: Pubkey,
+    pub bump: u8,
+    /// Aantal actief gevulde slots in allowed_programs, altijd aaneengesloten
+    /// vanaf index 0 (geen gaten) - remove_allowed_program gebruikt
+    /// swap-remove om dit invariant te bewaren.
+    pub count: u8,
+    pub allowed_programs: [Pubkey; MAX_ALLOWED_PROGRAMS],
+}
+
+impl PolicyAccount {
+    // discriminator (8) + wallet (32) + bump (1) + count (1) + allowed_programs (32 * MAX)
+    pub const LEN: usize = 8 + 32 + 1 + 1 + (32 * MAX_ALLOWED_PROGRAMS);
+}

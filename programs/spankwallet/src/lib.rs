@@ -47,6 +47,30 @@ pub mod spankwallet {
         instructions::transfer_token(ctx, amount, client_data_json)
     }
 
+    pub fn add_allowed_program(
+        ctx: Context<AddAllowedProgram>,
+        program_id: Pubkey,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::add_allowed_program(ctx, program_id, client_data_json)
+    }
+
+    pub fn remove_allowed_program(
+        ctx: Context<RemoveAllowedProgram>,
+        program_id: Pubkey,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::remove_allowed_program(ctx, program_id, client_data_json)
+    }
+
+    pub fn execute_advanced<'info>(
+        ctx: Context<'info, ExecuteAdvanced<'info>>,
+        cpi_instruction_data: Vec<u8>,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::execute_advanced(ctx, cpi_instruction_data, client_data_json)
+    }
+
     pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
         instructions::hunt(ctx, client_data_json)
     }

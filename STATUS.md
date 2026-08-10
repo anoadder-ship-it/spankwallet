@@ -1565,3 +1565,130 @@ devnet-programma draait nu de volledig geharde `verify_passkey_signature`, beves
 werkend met een echte hardware-passkey, zonder enige regressie in de bestaande
 functionaliteit (init_wallet en execute beide nog steeds probleemloos, zelfde niveau van
 bewijs als alle eerdere devnet-bevestigingen in dit project).
+
+## 38. Multi-passkey authority-model gebouwd: add_passkey/remove_passkey (Rust-laag, nog niet gedeployed)
+
+Op verzoek een LazorKit-geinspireerd multi-passkey-model gebouwd: waar een wallet tot nu
+toe precies één `owner_passkey` kon hebben, kunnen nu meerdere, gelijkwaardige, volledig
+bevoegde passkeys geregistreerd staan (telefoon, laptop, losse hardware-sleutel, back-up).
+Ontwerp vooraf voorgelegd en expliciet goedgekeurd op alle 5 punten (account-layout,
+rollen, recovery-interactie, migratiepad, challenge-binding) voordat er iets gebouwd werd -
+dit raakt de kern-identiteitsstructuur van de wallet.
+
+**Account-layout: satellite-account, bewust NIET LazorKits per-sleutel-PDA.** Nieuwe
+`PasskeysAccount` (PDA `[b"passkeys", wallet]`): `wallet`, `bump`,
+`owner_passkey_revoked: bool`, `count: u8`, `additional_passkeys: [[u8;33]; 8]`. Zelfde
+rent-/eenvoud-afweging als destijds bij `PolicyAccount` (sectie 34): LazorKits eigen PDA
+per sleutel geeft O(1)-lookup en onbeperkt aantal sleutels, maar kost een aparte
+rent-betaling PER sleutel en - belangrijker - zou elke van de acht bestaande
+passkey-geverifieerde instructies een VARIABEL aantal extra accounts hebben gegeven i.p.v.
+precies één. Passkeys zijn fysieke apparaten, geen honderden-schaal probleem: 8 extra (9
+totaal met owner_passkey) is ruim voldoende, één account, één eenmalige rent-betaling.
+
+**Bewust GEEN rollen.** Elke geregistreerde passkey heeft gelijke, volledige zeggenschap -
+directe generalisatie van "één owner_passkey" naar "een van N geregistreerde passkeys",
+zonder een permissiematrix (welke rol mag `remove_passkey`? `hunt`? `add_allowed_program`?)
+als bijvangst te hoeven ontwerpen. Rollen/gelaagde privileges blijven bewust bij de
+sectie-26-roadmap, een aparte, grotere ontwerpvraag.
+
+**Recovery-interactie, exact zoals voorgesteld:** `add_passkey`/`remove_passkey` is de
+EERSTE verdedigingslinie (één apparaat kwijt, andere werken nog); de bestaande
+`backup_authority`-recovery-flow blijft het LAATSTE redmiddel (alle passkeys tegelijk
+kwijt). `finalize_recovery` wist nu bij een geslaagde recovery de VOLLEDIGE passkey-set
+(alle extra sleutels weg, `owner_passkey_revoked` terug naar `false`) - geen stale,
+mogelijk-gecompromitteerde extra sleutels overleven een recovery. Lockout-bescherming:
+`remove_passkey` blokkeert het verwijderen van de allerlaatste geldige sleutel
+(`owner_passkey` actief + `count` samen moeten na de verwijdering nog >= 1 blijven).
+`remove_passkey` kan `owner_passkey` zelf intrekken zodra er minstens één extra sleutel
+bestaat - hetzelfde apparaat-kwijt-scenario geldt namelijk ook voor het OORSPRONKELIJKE
+apparaat, vaak het meest gedragen/verliesbare. Beide nieuwe instructies checken
+`wallet.recovery_state.is_none()`, net als alle andere passkey-gated instructies -
+voorkomt dat de passkey-lijst wordt gewijzigd tijdens een lopend herstelverzoek.
+
+**Migratiepad: geen migratie-instructie nodig.** `wallet.owner_passkey` blijft ongewijzigd
+de primaire sleutel - `WalletAccount`'s layout wordt nooit aangeraakt. `PasskeysAccount` is
+puur additief en lui aangemaakt (`init_if_needed`, zelfde patroon als `PolicyAccount`).
+Bestaande devnet-wallets werken volledig ongewijzigd door totdat hun eigenaar zelf voor het
+eerst `add_passkey` aanroept.
+
+**Challenge-binding: zelfde patroon als add_allowed_program.** `add_passkey(new_passkey,
+client_data_json)` en `remove_passkey(target_passkey, client_data_json)` binden beide
+uitsluitend de 33-byte passkey-payload aan de challenge (domain `"add_passkey"` /
+`"remove_passkey"`), geverifieerd tegen EEN VAN de al geldige sleutels - nooit een
+ongeautoriseerde toevoeging. `add_passkey` valideert bovendien het prefix-byte van de
+nieuwe sleutel (`validate_passkey_prefix`, zelfde reden als bij `seed_key`/
+`new_owner_passkey` elders) en weigert duplicaten (`PasskeyAlreadyRegistered`).
+
+**Rust-kernrefactor: `verify_passkey_signature` gesplitst in drie lagen.**
+`verify_passkey_signature_core` doet alle precompile-/UV-/type-/challenge-verificatie
+ONAFHANKELIJK van welke sleutel toegestaan is, en retourneert de daadwerkelijk
+ondertekenende publieke sleutel. De bestaande `verify_passkey_signature` (nu een dunne
+wrapper om de core) blijft uitsluitend voor `init_wallet` - daar bestaat nog geen
+`WalletAccount`/`PasskeysAccount` om tegen te verifieren, de enige mogelijke sleutel is
+`seed_key` zelf. De nieuwe `verify_passkey_signature_multi` wordt door alle ANDERE
+acht instructies gebruikt (de zeven bestaande plus de twee nieuwe) en accepteert een
+handtekening van `owner_passkey` (tenzij ingetrokken) OF een van de sleutels in
+`PasskeysAccount.additional_passkeys`. `read_passkeys_account` leest het account
+tolerant (`None` als het nog nooit is aangemaakt = alleen `owner_passkey` geldig, geen
+foutcase) - cruciaal voor het zero-migratiepad.
+
+**Elke van de zeven bestaande passkey-geverifieerde instructies kreeg een `passkeys`-veld**
+(`UncheckedAccount` met een `seeds = [b"passkeys", wallet.key()], bump`-constraint - dit
+garandeert dat het gegeven account ALTIJD exact het `PasskeysAccount` van DEZE wallet is,
+nooit een ander account gesubstitueerd door een kwaadwillende/foutieve client, ook al hoeft
+het account zelf niet te bestaan). Volledige, met `grep`-bewijs gecontroleerde checklist
+van alle 8 call-sites (Rust `Accounts`-struct + client-TS-bestand) is met de gebruiker
+doorgenomen voordat er gecommit werd:
+
+| Instructie | Rust `passkeys`-veld | `verify_passkey_signature_multi` | Client-bestand |
+|---|---|---|---|
+| init_wallet | n.v.t. (bewust, single-key) | n.v.t. (bewust) | n.v.t. |
+| execute | ✓ | ✓ | execute.ts |
+| transfer_token | ✓ | ✓ | transferToken.ts |
+| add_allowed_program | ✓ | ✓ | policy.ts |
+| remove_allowed_program | ✓ | ✓ | policy.ts |
+| execute_advanced | ✓ | ✓ | executeAdvanced.ts |
+| hunt | ✓ | ✓ | hunt.ts |
+| cancel_recovery | ✓ | ✓ | recovery.ts |
+
+`finalize_recovery` viel BUITEN deze checklist (roept `verify_passkey_signature` nooit aan
+- permissionless, uitsluitend tijdslot-gated) maar kreeg wel een nieuw, optioneel
+`PasskeysAccount`-veld (Anchors ingebouwde `Option<Account<'info, T>>`-patroon, met het
+programma-ID zelf als client-side sentinel voor "bestaat niet") voor de wipe-bij-succes-
+logica. Was nooit in de client-testpagina verweven (bevestigd: 0 treffers), dus geen
+client-bestand om bij te werken.
+
+**Client:** nieuw `client/src/passkeys.ts` (`derivePasskeysPda`, `readPasskeysAccount`,
+`buildAddPasskeyTransaction`, `buildRemovePasskeyTransaction`) plus de zeven bestaande
+bestanden bijgewerkt om het nieuwe account door te geven aan hun instructie-opbouw - stuk
+voor stuk geverifieerd met `grep` (niet aangenomen).
+
+**12 nieuwe lokale tests** in `tests/passkeys.ts`: add/remove happy-path (incl.
+`init_if_needed`-creatie), een net toegevoegde/verwijderde sleutel heeft daadwerkelijk
+wel/geen zeggenschap (getest door met die sleutel zelf een ANDERE instructie -
+`add_allowed_program` - te ondertekenen, niet enkel dat `add_passkey`/`remove_passkey`
+zelf slaagt), duplicaat-/niet-geregistreerd-detectie, lockout-bescherming,
+`owner_passkey` zelf intrekken zodra een extra sleutel bestaat, `RecoveryAlreadyInProgress`
+op beide nieuwe instructies, en de volledige `finalize_recovery`-wipe (inclusief
+bevestiging dat een sleutel van vóór de recovery erna geen zeggenschap meer heeft).
+
+**Zijdelings ontdekt en structureel opgelost: de al langer bekende flaky
+recovery-timing-tests (sectie 34-37) bleken NIET aan een trage on-chain klok te liggen,**
+maar aan een lokale validator die nauwelijks nieuwe slots produceert tijdens pure
+inactiviteit - empirisch vastgesteld door de daadwerkelijke `initiatedAt`/`getBlockTime`-
+waarden te loggen: 11 seconden `sleep()` leverde slechts ~1 seconde on-chain
+klokvooruitgang op, ongeacht hoe ruim de marge werd gemaakt (ook +8s bleef falen). Een
+standalone probe-validator zonder de rest van de testsuite liet WEL een normale 1:1-
+verhouding zien, wat erop wijst dat slot-productie hier samenhangt met transactie-
+activiteit, niet puur met verstreken tijd. Nieuwe `advanceOnChainClockPast()`-helper in
+`webauthnTestHelper.ts` verstuurt actief kleine, echte transacties totdat de on-chain klok
+(via `getBlockTime`) de gewenste tijd daadwerkelijk gepasseerd is, i.p.v. blind te
+wachten - toegepast op zowel de bestaande `tests/recovery.ts`-tests als de nieuwe
+`finalize_recovery`-wipe-test. Resultaat: de volledige testsuite draait nu in 3-4 seconden
+(was 12-24s) en is voor het eerst deze sessie **structureel stabiel groen**, niet
+incidenteel geluk - bevestigd via meerdere herhaalde volledige runs.
+
+**Resultaat: 30/30 lokale tests groen** (18 bestaand + 12 nieuw), inclusief de tot nu toe
+altijd-flaky recovery-timing-tests. Gecommit lokaal, NOG NIET gepusht of gedeployed -
+devnet-deploy en een live-hardware-passkey-herbevestiging (zelfde niveau van bewijs als
+sectie 35/37) blijven een bewust aparte, losse vervolgstap.

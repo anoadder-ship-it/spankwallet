@@ -1005,3 +1005,33 @@ correct is - een refactor kan een reeds-verouderde waarde onbedoeld "bevriezen" 
 er een functionele testfout in dezelfde sessie optreedt (Fase C's eigen browsertest
 gebruikte toen alleen init_wallet/hunt/recovery, niet execute, dus de fout bleef onopgemerkt
 tot vandaag).
+
+## 31. hunt bewezen tegen een echt, extern devnet-token (Circle devnet-USDC)
+
+Laatste openstaande item uit het begin van deze sessie ("stap 1", zie sectie 30) - hunt
+werd tot nu toe altijd getest tegen een spam-token dat de eigen testflow zelf aanmaakte
+(setupSpamTokenAccount in hunt.ts). Functioneel maakt dit voor het programma geen verschil
+(SPL Token-instructies werken identiek ongeacht wie de mint aanmaakte), maar als sterker,
+overtuigender bewijs is nu ook getest tegen een ECHT, extern, bekend devnet-token: Circle's
+officiele devnet-USDC (mint 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU), verkregen via
+de gratis Circle-faucet (faucet.circle.com, tot 20 USDC/2u zonder account).
+
+Nieuwe teststap (client/index.html knop 6, client/src/main.ts's runStep6): stuurt 1 USDC
+vanuit de gewone gebruikerswallet naar de vault-PDA (simuleert een echte, ongevraagde
+ontvangst van buitenaf - het scenario waar hunt voor ontworpen is), roept dan hunt aan op
+dat echte token. Hergebruikt de bestaande, bewezen buildHuntTransaction() uit hunt.ts
+ongewijzigd - alleen de testopzet (welk token, van waar) is nieuw, niet de programmalogica.
+
+Bevestigd end-to-end op devnet met echte hardware-passkey: het USDC-token-account is
+aantoonbaar gesloten na de hunt-aanroep (rechtstreekse getAccountInfo-check op het account
+zelf, niet afhankelijk van eventuele RPC-propagatievertraging). Signature:
+2dzSpG9aS8BJAGLTpNtZw8sWJUQtXzpu6SnN3E1Mgkpx3B9w3WwGguC1Z8PqNd1sdkVb8oz7uvZ6fad2unU5ann1.
+
+De bekende "Incinerator-toename: 0 lamports"-melding trad ook hier weer op (zelfde
+RPC-propagatievertragingsartefact als eerder empirisch vastgesteld in sectie 17, niet een
+nieuwe bug) - de account-sluiting zelf is het sluitende, betrouwbare bewijs van correcte
+uitvoering, niet de directe balansquery.
+
+**Hiermee is de volledige testdekking uit "stap 1" van deze sessie afgerond:**
+init_wallet, execute/transfer_sol, en hunt (zowel tegen eigen als tegen extern-aangemaakte
+tokens) zijn nu allemaal end-to-end bewezen met echte hardware-passkeys op devnet.

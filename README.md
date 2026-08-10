@@ -15,10 +15,11 @@ Non-custodial Solana wallet met **passkey-authenticatie** (WebAuthn / secp256r1)
 | Onderdeel                          | Status                                                          |
 |-------------------------------------|-------------------------------------------------------------------|
 | init_wallet                        | Bewezen end-to-end (echte hardware-passkey + Phantom, devnet)  |
-| execute (= transfer_sol)           | Herbouwd als gesloten, getypeerde actie; live-browsertest nog te herhalen na RPC-rustpauze |
-| hunt                                | Bewezen, incl. 50/50-rentsplitsing                              |
+| execute (= transfer_sol)           | Bewezen end-to-end op devnet                                    |
+| transfer_token                     | Bewezen end-to-end op devnet (echte devnet-USDC)                |
+| hunt                                | Bewezen, incl. 50/50-rentsplitsing, ook tegen extern devnet-USDC |
 | Recovery-flow                       | Volledig bewezen (initiate / cancel / finalize)                |
-| Browser-testpagina                  | Werkend (Vite + Wallet Standard)                                |
+| Browser-testpagina                  | Werkend (Vite + Wallet Standard), 7 teststappen                 |
 | Open CPI / arbitrary instructions   | Bewust verwijderd (zie STATUS.md sectie 25-26)                  |
 
 **Program ID (devnet):** ERAEjxMgxserGuj8hc6v7LVy6ZaXaVxwDtXFLbsxj8wY
@@ -46,9 +47,10 @@ pub fn execute(
 - Rent-exempt-drempelbewaking (de vault kan nooit onder zijn eigen minimum zakken)
 - Arbitrary CPI bestaat structureel niet meer voor deze instructie
 
-Verdere acties (bijv. transfer_token) horen als aparte getypeerde instructies met een eigen
-challenge-domain te komen - nooit als generieke CPI. Zie STATUS.md sectie 25-26 voor de
-volledige motivatie en de roadmap (allowlists, spend limits, risk tiers).
+transfer_token volgt exact hetzelfde principe: een gesloten, getypeerde actie met een eigen
+challenge-domain, zonder generieke CPI, werkend voor elke SPL-token (zBTC, BTCSOL, USDC, etc.)
+zonder per-munt-configuratie. Zie STATUS.md sectie 25-26 voor de volledige motivatie en de
+roadmap (allowlists, spend limits, risk tiers).
 
 ## Instructies
 
@@ -56,6 +58,7 @@ volledige motivatie en de roadmap (allowlists, spend limits, risk tiers).
 |----------------------|----------------------------|------------------------------------------------|
 | init_wallet          | Passkey (WebAuthn)         | Wallet + Vault-PDA aanmaken                   |
 | execute              | Passkey                    | SOL-transfer (getypeerd)                      |
+| transfer_token       | Passkey                    | SPL-token-transfer (getypeerd, munt-onafhankelijk) |
 | hunt                 | Passkey                    | Spam-token burnen + account sluiten (50/50 rent) |
 | initiate_recovery    | Backup authority            | Recovery starten                              |
 | cancel_recovery      | Passkey (owner-veto)        | Recovery annuleren                            |
@@ -138,9 +141,8 @@ RPC-provider (Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke end
 
 ## Roadmap (korte samenvatting)
 
-- Fase 1: kerninstructies + echte passkey-flow - grotendeels afgerond
-  - execute herbouwd als gesloten transfer_sol
-  - transfer_token als volgende getypeerde actie
+- Fase 1: kerninstructies + echte passkey-flow - afgerond
+  - execute (transfer_sol) en transfer_token beide bewezen als gesloten, getypeerde acties
   - Optionele policy-lagen (spend limits, recipient-allowlist, risk tiers) - zie STATUS.md sectie 26
 - Fase 2: fee-gated PDA-inbox
 - Fase 3: USB 2-of-2 / post-quantum (later)

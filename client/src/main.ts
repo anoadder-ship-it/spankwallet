@@ -25,6 +25,12 @@ import {
   buildRemoveAllowedProgramTransaction,
 } from "./policy";
 import { buildExecuteAdvancedTransaction, RemainingAccountSpec } from "./executeAdvanced";
+import {
+  derivePasskeysPda,
+  readPasskeysAccount,
+  buildAddPasskeyTransaction,
+  buildRemovePasskeyTransaction,
+} from "./passkeys";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -52,6 +58,11 @@ let lastCredentialId: Uint8Array | null = null;
 let lastPdas: InitWalletPdas | null = null;
 let lastWallet: ConnectedWallet | null = null;
 let lastBackupAuthority: Keypair | null = null;
+// PASSKEY 2: een tweede, onafhankelijke passkey voor het multi-passkey-model
+// (stap 11-15) - los van lastPasskeyPublicKey/lastCredentialId (PASSKEY 1,
+// de oorspronkelijke owner_passkey uit stap 1).
+let lastPasskeyPublicKey2: Uint8Array | null = null;
+let lastCredentialId2: Uint8Array | null = null;
 
 const connection = new Connection("https://devnet.helius-rpc.com/?api-key=f39fc413-6730-4848-a60f-a6685a6f04d3", "confirmed");
 
@@ -183,6 +194,7 @@ async function runStep2(): Promise<void> {
     (document.getElementById("step7-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step5-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step8-btn") as HTMLButtonElement).disabled = false;
+    (document.getElementById("step11-btn") as HTMLButtonElement).disabled = false;
   } catch (err) {
     log("");
     log("FOUT:");
@@ -1028,6 +1040,349 @@ async function runStep10(): Promise<void> {
   }
 }
 
+async function runStep11(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("Stap 11: TWEEDE, onafhankelijke passkey aanmaken (multi-passkey-model,");
+  log("stap 11-15). Dit simuleert een tweede apparaat - de wallet kan straks");
+  log("meerdere, gelijkwaardige sleutels tegelijk geregistreerd hebben. Je mag");
+  log("dezelfde hardware-sleutel/authenticator gebruiken als bij stap 1, of een");
+  log("andere als je die hebt - het gaat om twee cryptografisch onafhankelijke");
+  log("passkeys, niet per se twee fysieke apparaten.");
+  log("");
+  try {
+    log("[PASSKEY 2, NIEUW] navigator.credentials.create() wordt aangeroepen -");
+    log("keur de biometrie-/PIN-prompt goed voor deze NIEUWE, TWEEDE passkey.");
+    const result = await createSpankWalletPasskey(
+      "SpankWallet (test) - tweede sleutel",
+      window.location.hostname,
+      "spankwallet-test-user-2"
+    );
+    lastPasskeyPublicKey2 = result.compressedPublicKey;
+    lastCredentialId2 = result.credentialId;
+
+    log("");
+    log("SUCCES.");
+    log("");
+    log("Gecomprimeerde publieke sleutel van PASSKEY 2 (33 bytes):");
+    log(bytesToHex(result.compressedPublicKey));
+    log("");
+    log("PASSKEY 2 bestaat nu, maar staat nog NERGENS geregistreerd op de");
+    log("wallet - dat gebeurt in stap 12 via add_passkey.");
+    log("");
+    log("Klaar voor stap 12.");
+
+    (document.getElementById("step12-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep12(): Promise<void> {
+  if (
+    !lastPasskeyPublicKey ||
+    !lastCredentialId ||
+    !lastPdas ||
+    !lastWallet ||
+    !lastPasskeyPublicKey2 ||
+    !lastCredentialId2
+  ) {
+    log("Voer eerst stap 1, 2 en 11 uit.");
+    return;
+  }
+  log("Stap 12: add_passkey - PASSKEY 2 registreren op de wallet, ondertekend");
+  log("door PASSKEY 1 (de oorspronkelijke owner_passkey uit stap 1) - elke AL");
+  log("geldige sleutel mag een nieuwe sleutel toevoegen.");
+  log("");
+
+  try {
+    log("[PASSKEY 1, OORSPRONKELIJK] navigator.credentials.get() wordt");
+    log("aangeroepen - keur de biometrie-/PIN-prompt goed voor de EERSTE,");
+    log("oorspronkelijke passkey (niet de zojuist aangemaakte tweede!).");
+    const { transaction, passkeysPda } = await buildAddPasskeyTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPasskeyPublicKey2,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+    log("passkeys PDA: " + passkeysPda.toBase58());
+    log("");
+
+    log("Eigen simulatie (test verify_passkey_signature_multi + de");
+    log("init_if_needed-creatie van het passkeys-account)...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    log("Passkeys-account teruglezen (ruwe account-bytes) om te bevestigen dat");
+    log("PASSKEY 2 daadwerkelijk geregistreerd staat...");
+    const passkeys = await readPasskeysAccount(connection, passkeysPda);
+    if (!passkeys) {
+      log("FOUT: passkeys-account bestaat niet na bevestigde add_passkey (onverwacht).");
+      return;
+    }
+    log("count: " + passkeys.count);
+    log("owner_passkey_revoked: " + passkeys.ownerPasskeyRevoked);
+    log("additional_passkeys[0]: " + bytesToHex(passkeys.additionalPasskeys[0]));
+    if (
+      passkeys.count !== 1 ||
+      bytesToHex(passkeys.additionalPasskeys[0]) !== bytesToHex(lastPasskeyPublicKey2)
+    ) {
+      log("FOUT: PASSKEY 2 staat niet correct in het teruggelezen passkeys-account.");
+      return;
+    }
+    log("");
+    log("SUCCES - add_passkey heeft het passkeys-account daadwerkelijk aangemaakt");
+    log("(init_if_needed) en PASSKEY 2 geregistreerd, ondertekend door PASSKEY 1.");
+    log("");
+    log("Klaar voor stap 13 - dat bewijst pas dat PASSKEY 2 ook daadwerkelijk");
+    log("ZELFSTANDIG zeggenschap heeft, niet enkel dat de registratie zelf slaagde.");
+
+    (document.getElementById("step13-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep13(): Promise<void> {
+  if (!lastPdas || !lastWallet || !lastPasskeyPublicKey2 || !lastCredentialId2) {
+    log("Voer eerst stap 1, 2, 11 en 12 uit.");
+    return;
+  }
+  log("Stap 13: HET EIGENLIJKE BEWIJS - PASSKEY 2 ondertekent ZELFSTANDIG een");
+  log("HELE ANDERE instructie (add_allowed_program), zonder PASSKEY 1 erbij te");
+  log("betrekken. Als dit slaagt, heeft PASSKEY 2 daadwerkelijk volledige,");
+  log("onafhankelijke zeggenschap over de wallet - niet slechts een");
+  log("geregistreerde, maar verder krachteloze vermelding.");
+  log("");
+
+  try {
+    log("[PASSKEY 2] navigator.credentials.get() wordt aangeroepen - keur de");
+    log("biometrie-/PIN-prompt goed voor de TWEEDE passkey (niet de eerste!).");
+    const { transaction, policyPda } = await buildAddAllowedProgramTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      TOKEN_PROGRAM_ID,
+      lastPasskeyPublicKey2,
+      lastCredentialId2,
+      window.location.hostname
+    );
+    log("policy PDA: " + policyPda.toBase58());
+    log("");
+
+    log("Eigen simulatie...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    const policy = await readPolicyAccount(connection, policyPda);
+    if (!policy || !policy.allowedPrograms.some((p) => p.equals(TOKEN_PROGRAM_ID))) {
+      log("FOUT: TOKEN_PROGRAM_ID staat niet in de teruggelezen allowlist (onverwacht).");
+      return;
+    }
+    log("count: " + policy.count);
+    log("allowed_programs: " + policy.allowedPrograms.map((p) => p.toBase58()).join(", "));
+    log("");
+    log("SUCCES - PASSKEY 2 heeft ZELFSTANDIG add_allowed_program ondertekend en");
+    log("uitgevoerd, zonder PASSKEY 1 erbij te betrekken. Dit is het daadwerkelijke");
+    log("bewijs dat het multi-passkey-model werkt: twee onafhankelijke sleutels");
+    log("met gelijke, volledige zeggenschap over dezelfde wallet.");
+    log("");
+    log("Klaar voor stap 14.");
+
+    (document.getElementById("step14-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep14(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastPdas || !lastWallet || !lastPasskeyPublicKey2 || !lastCredentialId2) {
+    log("Voer eerst stap 1, 2, 11, 12 en 13 uit.");
+    return;
+  }
+  log("Stap 14: remove_passkey - PASSKEY 1 (de oorspronkelijke owner_passkey)");
+  log("intrekken, ondertekend door PASSKEY 2. Mag alleen omdat PASSKEY 2 er nog");
+  log("is als resterende geldige sleutel - dit bewijst zowel dat een sleutel");
+  log("zichzelf kan opvolgen als beheerder, als dat de wallet daarna nog");
+  log("bereikbaar blijft (via PASSKEY 2).");
+  log("");
+
+  try {
+    log("[PASSKEY 2] navigator.credentials.get() wordt aangeroepen - keur de");
+    log("biometrie-/PIN-prompt goed voor de TWEEDE passkey.");
+    const { transaction } = await buildRemovePasskeyTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPasskeyPublicKey,
+      lastPasskeyPublicKey2,
+      lastCredentialId2,
+      window.location.hostname
+    );
+
+    log("Eigen simulatie...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    const passkeysPda = derivePasskeysPda(lastPdas.walletPda);
+    const passkeys = await readPasskeysAccount(connection, passkeysPda);
+    if (!passkeys || !passkeys.ownerPasskeyRevoked) {
+      log("FOUT: owner_passkey_revoked staat niet op true (onverwacht).");
+      return;
+    }
+    log("owner_passkey_revoked: " + passkeys.ownerPasskeyRevoked);
+    log("count (extra passkeys): " + passkeys.count);
+    log("");
+    log("SUCCES - PASSKEY 1 is ingetrokken. Alleen PASSKEY 2 is nu nog geldig.");
+    log("");
+    log("Klaar voor stap 15 - nu bewijzen we de lockout-bescherming: PASSKEY 2");
+    log("verwijderen moet NU geweigerd worden (het zou de allerlaatste geldige");
+    log("sleutel zijn).");
+
+    (document.getElementById("step15-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep15(): Promise<void> {
+  if (!lastPdas || !lastWallet || !lastPasskeyPublicKey2 || !lastCredentialId2) {
+    log("Voer eerst stap 1, 2 en 11-14 uit.");
+    return;
+  }
+  log("Stap 15: LOCKOUT-BESCHERMING - proberen PASSKEY 2 te verwijderen terwijl");
+  log("het de ENIGE nog geldige sleutel is. Dit MOET geweigerd worden");
+  log("(CannotRemoveLastPasskey) - anders zou de wallet permanent onbereikbaar");
+  log("worden. Alleen simuleren (niet versturen) - we willen de weigering");
+  log("aantonen, geen fee betalen voor een transactie die toch niets gaat doen.");
+  log("");
+
+  try {
+    log("[PASSKEY 2] navigator.credentials.get() wordt aangeroepen - keur de");
+    log("biometrie-/PIN-prompt goed (de handtekening zelf is cryptografisch");
+    log("geldig, de on-chain lockout-check moet 'm alsnog weigeren).");
+    const { transaction } = await buildRemovePasskeyTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPasskeyPublicKey2,
+      lastPasskeyPublicKey2,
+      lastCredentialId2,
+      window.location.hostname
+    );
+
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+
+    if (!simResult.value.err) {
+      log("FOUT: het verwijderen van de allerlaatste geldige passkey had moeten");
+      log("falen, maar de simulatie slaagde (onverwacht - de lockout-bescherming");
+      log("werkt niet).");
+      return;
+    }
+
+    log("SUCCES - de lockout-bescherming werkt: PASSKEY 2 (de laatste geldige");
+    log("sleutel) kon NIET verwijderd worden.");
+    log("");
+    log("Het volledige multi-passkey-model is nu end-to-end bewezen op devnet:");
+    log("een tweede sleutel toevoegen (stap 11-12), zelfstandige zeggenschap van");
+    log("die sleutel over een HELE ANDERE instructie (stap 13), de oorspronkelijke");
+    log("sleutel intrekken zodra een tweede bestaat (stap 14), en de");
+    log("lockout-bescherming die voorkomt dat de wallet permanent onbereikbaar");
+    log("wordt (stap 15).");
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
 document.getElementById("start-btn")!.addEventListener("click", () => {
   document.getElementById("output")!.textContent = "";
   runStep1();
@@ -1062,4 +1417,19 @@ document.getElementById("step9-btn")!.addEventListener("click", () => {
 });
 document.getElementById("step10-btn")!.addEventListener("click", () => {
   runStep10();
+});
+document.getElementById("step11-btn")!.addEventListener("click", () => {
+  runStep11();
+});
+document.getElementById("step12-btn")!.addEventListener("click", () => {
+  runStep12();
+});
+document.getElementById("step13-btn")!.addEventListener("click", () => {
+  runStep13();
+});
+document.getElementById("step14-btn")!.addEventListener("click", () => {
+  runStep14();
+});
+document.getElementById("step15-btn")!.addEventListener("click", () => {
+  runStep15();
 });

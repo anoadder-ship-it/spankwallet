@@ -38,6 +38,20 @@
       dat de CPI daarna weer geweigerd wordt.
     </p>
     <p>
+      Stap 11-15: het multi-passkey-model. Een wallet kan meerdere,
+      gelijkwaardige passkeys tegelijk geregistreerd hebben (PASSKEY 1 =
+      origineel uit stap 1, PASSKEY 2 = nieuw). Stap 11 maakt PASSKEY 2 aan.
+      Stap 12 registreert PASSKEY 2 (add_passkey, ondertekend door PASSKEY 1).
+      Stap 13 is het eigenlijke bewijs: PASSKEY 2 ondertekent ZELFSTANDIG een
+      hele andere instructie (add_allowed_program), zonder PASSKEY 1. Stap 14
+      trekt PASSKEY 1 in (remove_passkey, ondertekend door PASSKEY 2). Stap
+      15 bewijst de lockout-bescherming: PASSKEY 2 verwijderen terwijl het de
+      enige geldige sleutel is moet geweigerd worden. Elke stap-log geeft
+      expliciet aan welke passkey ([PASSKEY 1] of [PASSKEY 2]) de prompt
+      hoort te zijn - er komen meerdere navigator.credentials.get()-aanroepen
+      na elkaar voor.
+    </p>
+    <p>
       Werkt alleen als je browser een platform-authenticator of
       hardware-security-key heeft, en een Wallet Standard-conforme
       wallet-extensie geinstalleerd is. Vereist een secure context -
@@ -53,6 +67,11 @@
     <button id="step8-btn" disabled>8. add_allowed_program: System Program toevoegen</button>
     <button id="step9-btn" disabled>9. execute_advanced: geweigerd + echte CPI</button>
     <button id="step10-btn" disabled>10. remove_allowed_program: verwijderen + herbevestig weigering</button>
+    <button id="step11-btn" disabled>11. PASSKEY 2 aanmaken (tweede, onafhankelijke passkey)</button>
+    <button id="step12-btn" disabled>12. add_passkey: PASSKEY 2 registreren (ondertekend door PASSKEY 1)</button>
+    <button id="step13-btn" disabled>13. Bewijs: PASSKEY 2 ondertekent zelfstandig add_allowed_program</button>
+    <button id="step14-btn" disabled>14. remove_passkey: PASSKEY 1 intrekken (ondertekend door PASSKEY 2)</button>
+    <button id="step15-btn" disabled>15. Lockout-bescherming: PASSKEY 2 verwijderen moet falen</button>
     <div id="output"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

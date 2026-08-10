@@ -1967,11 +1967,23 @@ pub struct ExecuteAdvancedViaSession<'info> {
     )]
     pub vault: Account<'info, VaultAccount>,
 
+    /// CHECK: bewust UncheckedAccount i.p.v. Account<PolicyAccount>. Anchors
+    /// macro deserialiseert elk typed Account<T>-veld ALTIJD als onderdeel
+    /// van try_accounts(), voordat de instructie-body ooit draait - een
+    /// require!() eerder in de body-tekst plaatsen verandert daar niets aan
+    /// (empirisch bevestigd op devnet: een sessie zonder can_execute_advanced
+    /// gaf AccountNotInitialized i.p.v. het bedoelde
+    /// SessionInstructionNotAllowed, puur omdat PolicyAccount nog niet
+    /// bestond - de autorisatie-check kwam nooit aan bod). Door dit
+    /// UncheckedAccount te maken en hieronder tolerant te lezen
+    /// (read_policy_account, "bestaat niet" = lege allowlist, geen foutcase)
+    /// draaien de autorisatie-checks in de body ALTIJD eerst, ongeacht of er
+    /// uberhaupt een PolicyAccount bestaat.
     #[account(
         seeds = [b"policy", wallet.key().as_ref()],
-        bump = policy.bump,
+        bump,
     )]
-    pub policy: Account<'info, PolicyAccount>,
+    pub policy: UncheckedAccount<'info>,
 
     /// CHECK: het CPI-doelprogramma, zelfde principe als execute_advanced -
     /// moet expliciet op ZOWEL de sessie's eigen sub-scope ALS de live
@@ -2029,10 +2041,18 @@ pub fn execute_advanced_via_session<'info>(
         .any(|p| *p == cpi_program_id);
     require!(session_allows, SpankWalletError::SessionProgramNotAllowed);
 
-    let policy = &ctx.accounts.policy;
-    let policy_allows = policy.allowed_programs[..policy.count as usize]
-        .iter()
-        .any(|p| *p == cpi_program_id);
+    // Tolerant: geen PolicyAccount = een lege allowlist, geen foutcase - de
+    // autorisatie-checks hierboven zijn nu altijd al gepasseerd voordat dit
+    // ooit bereikt wordt (zie de toelichting bij het policy-veld hierboven).
+    let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
+    let policy_allows = policy
+        .as_ref()
+        .map(|p| {
+            p.allowed_programs[..p.count as usize]
+                .iter()
+                .any(|a| *a == cpi_program_id)
+        })
+        .unwrap_or(false);
     require!(policy_allows, SpankWalletError::ProgramNotAllowed);
 
     let vault_key = ctx.accounts.vault.key();

@@ -639,6 +639,62 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
   });
 
+  it("execute_advanced_via_session faalt met SessionInstructionNotAllowed, NIET met AccountNotInitialized, als er nog geen PolicyAccount bestaat (regressietest)", async () => {
+    // Gevonden tijdens live devnet-testen (STATUS.md): policy stond ooit als
+    // Account<PolicyAccount> (typed) - Anchor deserialiseert zo'n veld altijd
+    // in try_accounts(), VOORDAT de instructie-body draait, dus de
+    // autorisatie-check (can_execute_advanced) kwam nooit aan bod als
+    // PolicyAccount nog niet bestond: elke aanroep faalde met
+    // AccountNotInitialized, ongeacht sessie-scope. Fix: policy is nu
+    // UncheckedAccount, tolerant gelezen NA de autorisatie-checks. Dit test
+    // expliciet de FOUTCODE, niet enkel "er was een fout" - anders vangt
+    // geen enkele test een regressie van precies dit probleem.
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    // Bewust GEEN callAddAllowedProgram - policy bestaat nog niet.
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    // can_execute_advanced = false.
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      true,
+      false,
+      false
+    );
+
+    let errString = "";
+    try {
+      await program.methods
+        .executeAdvancedViaSession(Buffer.from([]))
+        .accounts({
+          wallet: walletPda,
+          vault: vaultPda,
+          policy: policyPda,
+          cpiProgram: SystemProgram.programId,
+          session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+          sessionKey: sessionKeypair.publicKey,
+        })
+        .signers([sessionKeypair])
+        .rpc();
+    } catch (err) {
+      errString = String(err);
+    }
+    assert.include(
+      errString,
+      "SessionInstructionNotAllowed",
+      "verwachtte specifiek SessionInstructionNotAllowed, kreeg: " + errString
+    );
+    assert.notInclude(
+      errString,
+      "AccountNotInitialized",
+      "de autorisatie-check had moeten falen VOORDAT het ontbrekende PolicyAccount ooit relevant werd"
+    );
+  });
+
   it("execute_advanced_via_session voert een echte CPI uit (System Program: Assign) als de sessie correct gescoped is", async () => {
     const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
     await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);

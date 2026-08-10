@@ -1588,9 +1588,12 @@ async function runStep18(): Promise<void> {
   log("Stap 18: NEGATIEF scope-bewijs - deze sessie is ALLEEN gescoped voor execute");
   log("(stap 16), niet voor execute_advanced. Een poging tot");
   log("execute_advanced_via_session moet geweigerd worden met");
-  log("SessionInstructionNotAllowed, ongeacht of het doelprogramma verder geldig");
-  log("zou zijn. Alleen simuleren (niet versturen) - we willen de weigering");
-  log("aantonen, geen fee betalen voor een transactie die toch niets gaat doen.");
+  log("SessionInstructionNotAllowed - en dat MOET de eerst gecontroleerde reden");
+  log("zijn, zelfs als er nog geen PolicyAccount voor deze wallet bestaat (dat");
+  log("kan zonder stap 8 te draaien): autorisatie hoort altijd voor te gaan op de");
+  log("vraag of iets anders uberhaupt bestaat. Alleen simuleren (niet versturen) -");
+  log("we willen de weigering aantonen, geen fee betalen voor een transactie die");
+  log("toch niets gaat doen.");
   log("");
 
   try {
@@ -1625,9 +1628,16 @@ async function runStep18(): Promise<void> {
       log("niet), maar de simulatie slaagde (onverwacht).");
       return;
     }
+    const logsText = (simResult.value.logs ?? []).join("\n");
+    if (!logsText.includes("SessionInstructionNotAllowed")) {
+      log("FOUT: de simulatie faalde wel, maar NIET met SessionInstructionNotAllowed -");
+      log("dit bewijst niet wat we willen bewijzen. Zie de fout hierboven.");
+      return;
+    }
     log("SUCCES - de scope-beperking werkt: deze sessie kon GEEN execute_advanced");
     log("aanroepen, precies zoals bij add_session_key ingesteld");
-    log("(can_execute_advanced=false).");
+    log("(can_execute_advanced=false) - bevestigd via de expliciete");
+    log("SessionInstructionNotAllowed-foutmelding hierboven.");
     log("");
     log("Klaar voor stap 19.");
 

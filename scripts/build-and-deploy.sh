@@ -15,6 +15,13 @@
 #   3. Cargo's build-cache detecteert een --arch-wijziging niet altijd als
 #      reden voor een rebuild. Bij twijfel: `rm -rf target` eerst.
 #
+# UITSLUITEND VOOR DE LOKALE VALIDATOR (127.0.0.1). Sinds STATUS.md sectie 42
+# is de upgrade-authority van het echte devnet-programma een Squads V4-
+# multisig (2-of-3, 72u-timelock), geen lokale sleutel meer - dit script's
+# rechtstreekse `solana program deploy` zou daar sowieso op falen, en moet
+# NOOIT tegen devnet/mainnet aangeroepen worden. Zie README.md's
+# "Deployen naar devnet"-sectie voor het huidige, multisig-gebaseerde proces.
+#
 # Gebruik:
 #   ./scripts/build-and-deploy.sh          # normale build + deploy
 #   ./scripts/build-and-deploy.sh --clean  # met rm -rf target eerst (bij twijfel)

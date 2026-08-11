@@ -149,36 +149,52 @@ publiek bereikbaar RPC-endpoint, nooit via loopback. Voor elke test die een echt
 wallet-extensie gebruikt, moet het programma dus op devnet staan (zie STATUS.md sectie 13
 voor de volledige diagnose van dit probleem).
 
+**De upgrade-authority is sinds STATUS.md sectie 42 een Squads V4-multisig (2-of-3, 72u-
+timelock), niet meer een enkele lokale sleutel.** Een directe
+`solana program deploy --keypair ~/.config/solana/id.json` op `9ma6...` FAALT nu terecht -
+die sleutel is geen authority meer. Een upgrade van het echte devnet-programma verloopt nu
+in twee delen:
+
+1. **Buffer voorbereiden (lokaal, geen multisig nodig):**
+   ```bash
+   solana program write-buffer target/deploy/spankwallet.so \
+     --keypair ~/.config/solana/id.json \
+     --url https://api.devnet.solana.com
+   # noteer het geretourneerde buffer-adres, dan:
+   solana program set-buffer-authority <buffer-adres> \
+     --new-buffer-authority 89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw \
+     --keypair ~/.config/solana/id.json \
+     --url https://api.devnet.solana.com
+   ```
+2. **Upgrade voorstellen/goedkeuren/uitvoeren via de multisig** - op `app.squads.so`
+   (NIET `devnet.squads.so`, dat is het legacy V3-domein), met devnet geselecteerd in
+   zowel de wallet-extensie als de Squads-UI zelf. Twee van de drie leden (telefoon,
+   hoofd-pc, Windows-pc) moeten goedkeuren, en de 72u-timelock moet verstrijken voordat
+   uitvoering mogelijk is. Zie STATUS.md sectie 41-42 voor de volledige achtergrond,
+   inclusief een aantal reeel tegengekomen valkuilen (SDK-foutvertaalbugs,
+   ProgramData-headroom-tekort, RPC-timing-races) die de moeite waard zijn om te kennen
+   voordat je dit voor het eerst zelf doet.
+
+Controleer de huidige authority altijd met:
 ```bash
-solana program deploy target/deploy/spankwallet.so \
-  --program-id 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9 \
-  --keypair ~/.config/solana/id.json \
-  --url https://api.devnet.solana.com
+solana program show 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9 --url https://api.devnet.solana.com
 ```
 
-Gebruik voor een upgrade ALTIJD het vaste, hierboven genoemde programma-ID direct als
-`--program-id`, NOOIT het pad naar `target/deploy/spankwallet-keypair.json` - dat
-keypair-bestand is een lokaal, wegwerpbaar build-artefact (gitignored) dat op elk moment kan
-afwijken van het daadwerkelijk gedeployde adres (bijv. na een `anchor keys sync`-misser of een
-schone `target/`-rebuild). Zie STATUS.md voor de volledige lijst bekende deploy-valkuilen
-(verkeerde signer uit een gedeelde solana-config, `anchor keys sync` dat per ongeluk een
-nieuw programma-ID genereert, `anchor build` dat de `--arch v3`-binary overschrijft) en het
-altijd-eerst-`anchor build`-dan-`cargo-build-sbf --arch v3`-proces.
+Voor een upgrade ALTIJD het vaste programma-ID direct als `--program-id`/doel gebruiken,
+NOOIT het pad naar `target/deploy/spankwallet-keypair.json` - dat keypair-bestand is een
+lokaal, wegwerpbaar build-artefact (gitignored) dat op elk moment kan afwijken van het
+daadwerkelijk gedeployde adres. Zie STATUS.md voor de volledige lijst bekende
+deploy-valkuilen (verkeerde signer uit een gedeelde solana-config, `anchor keys sync` dat
+per ongeluk een nieuw programma-ID genereert, `anchor build` dat de `--arch v3`-binary
+overschrijft) en het altijd-eerst-`anchor build`-dan-`cargo-build-sbf --arch v3`-proces.
 
 Rate-limiting: api.devnet.solana.com heeft een officieel, strikt rate-limit (100
 verzoeken/10s per IP). Bij intensief testen op een dag raak je dat onvermijdelijk. Een
-werkend, gratis alternatief zonder aanmelding:
-
-```bash
-solana program deploy target/deploy/spankwallet.so \
-  --program-id 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9 \
-  --keypair ~/.config/solana/id.json \
-  --url https://solana-devnet.api.onfinality.io/public
-```
-
-client/src/main.ts's Connection moet naar hetzelfde endpoint wijzen als waar je op
-deployt. Bij structureel intensiever testen: overweeg een gratis account bij een dedicated
-RPC-provider (Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke endpoints.
+werkend, gratis alternatief zonder aanmelding: `https://solana-devnet.api.onfinality.io/public`
+(gebruik hetzelfde endpoint voor zowel de `--url`-vlaggen hierboven als client/src/main.ts's
+Connection). Bij structureel intensiever testen: overweeg een gratis account bij een
+dedicated RPC-provider (Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke
+endpoints.
 
 ## Veiligheidsprincipes
 

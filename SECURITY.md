@@ -37,5 +37,8 @@ en zo snel mogelijk bekeken. Zie `STATUS.md` voor context over reeds bekende en
 opgeloste beveiligingsoverwegingen, met name secties 21-22 (de grondige security-doorloop),
 25-26 (de `execute`-herziening naar gesloten, getypeerde acties), 36-37 (WebAuthn-hardening:
 User Verification-afdwinging en clientDataJSON-type-validatie), 38-39 (het multi-passkey-
-model en zijn lockout-bescherming), en 40 (session keys: hun scope-/expiry-beperkingen en
-een gevonden-en-gefixte autorisatie-ordeningsbug in `execute_advanced_via_session`).
+model en zijn lockout-bescherming), 40 (session keys: hun scope-/expiry-beperkingen en
+een gevonden-en-gefixte autorisatie-ordeningsbug in `execute_advanced_via_session`), en
+41-42 (de programma-upgrade-authority: van een enkele sleutel naar een 2-of-3 Squads-
+multisig met 72u-timelock, inclusief een devnet-generale-repetitie op een volledig los
+wegwerpprogramma voordat de echte migratie werd uitgevoerd).

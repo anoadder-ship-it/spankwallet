@@ -2115,3 +2115,58 @@ persoon/sleutel zijn - twee losse acties, geen beperking op wie welke actie mag
 combineren) - signature `4297FamyaPonzt5wxMbVYCMVpdExhmbT7p94rCXQMLuYmX61rpmj2R9rCkPHR1ZGWFobjTJiV7tMSdjCoUYognGw`,
 bevestigd via directe terugleeslezing: `approved: [3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3]`,
 status nog `Active` (wacht op de tweede van de drie leden voor de drempel).
+
+**Fase 6: het opgegeven Windows-pc-adres bleek nooit echt bestaan te hebben - multisig +
+wegwerpprogramma opnieuw opgezet, plus een tweede timing-bug gevonden.** Bij het
+exporteren van de private key voor het Windows-pc-lid (`AHy1bU6pMv4NQ2H8zivtW3AFvzaXY836yx2BaTyJfcwG`)
+bleek de teruggerekende publieke sleutel niet overeen te komen (niet aangenomen - expliciet
+gecontroleerd door de private key te decoderen en de publieke sleutel ervan te vergelijken
+vóórdat hij ergens gebruikt werd). Navraag bij de gebruiker: Phantom op de Windows-pc had
+altijd maar een enkel, ander account gehad (`2jDzaP3FbW5583hb4FeGZVU9MYseqBeFHwxycjzcvT7Q`) -
+het eerder opgegeven adres bestond nooit als een echte, benaderbare wallet.
+
+Omdat de allereerste 2-of-3-multisig (`DELWtaR7...`) dit onbereikbare adres al als lid
+had vastgelegd bij aanmaak, en de upgrade-authority van het (eerste) wegwerpprogramma
+al naar DIE multisig's vault was overgedragen, koos de gebruiker er expliciet voor
+(sneller/betrouwbaarder dan een config-transactie op de bestaande multisig) om opnieuw te
+beginnen: een nieuwe multisig aanmaken met het gecorrigeerde adres, i.p.v. het foutieve lid
+te vervangen via nog een aparte propose/approve/execute-cyclus.
+
+Gedaan:
+- Nieuwe multisig aangemaakt (zelfde script, gecorrigeerde ledenlijst): PDA
+  `2twpc8sYxYBUwArQ2D6cbFvkufTdK7iRUfaYycUJ58YA`, vault `5nvYWhBRmN9TNru37mqQAX6dPJ7qyVbGQdEDyreUxdwt`,
+  opnieuw 2-of-3/300s, on-chain teruggelezen ter bevestiging.
+- Vastgesteld dat de upgrade-authority van het EERSTE wegwerpprogramma niet meer
+  rechtstreeks over te dragen was (zat al achter de oude vault, alleen bereikbaar via DIE
+  multisig's eigen 2-of-3-flow - een nieuwe propose/approve/execute-cyclus enkel om de
+  authority te verplaatsen). In plaats daarvan sneller en zonder afhankelijkheid van de
+  oude, verlaten multisig: een TWEEDE, vers wegwerpprogramma gedeployed
+  (`BndKWeeteD8pADsssZaDhkhoSEQQzTJT149S2zFncsc4`, zelfde triviale bron, eerst de
+  ORIGINELE v1-boodschap opnieuw gedeployed zodat de latere upgrade weer een
+  daadwerkelijk waarneembaar verschil laat zien), waarvan de upgrade-authority meteen
+  rechtstreeks (met de eigen, nog wel beschikbare lokale sleutel) naar de NIEUWE vault
+  gezet is. v2-buffer opnieuw geschreven en overgedragen (`GKLXSZNxUZs92oNirBQao1J4bKuXRcjk3CJnp7QJMGpe`).
+  `manage-proposal.ts`'s constanten bijgewerkt naar alle nieuwe adressen.
+
+**Tweede timing-bug, dezelfde soort als eerder maar met een andere foutcode.** Ondanks de
+eerdere fix (vers herlezen vlak voor `proposalCreate`) faalde de eerste `propose`-poging op
+de nieuwe multisig opnieuw, deze keer met `StaleProposal` (6007) i.p.v.
+`InvalidTransactionIndex`. Direct on-chain gecontroleerd (niet aangenomen): op dat moment
+gold `transactionIndex=1 > staleTransactionIndex=0` al gewoon correct, en de
+`VaultTransaction`, maar niet het `Proposal`-account, bestond al - exact hetzelfde patroon
+als de eerste keer, dus vermoedelijk dezelfde onderliggende oorzaak (RPC-
+bevestigingsniveau-vertraging tussen twee snel-opeenvolgende aanroepen binnen een en
+dezelfde scriptrun), nu net iets trager zichtbaar. Losstaand `proposalCreate` opnieuw
+gedraaid (signature `2a4MNw4eBDjpoCd1ypkGudwB1yUnqP8Ny1SZ55Bk6cE2YrkxNcMLQEr9N14JUs3m3KM3u2MaN3ZdLqJJLh1LAnCP`) -
+geslaagd. Nog niet structureel in het script opgelost (bijv. met een korte expliciete
+wachttijd of een confirmatie-niveau "finalized" tussen de twee aanroepen) - voor deze
+eenmalige repetitie was handmatig retrying voldoende, maar dit zou de aandacht verdienen
+als dit script ooit vaker/geautomatiseerd gebruikt wordt.
+
+Beide goedkeuringen daarna zonder problemen gezet: hoofd-pc
+(signature `5w5f5JtAfbBNuL6WSFJMvyuJo3YgbGRTy34hANsrcae22SKG3UzaftqrGbnWq2KMojoh6fowVFSaY8BmvtXcsKC2`),
+Windows-pc, gecorrigeerd adres
+(signature `3C7TpLxfJdLLDpdUw3tAZv6tzfUHRWGSuMxM6gyqHF4HT7spYN69zRfvMTkptsw2Sm3KFKbn2SYxWD2VkUMoEAPU`).
+On-chain bevestigd: proposal-status `Approved`, beide leden aanwezig in `approved`. De
+2-of-3-drempel is hiermee daadwerkelijk bereikt en de 300s-timelock is gestart (18:05:05
+UTC -> uitvoerbaar vanaf 18:10:05 UTC).

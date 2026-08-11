@@ -2294,3 +2294,79 @@ van het voorstel, de twee goedkeuringen, het verstrijken van de 72u-timelock, en
 uiteindelijke uitvoering moeten via `app.squads.so` door de gebruiker zelf gebeuren** (geen
 geëxporteerde sleutels voor de echte migratie, zoals afgesproken) - zie de exacte
 klikvolgorde die aan de gebruiker is gegeven direct na deze sectie werd geschreven.
+
+## 43. Squads-webinterface bleek onbruikbaar - eigen wallet-adapter-ondertekenpagina gebouwd; canary-upgrade-voorstel staat op 1-van-2 goedkeuringen
+
+Vervolg op sectie 42. **De Squads-webinterface (`app.squads.so`) bleek in de praktijk
+onbruikbaar** - toonde herhaaldelijk alleen demodata, kon de echte productiemultisig niet
+vinden, ongeacht devnet/mainnet-instelling. Omdat de gebruiker voor deze ECHTE migratie
+expliciet GEEN private-key-export wilde (in tegenstelling tot de repetitie in sectie 41,
+waar wegwerpsleutels dat voor een wegwerpprogramma toelieten), is in plaats daarvan een
+eigen ondertekenpagina gebouwd: `wallet-signer.html` (scratchpad, `squads-admin/`-map,
+dus buiten de git-repo). Deze bouwt de Squads-transacties zelf op en laat ze door de
+wallet-extensie ondertekenen via diens eigen goedkeuringspopup (Wallet Standard) - de
+sleutel verlaat nooit de extensie.
+
+Onderweg drie root causes gevonden en gefixt, elk met primair bewijs in plaats van
+aannames (zoals gebruikelijk voor dit project):
+
+- **RPC-verversingsrace bij propose**: twee losse instructies (`vaultTransactionCreate`
+  + `proposalCreate`) na elkaar raakten `InvalidTransactionIndex`/`StaleProposal` door
+  een timing-gat. Definitief opgelost (niet omzeild) door ze te combineren tot EEN
+  atomaire transactie met twee instructies, dus een enkele handtekening.
+- **`window.isSecureContext` was `false`** op het platte `http://<LAN-IP>`-origin,
+  waardoor Phantom `connect()` stil liet hangen zonder popup of fout. Opgelost met een
+  self-signed HTTPS-server (`https-server.js`, poort 8766).
+- **Brave's ingebouwde wallet onderschepte de Wallet Standard-verbinding** die voor
+  Phantom bedoeld was, waardoor met het verkeerde (niet-multisig-lid) account werd
+  verbonden. Opgelost door Brave Wallet uit te schakelen in de browserinstellingen.
+
+Met beide fixes is via de hoofd-pc (Phantom, adres `3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3`)
+succesvol een upgrade-voorstel ingediend EN goedgekeurd voor de echte canary-upgrade uit
+sectie 42. Per ongeluk is de flow twee keer doorlopen op hetzelfde apparaat, wat een dubbel
+voorstel opleverde:
+
+- Voorstel `transactionIndex 1`: 1 goedkeuring (hoofd-pc). Overbodig/dood - wijst naar
+  dezelfde eenmalige buffer als voorstel 2, wordt dus vanzelf onuitvoerbaar zodra
+  voorstel 2 wordt uitgevoerd. Geen actie nodig.
+- **Voorstel `transactionIndex 2`: de relevante. Status `Active`, 1 van de 2 vereiste
+  goedkeuringen (hoofd-pc).** Dit is ook het voorstel dat de pagina automatisch target
+  (de "3. Goedkeuren"/"4. Uitvoeren"-knoppen lezen altijd de huidige
+  `multisig.transactionIndex`, dat is nu 2).
+- Propose-signature: `5bhHo8gwGGgYQvUgrty854E7UerD9rVJ9968jEe4UjWeMk4HiJ65yzYdKwCJw5Fr2bbnb46LkHvJdFwZ8af68rQ7`
+- Approve-signature (hoofd-pc): `5dXT31CxvaVvkqM6pztAy7ehbCd1S88vwuvRyT8bwD3zJn1SN77zP5N7qen9FA12xBH687qZUtgsUHr7G6bXaaFj`
+- Een premature uitvoerpoging faalde met een vage `Unexpected error` (`-32603`) uit
+  Phantoms eigen extensiecode - on-chain geverifieerd dat dit simpelweg kwam doordat er
+  nog maar 1 van de 2 goedkeuringen was (status `Active`, niet `Approved`), geen aparte bug.
+
+**Mobiele ondertekening (telefoon, Solflare) werkte in eerste instantie helemaal niet** -
+0 Wallet Standard-providers gedetecteerd, op alle geprobeerde Android-browsers. Root cause
+(bevestigd tegen de daadwerkelijke broncode van `solana-mobile/mobile-wallet-adapter` op
+GitHub, niet enkel documentatie-samenvattingen - die op een punt zelfs tegenstrijdig
+bleken met de broncode): geen enkele mobiele walletapp injecteert zichzelf automatisch in
+browsertabbladen zoals een desktopextensie dat doet - de pagina deed nog geen enkele
+poging om een mobiele wallet te vinden. **Fix aangebracht, nog NIET getest op de
+telefoon:**
+
+- Knop 1 registreert nu bij laden op Android automatisch Mobile Wallet Adapter
+  (`@solana-mobile/wallet-standard-mobile`, npm) als Wallet Standard-provider - de
+  bestaande verbindingscode vindt 'm daarna vanzelf, geen apart codepad nodig.
+- Nieuwe knop "1b. Verbinden via Solflare-mobiel" als onafhankelijke fallback,
+  specifiek voor Solflare: gebruikt Solflare's eigen SDK (iframe naar
+  `connect.solflare.com` + deep-link + postMessage), werkt in principe ongeacht welke
+  mobiele browser.
+- CDN-imports geverifieerd (200 OK, juiste exports aanwezig) en de module-JS
+  syntactisch gecontroleerd (`node --check`); niet functioneel getest bij gebrek aan een
+  Android-toestel in deze sessie.
+
+**Openstaand bij het afsluiten van deze sessie:**
+1. Telefoon (of Windows-pc) moet de tweede goedkeuring geven op voorstel `transactionIndex 2`
+   via `https://192.168.178.205:8766/wallet-signer.html` (knop 1, of bij falen knop 1b) om
+   de 2-van-2-drempel te halen - pas dan begint de echte 72u-timelock.
+2. Zodra de timelock verstreken is: uitvoeren via dezelfde pagina (knop 4), daarna
+   bevestigen via `solana program show` + `solana program dump` (zelfde bewijspatroon als
+   bij de repetitie in sectie 41) dat de canary-bytecode daadwerkelijk is bijgewerkt.
+3. De `wallet-signer.html`-HTTPS-server (poort 8766, self-signed certificaat) is bij het
+   afsluiten van deze sessie los van de Claude Code-sessie losgekoppeld gestart
+   (`setsid`/`nohup`/`disown`) zodat hij blijft draaien; geen actie nodig om 'm morgen
+   weer te bereiken.

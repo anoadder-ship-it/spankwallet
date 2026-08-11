@@ -2013,3 +2013,33 @@ dit vervangen. Deze twee stappen (plus de goedkeuring ertussen) moeten dus daadw
 via de drie fysieke apparaten/wallets gebeuren. Vooraf onderzocht: de eerdere
 browser-netwerkverwarring komt vermoedelijk doordat `app.squads.so` de MAINNET-UI is - de
 juiste devnet-URL is een apart domein, `https://devnet.squads.so`.
+
+**Correctie op de vorige alinea - eigen fout, gevonden door de gebruiker en pas daarna
+grondig geverifieerd.** De gebruiker zag op `devnet.squads.so/squads` twee squads
+(`9TzP2rTLkkGKTDDu7A2iJzp88aUuEWPMRE2jqSMm9dSc`, 3 owners; `BVGkkiAApvzvAPKcHAA4EzopXP5nJMWTooXG22a1oWVY`,
+1 owner) die geen van beide overeenkwamen met het gerapporteerde multisig-adres, en een
+directe link naar dat adres 404'te. In plaats van aan te nemen dat het eigen eerder
+gerapporteerde adres fout was, eerst alle drie de kandidaat-adressen rechtstreeks on-chain
+opgevraagd en vergeleken. Uitkomst: `DELWtaR7...` bleek nog steeds volledig correct (owner
+program = de echte Squads V4-program-ID, threshold/timeLock/leden allemaal exact zoals
+verwacht) - de TWEE zichtbare squads in de UI bleken beide eigendom van
+`SMPLecH534NA9acpos4G6x7uf3LWbCAwZQE9e8ZekMu`, bevestigd via onderzoek de **Squads V3
+(legacy)**-programma-ID te zijn (onveranderlijk sinds februari 2023, geen enkele relatie
+met de V4-SDK die dit hele traject gebruikt) - ze deserialiseerden dan ook merkbaar NIET
+als een V4 `Multisig`-account (struct-mismatch-fout).
+
+Root cause: mijn eigen eerdere claim dat `devnet.squads.so` de juiste V4-devnet-URL was
+(en `app.squads.so` mainnet) bleek FOUT, gebaseerd op een lage-kwaliteit zoekresultaat-
+samenvatting, niet op een primaire bron. Rechtstreeks Squads' eigen v4-launch-blogpost
+opgehaald en gecontroleerd: "v4, the new Squads app... available today at app.squads.so" -
+`app.squads.so` IS de juiste V4-app (met vermoedelijk een in-app devnet/mainnet-toggle,
+geen apart domein); `devnet.squads.so` hoort kennelijk bij het legacy V3-domein. Les:
+zoekresultaat-samenvattingen zijn geen vervanging voor een primaire bron bij een claim die
+een concrete actie van de gebruiker stuurt - de fout zat in te snel een claim aannemen
+zonder hem tegen de brontekst zelf te toetsen, niet in het onderzoek zelf overslaan.
+
+Upgrade-authority van het wegwerpprogramma nogmaals expliciet herverifieerd na deze
+verwarring: `solana program show 6hzVvPNHxVCW4aMECXW92GWHdRsCzcZkDXmY6k9zUmEU` toont nog
+steeds `Authority: 5FtJ2ZVVpbu3ckErDUgtrKwyUtr8NFXburSSTA2P4Crt` - exact de vault-PDA van
+de correcte, geverifieerde `DELWtaR7...`-multisig. Niets is stiekem gewijzigd; de
+verwarring zat uitsluitend in welke URL naar welke programma-versie leidt.

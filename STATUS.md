@@ -2043,3 +2043,37 @@ verwarring: `solana program show 6hzVvPNHxVCW4aMECXW92GWHdRsCzcZkDXmY6k9zUmEU` t
 steeds `Authority: 5FtJ2ZVVpbu3ckErDUgtrKwyUtr8NFXburSSTA2P4Crt` - exact de vault-PDA van
 de correcte, geverifieerde `DELWtaR7...`-multisig. Niets is stiekem gewijzigd; de
 verwarring zat uitsluitend in welke URL naar welke programma-versie leidt.
+
+**Fase 4: volledig CLI-based voorstel/goedkeuring/uitvoering, browser-UI losgelaten.**
+Na de URL-verwarring expliciet gekozen (functionaliteit boven UI-gemak, op verzoek): ook
+het indienen van het upgrade-voorstel, de goedkeuring en de uitvoering zelf via een script
+laten lopen, in plaats van verder te zoeken naar een werkende Squads-webinterface voor
+deze specifieke multisig. Vastgesteld en bevestigd (niet aangenomen) dat dit deel WEL
+daadwerkelijk een echte handtekening van een van de drie leden vereist voor alle drie de
+stappen - zowel `vaultTransactionCreate` (`creator`-veld) als `vaultTransactionExecute`
+(`member`-veld, expliciet `[**signer**]` in de gegenereerde SDK-typedefinities) - dus dit
+kan, in tegenstelling tot de multisig-aanmaak zelf, niet zonder de drie echte apparaten.
+
+De instructie-account-volgorde en -data voor de daadwerkelijke `Upgrade`-instructie (het
+kernstuk van dit script) is NIET zelf verzonnen, maar geverifieerd tegen twee onafhankelijke
+primaire bronnen die elkaar bevestigen: (1) de daadwerkelijke Agave-broncode zelf
+(`programs/bpf_loader/src/lib.rs`, lokaal beschikbaar), en (2) Squads' eigen, officiele
+`squads-v4-program-upgrade`-GitHub-Action (`src/main.ts`, opgehaald via `gh`/curl, niet via
+een samenvattend zoekresultaat). Beide bevestigen exact dezelfde account-volgorde
+(ProgramData, Program, Buffer, Spill, Rent-sysvar, Clock-sysvar, upgrade-authority-signer)
+en instructiedata (u32 LE waarde 3).
+
+Gebouwd: `manage-proposal.ts`/`.js` (drie modi: `propose`/`approve`/`execute`, elk
+aanroepbaar met `node manage-proposal.js <modus> <pad-naar-keypair>`), met tolerante
+detectie of het Proposal-account al bestaat (voorkomt een verwarrende
+"already exists"-fout, voor het geval een nieuwere SDK-versie `vaultTransactionCreate` en
+`proposalCreate` ooit zou samenvoegen - vooraf niet met zekerheid vast te stellen uit de
+documentatie alleen). `tsc` ving tijdens het bouwen een echte fout (`approve()` miste een
+verplicht `feePayer`-veld) voordat het bij de gebruiker terechtkwam.
+
+**Eerlijk vastgestelde grens: dit script kon niet end-to-end getest worden vanaf de Spark**
+(geen van de drie echte member-sleutels is hier beschikbaar, met opzet). Verificatie
+beperkt zich dus tot: overeenstemming met twee onafhankelijke primaire bronnen, en een
+schone TypeScript-compilatie. De gebruiker is expliciet gevraagd eerst `propose` te
+draaien en het resultaat te melden voordat `approve`/`execute` gebruikt worden, om een
+eventuele fout met minimale cyclus te vinden.

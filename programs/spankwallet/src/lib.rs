@@ -7,6 +7,9 @@ mod state;
 use instructions::*;
 use state::PASSKEY_PUBKEY_LEN;
 
+// Upgrade-authority sinds STATUS.md sectie 42: een 2-of-3 Squads V4-multisig
+// met 72u-timelock, niet meer een enkele sleutel - zie README.md's
+// "Deployen naar devnet"-sectie voor het huidige upgradeproces.
 declare_id!("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
 
 #[program]

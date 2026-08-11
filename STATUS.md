@@ -2170,3 +2170,57 @@ Windows-pc, gecorrigeerd adres
 On-chain bevestigd: proposal-status `Approved`, beide leden aanwezig in `approved`. De
 2-of-3-drempel is hiermee daadwerkelijk bereikt en de 300s-timelock is gestart (18:05:05
 UTC -> uitvoerbaar vanaf 18:10:05 UTC).
+
+**Fase 7: uitvoering - de timelock daadwerkelijk laten verlopen, nog twee echte bugs
+gevonden en opgelost, en tot slot de upgrade onweerlegbaar bevestigd.** Op de klok
+gewacht (een korte `until`-poll-lus, geen dummy-transacties nodig aangezien dit devnet is
+- devnet-tijd verstrijkt vanzelf, zelfde principe als bij session keys sectie 40) tot
+18:10:05 UTC daadwerkelijk gepasseerd was, dan pas `execute` geprobeerd.
+
+Eerste probleem: `multisig.rpc.vaultTransactionExecute` gooide een client-side
+`TypeError: Cannot set property logs of Error which has only a getter` - een bug in de
+SDK's eigen foutvertaal-code die de ECHTE onderliggende foutmelding verborg. Opgelost door
+de lager-liggende `multisig.transactions.vaultTransactionExecute` te gebruiken (geeft een
+ongetekende `VersionedTransaction` terug) en die zelf te ondertekenen/simuleren, wat de
+buggy foutvertaling omzeilde en de daadwerkelijke simulatie-logs zichtbaar maakte.
+
+Daaruit bleek de ECHTE, tweede bug: `AccountDataTooSmall` / "ProgramData account not large
+enough". Root cause gevonden door de daadwerkelijke ProgramData-account-grootte on-chain op
+te vragen (129501 bytes, oftewel exact 129456 bytes ELF-capaciteit na aftrek van de vaste
+45-byte metadata-header - EXACT gelijk aan v1's grootte, dus letterlijk geen enkele byte
+speling): `solana program deploy`'s standaardallocatie reserveert kennelijk geen enkele
+headroom voor toekomstige upgrades, dus zelfs een verschil van 24 bytes (129480 t.o.v.
+129456) al genoeg was om de upgrade te laten mislukken. Gefixt met `solana program extend`
+- een permissionless, autoriteit-onafhankelijke actie (voegt uitsluitend rent-betaalde
+ruimte toe, raakt geen code of autoriteit aan) - het minimum van 10.240 bytes per aanroep
+toegepast (ontdekt via de foutmelding van een eerdere, te kleine poging). Nieuwe
+ProgramData-grootte: 139741 bytes, ruim voldoende. Les voor toekomstige DEVNET/mainnet-
+deploys (ook relevant voor SpankWallet zelf, hoewel niet met terugwerkende kracht
+toegepast op de al-lopende devnet-deploy): standaard `solana program deploy` geeft geen
+gegarandeerde upgrade-headroom - overweeg vooraf `--max-len` met een bewuste marge, of
+gebruik `solana program extend` proactief na een deploy die significant kleiner is dan een
+te verwachten toekomstige versie.
+
+Na de fix: simulatie slaagde schoon ("Upgraded program..."), daadwerkelijk verstuurd en
+bevestigd (signature `2f6wXvHcAbtxsxKxKaKoKcgfLNGcvhEpg8tPmaNngR4axRHcT2rv4WM47KZaHThzSETn3EAeBKfoaMnZWdkV3S1S`).
+`solana program show` toont een nieuw deploy-slot (482976329 -> 482979618), authority nog
+steeds correct de vault. **Sluitende, onweerlegbare verificatie**: de daadwerkelijke
+on-chain bytecode opgehaald met `solana program dump` en doorzocht - bevat nu letterlijk
+`"UPGRADED via Squads 2-of-3 multisig! Counter is now"`, en de oude
+`"Hello, world! Counter is now"`-tekst is volledig verdwenen. Geen aanname op basis van een
+slot-nummer of foutloze simulatie - de daadwerkelijk gewijzigde bytecode zelf is
+gecontroleerd.
+
+**De devnet-generale-repetitie is hiermee volledig, end-to-end geslaagd:** een 2-of-3
+Squads V4-multisig met timelock aangemaakt, de upgrade-authority van een volledig los
+wegwerpprogramma overgedragen, een echte code-upgrade voorgesteld, door twee van de drie
+onafhankelijke leden goedgekeurd, na een daadwerkelijk verstreken timelock uitgevoerd, en
+de resulterende bytecode-wijziging onweerlegbaar bevestigd. Onderweg vijf reele, niet
+voorziene problemen gevonden en opgelost (twee RPC-timing-races in propose/approve, een
+foutief/nooit-bestaand signer-adres, een SDK-foutvertaalbug, en een te-krappe
+ProgramData-allocatie) - geen van alle vooraf voorzien, allemaal empirisch gevonden en met
+primaire bronnen (Agave-broncode, Squads' eigen programmabroncode, directe on-chain-
+verificatie) opgelost in plaats van aangenomen. SpankWallet's eigen upgrade-authority
+(`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) is tijdens dit hele traject geen moment
+aangeraakt - de daadwerkelijke migratie is een bewuste, aparte vervolgstap na deze
+geslaagde repetitie.

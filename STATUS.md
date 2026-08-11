@@ -2077,3 +2077,41 @@ beperkt zich dus tot: overeenstemming met twee onafhankelijke primaire bronnen, 
 schone TypeScript-compilatie. De gebruiker is expliciet gevraagd eerst `propose` te
 draaien en het resultaat te melden voordat `approve`/`execute` gebruikt worden, om een
 eventuele fout met minimale cyclus te vinden.
+
+**Fase 5: propose + eerste approve daadwerkelijk uitgevoerd, een echte bug gevonden en
+gefixt.** De gebruiker kon de scripts niet zelf op de drie apparaten draaien (geen
+terminal-toegang/geen developer) - in overleg overgestapt op: gebruiker exporteert een
+private key uit de wallet-extensie en deelt die in de chat, de sleutel wordt uitsluitend
+voor deze devnet-wegwerp-repetitie gebruikt (expliciet bevestigd door de gebruiker), nooit
+voor de echte SpankWallet-migratie. Voorafgaand hieraan expliciet gecontroleerd of het om
+een speciaal-hiervoor-aangemaakte wallet ging (niet een bestaande/dagelijkse) - bevestigd.
+Ontvangen sleutel geconverteerd naar het standaard keypair-array-formaat en de publieke
+sleutel er direct uit teruggerekend en vergeleken tegen het bekende adres, voordat hij
+gebruikt werd - niet blind vertrouwd dat de conversie klopte.
+
+`propose` uitgevoerd met de hoofd-pc-sleutel: `vaultTransactionCreate` slaagde meteen
+(transactionIndex 1, signature `25ARwsoB7h5oYoFbeZnamZsqfvFJoocWuYpQ6znXKtZP58cZWg8nU4sN92gVbUttA2Tt8XFxnbMXxMvg6N2Wxa82`),
+maar de daaropvolgende `proposalCreate`-aanroep in hetzelfde scriptverloop faalde met
+on-chain foutcode `InvalidTransactionIndex` (6009). Root cause gevonden door Squads' eigen
+programmabroncode rechtstreeks op te halen (`proposal_create.rs`, GitHub) i.p.v. te
+gokken: de validatie `args.transaction_index <= multisig.transaction_index` faalde
+vermoedelijk door een timing-/bevestigingsniveau-gat tussen de twee opeenvolgende
+RPC-aanroepen binnen dezelfde scriptrun - het script hergebruikte een lokaal berekende
+`transactionIndex`-variabele in plaats van vlak voor `proposalCreate` het account vers
+van de chain te herlezen. Bevestigd via een direct on-chain-onderzoek (niet aangenomen):
+`multisig.transactionIndex` stond op dat moment daadwerkelijk al op 1, de
+`VaultTransaction`-account bestond al, alleen het `Proposal`-account ontbrak nog. Fix:
+`propose()` in `manage-proposal.ts` herleest het multisig-account nu expliciet vers vlak
+voor `proposalCreate`, in plaats van de eerder lokaal berekende waarde te hergebruiken.
+Losstaand met deze fix `proposalCreate` opnieuw gedraaid (signature
+`hXfrzmD48uRAAPbjTdw9ksyQtZ7sEswuXxkctirogqzGVnrozytcSkK6xw5RkMVjALdx7eGFaHGVrkyyBBELYd4`) -
+geslaagd, `Proposal`-account bevestigd `Active` met 0 goedkeuringen.
+
+Tweede ontdekking (ook niet aangenomen, on-chain geverifieerd): het aanmaken van een
+Proposal-account telt NIET automatisch als de eerste goedkeuring van de creator - er zijn
+daadwerkelijk twee losse `approve`-aanroepen nodig voor de 2-of-3-drempel. Eerste
+`approve` uitgevoerd met dezelfde hoofd-pc-sleutel (creator en approver mogen dezelfde
+persoon/sleutel zijn - twee losse acties, geen beperking op wie welke actie mag
+combineren) - signature `4297FamyaPonzt5wxMbVYCMVpdExhmbT7p94rCXQMLuYmX61rpmj2R9rCkPHR1ZGWFobjTJiV7tMSdjCoUYognGw`,
+bevestigd via directe terugleeslezing: `approved: [3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3]`,
+status nog `Active` (wacht op de tweede van de drie leden voor de drempel).

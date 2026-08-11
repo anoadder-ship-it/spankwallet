@@ -1978,3 +1978,38 @@ RPC-respons vertrouwd).
 Nog te doen: upgrade-authority van het wegwerpprogramma overdragen aan deze vault, een
 echte testupgrade door de volledige voorstel-/goedkeurings-/timelock-/uitvoeringsflow
 heen halen, en het resultaat verifieren met `solana program show`.
+
+**Fase 3: upgrade-authority overgedragen, v2 gebouwd en als buffer klaargezet -
+uitsluitend nog CLI-bereikbare stappen.** Tijdens deze fase een tweede reele valkuil
+gevonden en direct gefixt: `solana program set-upgrade-authority` deelt, in tegenstelling
+tot `solana program deploy`, GEEN enkel `--keypair`-argument voor zowel signer als fee-
+payer - zonder expliciete `--keypair` viel de fee-payer terug op de CLI-config-default
+(`~/solana_darkpool/heartbeat.json`, 0 devnet-SOL, hetzelfde "verkeerde signer"-gevaar als
+al gedocumenteerd voor deploys), wat de eerste poging deed falen met "Attempt to debit an
+account but found no record of a prior credit". Opgelost door `--keypair
+~/.config/solana/id.json` expliciet mee te geven naast `--upgrade-authority`.
+
+Uitgevoerd en on-chain geverifieerd (telkens met `solana program show`/`--buffers`, niet
+enkel op een geslaagde CLI-aanroep vertrouwd):
+- Upgrade-authority van het wegwerpprogramma overgedragen aan de vault (met bewust
+  `--skip-new-upgrade-authority-signer-check`, omdat een PDA per definitie nooit zelf kan
+  ondertekenen - de vault-adres was al onafhankelijk geverifieerd via de vorige fase, dus
+  het overslaan van deze CLI-veiligheidscheck was hier verantwoord). `Authority` op het
+  wegwerpprogramma toont nu `5FtJ2ZVVpbu3ckErDUgtrKwyUtr8NFXburSSTA2P4Crt`.
+- v2 van het wegwerpprogramma gebouwd (`msg!()`-tekst zichtbaar gewijzigd naar "UPGRADED
+  via Squads 2-of-3 multisig!" - een concrete, verifieerbare bytecode-wijziging, geen
+  no-op-herdeploy), via hetzelfde `anchor build`-dan-`cargo-build-sbf --arch v3`-proces.
+- v2 weggeschreven als buffer-account (`4P3anQqbW5q8ChjQXKnTQjD4WwmRo9etejXP36ShPUPP`),
+  en de buffer-authority overgedragen aan diezelfde vault - bevestigd via
+  `solana program show --buffers --buffer-authority <vault>`.
+
+**Grens van wat vanaf de Spark alleen kan, expliciet vastgesteld** (niet aangenomen):
+zowel het indienen van het upgrade-voorstel (`vaultTransactionCreate`, vereist een
+signer met Initiate-permissie) als de uiteindelijke uitvoering
+(`vaultTransactionExecute`, vereist een `member`-signer-account) zijn geverifieerd tegen
+de daadwerkelijke SDK-typedefinities te vereisen dat een van de DRIE geregistreerde leden
+zelf ondertekent - geen enkele combinatie van lokaal beschikbare sleutels op de Spark kan
+dit vervangen. Deze twee stappen (plus de goedkeuring ertussen) moeten dus daadwerkelijk
+via de drie fysieke apparaten/wallets gebeuren. Vooraf onderzocht: de eerdere
+browser-netwerkverwarring komt vermoedelijk doordat `app.squads.so` de MAINNET-UI is - de
+juiste devnet-URL is een apart domein, `https://devnet.squads.so`.

@@ -2264,3 +2264,33 @@ al-gefunde devnet-sleutel als betaler/aanmaker. On-chain teruggelezen ter verifi
 `G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`, ongewijzigd. **Stap 3 (de daadwerkelijke
 overdracht van de upgrade-authority naar de vault hierboven) is NIET uitgevoerd en wacht op
 aparte, expliciete bevestiging van de gebruiker**, zoals afgesproken.
+
+**Stap 3 uitgevoerd: de echte upgrade-authority is overgedragen.** Na expliciete
+bevestiging: `solana program set-upgrade-authority 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9
+--new-upgrade-authority 89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw
+--skip-new-upgrade-authority-signer-check` (zelfde reden als bij de repetitie: een PDA kan
+nooit zelf ondertekenen, het vault-adres was al onafhankelijk geverifieerd). Direct
+geverifieerd met `solana program show`: `Authority` toont nu daadwerkelijk
+`89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`, alle andere velden (Program ID,
+ProgramData-adres, Data Length, Balance) ongewijzigd. **Het single-key-upgrade-authority-
+SPOF - gap 1 uit de externe security-review (sectie 41) - is hiermee gesloten op devnet.**
+
+**Stap 4 uitgevoerd: documentatie en scripts bijgewerkt.** README.md's "Deployen naar
+devnet"-sectie beschrijft nu het daadwerkelijke, huidige tweetraps-proces (buffer
+voorbereiden met een gewone lokale sleutel, upgrade voorstellen/goedkeuren/uitvoeren via de
+multisig op `app.squads.so`) - een directe `solana program deploy` met de oude lokale
+sleutel faalt nu terecht. `scripts/build-and-deploy.sh` kreeg een expliciete waarschuwing
+dat het uitsluitend voor de lokale validator is. SECURITY.md's sectiepointers uitgebreid.
+
+**Stap 5 (canary-upgrade), voorbereidingsdeel afgerond.** Een triviale, functioneel
+volledig onschadelijke wijziging aangebracht (een toelichtende comment bij `declare_id!`,
+geen enkele instructie-/verificatielogica gewijzigd) - bewust gekozen zodat de eerste
+daadwerkelijke test van de nieuwe multisig-flow geen enkel functioneel risico draagt.
+49/49 lokale tests bevestigd groen vóór het committen. Build + `--arch v3`-binary
+(445.272 bytes, byte-offset geverifieerd, 1 treffer) als buffer geschreven
+(`7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh`), buffer-authority overgedragen aan de
+vault, bevestigd via `solana program show --buffers --buffer-authority`. **Het indienen
+van het voorstel, de twee goedkeuringen, het verstrijken van de 72u-timelock, en de
+uiteindelijke uitvoering moeten via `app.squads.so` door de gebruiker zelf gebeuren** (geen
+geëxporteerde sleutels voor de echte migratie, zoals afgesproken) - zie de exacte
+klikvolgorde die aan de gebruiker is gegeven direct na deze sectie werd geschreven.

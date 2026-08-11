@@ -2224,3 +2224,43 @@ verificatie) opgelost in plaats van aangenomen. SpankWallet's eigen upgrade-auth
 (`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) is tijdens dit hele traject geen moment
 aangeraakt - de daadwerkelijke migratie is een bewuste, aparte vervolgstap na deze
 geslaagde repetitie.
+
+## 42. Echte SpankWallet-migratievoorstel goedgekeurd - stap 1+2 uitgevoerd, stap 3 (overdracht) wacht op expliciete bevestiging
+
+Vervolg op de geslaagde devnet-generale-repetitie (sectie 41). Voorstel voor de echte
+migratie behandelde drie punten die de repetitie blootlegde: (1) ProgramData-headroom
+vooraf controleren en zo nodig vergroten, (2) ondertekenen zonder private-key-export voor
+de echte migratie (in tegenstelling tot de repetitie, waar wegwerpwallets voor een
+wegwerpprogramma dat wel toelieten), (3) de bewezen aanpak/scripts hergebruiken i.p.v.
+opnieuw beginnen. Goedgekeurd, met een expliciete, harde grens: geen enkele actie op
+`9ma6...`'s daadwerkelijke upgrade-authority totdat apart bevestigd.
+
+**Stap 1 (geen authority-actie): ProgramData-headroom vergroot.** Gecontroleerd:
+`9ma6...`'s ProgramData had al ~9.531 bytes headroom (454.848 bytes toegewezen, 445.272
+bytes daadwerkelijke laatste build) - niet nul zoals het wegwerpprogramma bij de repetitie,
+maar waarschijnlijk te krap voor iets substantieels zoals de nog openstaande
+gelaagde-privileges-roadmap. Vergroot met `solana program extend` (dezelfde permissionless,
+autoriteit-onafhankelijke actie als bewezen tijdens de repetitie) met 300.000 bytes extra.
+Geverifieerd: 454.848 -> 754.848 bytes (exact +300.000), `Authority` ongewijzigd
+(`G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`) - bevestigt dat deze actie de authority
+niet raakt.
+
+**Stap 2 (geen authority-actie): de echte productiemultisig aangemaakt.** Hergebruik van
+het bij de repetitie bewezen `create-multisig`-script (nieuw bestand,
+`create-spankwallet-multisig.ts`, om de wegwerp-versie niet te overschrijven/verwarren),
+met de drie definitieve, echte signer-adressen (telefoon/Solflare, hoofd-pc/Phantom,
+Windows-pc/Phantom - dezelfde set als aan het eind van de repetitie gecorrigeerd) en de
+volle 72u-timelock (259.200 seconden - bewust dezelfde duur als `recovery_timelock_seconds`'s
+eigen default). Multisig-aanmaak heeft, net als bij de repetitie, geen van de drie echte
+private keys nodig gehad (leden zijn pure data bij aanmaak) - uitsluitend de lokale,
+al-gefunde devnet-sleutel als betaler/aanmaker. On-chain teruggelezen ter verificatie:
+`threshold: 2`, `timeLock: 259200`, alle drie leden aanwezig met volledige permissies.
+
+- Multisig PDA: `A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp`
+- Vault PDA (toekomstige upgrade-authority, nog NIET actief): `89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`
+- Aanmaak-signature: `5aqw7zJiNaUMzqJURYM7LsQmsFAosSnh4oaFqGrLAmkeTLycoYLHimQL4KAc1rg3Dwan2nzv8g3uRzTXKUc3GgeK`
+
+`9ma6...`'s `Authority` opnieuw expliciet gecontroleerd na beide stappen: nog steeds
+`G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`, ongewijzigd. **Stap 3 (de daadwerkelijke
+overdracht van de upgrade-authority naar de vault hierboven) is NIET uitgevoerd en wacht op
+aparte, expliciete bevestiging van de gebruiker**, zoals afgesproken.

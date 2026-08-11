@@ -1930,3 +1930,51 @@ voorstel-/goedkeurings-/timelock-/uitvoeringsflow heen halen, en het resultaat v
 met `solana program show`. SpankWallet's eigen upgrade-authority (`9ma6...`) wordt pas
 aangeraakt na expliciete bevestiging van de gebruiker dat deze volledige repetitie
 succesvol is afgerond.
+
+**Tussentijdse correctie: apparaat-scheiding.** Bij het verzamelen van de drie signer-
+adressen bleek een van de drie ("Chromium acc1") een tweede browserprofiel op dezelfde
+Linux-machine te zijn als een andere signer, geen apart fysiek apparaat - exact het
+scenario dat de bescherming van 2-of-3 zou ondermijnen (een enkele-machine-compromittering
+zou dan mogelijk 2 van de 3 handtekeningen kunnen bereiken). Direct gevonden en opgelost
+door te vragen naar bevestiging in plaats van aan te nemen dat de opgegeven adressen
+correct gescheiden waren. Definitieve, daadwerkelijk fysiek gescheiden signer-set:
+telefoon (Solflare Android, `CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3`), hoofd-pc
+(Brave/Phantom, `3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3`), Windows-pc (Edge,
+`AHy1bU6pMv4NQ2H8zivtW3AFvzaXY836yx2BaTyJfcwG`) - geldt voor zowel deze repetitie als de
+latere, echte SpankWallet-migratie. Elk adres gefund met devnet-SOL (0.1/0.3/nog te doen)
+vanaf de al-gefunde lokale devnet-sleutel, puur om transactiefees te kunnen betalen -
+geen van deze transfers heeft enige relatie met SpankWallet's eigen fondsen.
+
+**Fase 2: multisig-aanmaak - browser-UI verlaten voor een gescript pad.** De Squads-
+webinterface gaf herhaaldelijk netwerkverwarring tussen Phantom-instellingen, Squads'
+eigen clusterkeuze, en drie verschillende apparaten/wallets. In plaats van door te blijven
+klikken: onderzocht en bevestigd (niet aangenomen) dat Squads V4 een officiele TypeScript-
+SDK heeft (`@sqds/multisig`, npm) waarmee een multisig volledig gescript aangemaakt kan
+worden. Kern-inzicht, geverifieerd tegen de daadwerkelijk geinstalleerde package-
+typedefinities (niet tegen mogelijk verouderde blogposts): `multisig.rpc.multisigCreateV2()`
+vereist alleen een `creator` (fee payer) en een verse, eenmalige `createKey` als
+handtekeningen - de `members` zijn pure data (publieke sleutels + permissies), ZONDER dat
+die leden zelf iets hoeven te ondertekenen bij aanmaak. Dit betekent dat de multisig-
+aanmaak zelf volledig vanaf de Spark kon, met uitsluitend de drie al-bekende publieke
+adressen en het lokale, al-gefunde devnet-testkeypair als payer - geen van de drie
+apparaten hoefde erbij betrokken te worden.
+
+Gebouwd: een klein, op zichzelf staand TS-script (`@sqds/multisig` + `@solana/web3.js`,
+volledig los van zowel SpankWallet als het wegwerp-Anchor-programma) dat: de actuele
+Squads-`ProgramConfig` (treasury-adres) rechtstreeks van devnet opvraagt i.p.v. aan te
+nemen, een multisig aanmaakt met de drie leden (allemaal `Permissions.all()` - bewust geen
+rollen, zelfde ontwerptaal als multi-passkey), drempel 2-of-3, timelock 300s (verkorte
+TEST-waarde voor deze repetitie, niet de 72u van de uiteindelijke migratie), en het
+resultaat DIRECT VAN DEVNET TERUGLEEST ter verificatie (niet enkel op een geslaagde
+RPC-respons vertrouwd).
+
+**Resultaat, bevestigd via on-chain-terugleeslezing:**
+- Multisig PDA: `DELWtaR7m7xsFLKVDggofscvakykvXFt6c5eEAXSA3BJ`
+- Vault PDA (index 0, wordt de nieuwe upgrade-authority): `5FtJ2ZVVpbu3ckErDUgtrKwyUtr8NFXburSSTA2P4Crt`
+- Aanmaak-signature: `5exhA1iRh4tmXsBnmAbD5YCwJF57CVjYqxTSXoPpkLUZe7prhShprbag6q71TkSh3JsMyAPxh8TgfAVHg3fHaRk7`
+- Teruggelezen: `threshold: 2`, `timeLock: 300`, alle drie leden aanwezig met
+  `permissions.mask: 7` (Initiate+Vote+Execute, volledig gelijkwaardig)
+
+Nog te doen: upgrade-authority van het wegwerpprogramma overdragen aan deze vault, een
+echte testupgrade door de volledige voorstel-/goedkeurings-/timelock-/uitvoeringsflow
+heen halen, en het resultaat verifieren met `solana program show`.

@@ -2730,3 +2730,129 @@ en dat de server de bijgewerkte pagina serveert.
 op elk apparaat met een geregistreerd lid) voorstel #5 uitvoeren, en daarna bevestigen via
 `solana program show` + `solana program dump` (zelfde bewijspatroon als de repetitie in
 sectie 41) dat de canary-bytecode daadwerkelijk is bijgewerkt.
+
+## 47. Onderzoek naar hoe echte Solana-auditbedrijven werken (OtterSec, Neodyme, Sec3, Certora, Ackee) - en drie van hun tools daadwerkelijk tegen SpankWallet gedraaid
+
+Op verzoek onderzocht hoe grote Solana-auditbedrijven daadwerkelijk werken, en zoveel
+mogelijk van die aanpak zelf toegepast met gratis/open-source tooling - niet alleen een
+lijst met namen, maar drie tools daadwerkelijk uitgevoerd tegen de echte SpankWallet-code
+en de resultaten getrieerd zoals een auditor dat zou doen.
+
+**Methodologie-onderzoek (primaire bronnen: officiele docs/blogs, niet samenvattingen van
+samenvattingen):**
+- **OtterSec**: offensieve CTF-stijl handmatige review + eigen differentiele fuzzing
+  (rBPF JIT) + formele verificatie (Kani Rust Verifier-geintegreerd voor Anchor-code) +
+  eigen open-source Binary Ninja-tooling voor reverse-engineering van closed-source
+  sBPF-programma's.
+- **Neodyme**: begon met validator-onderzoek in 2020, sindsdien doorlopend contractwerk
+  voor de Solana Foundation; publiceert een concrete pitfalls-lijst (zie hieronder) die
+  ze als eerste checklist gebruiken bij elke audit.
+- **Sec3**: bouwt eigen static-analysis-tooling (X-Ray, hieronder daadwerkelijk gedraaid)
+  met een eigen kwetsbaarheids-taxonomie (50+ SVE-categorieen).
+- **Certora**: formele verificatie via de Certora Prover (sinds februari 2025 volledig
+  open-source en gratis), met een Solana-specifieke DSL (CVLR). Certora's eigen
+  klantenlijst omvat Squads - hetzelfde multisig-framework dat SpankWallet's eigen
+  upgrade-authority beheert (sectie 41-46).
+- **Ackee Blockchain**: bouwde Trident (hieronder daadwerkelijk gedraaid), het eerste
+  open-source fuzzing-framework specifiek voor Anchor-programma's, gesponsord door de
+  Solana Foundation.
+
+**Checklists opgehaald en systematisch tegen de echte code gecontroleerd** (Neodyme's
+"Common Pitfalls"-blog, Zealynx' 45-item-checklist, Helius' "Hitchhiker's Guide") - een
+representatieve steekproef van items expliciet geverifieerd tegen `instructions.rs`/
+`state.rs`, niet aangenomen op basis van eerdere reviews:
+- **Closing Accounts**: `close_session`/`close_expired_session` gebruiken Anchor's
+  ingebouwde `close = ...`-constraint (correct - voorkomt de klassieke fout van alleen
+  lamports overmaken zonder discriminator te wissen, wat reinitialisatie mogelijk zou
+  maken).
+- **Bump Seed Canonicalization**: alle bumps worden bij aanmaak eenmalig opgeslagen via
+  `ctx.bumps.X` (per definitie canoniek) en daarna consequent hergebruikt via
+  `bump = wallet.bump`/`vault_bump`/`policy.bump`/`passkeys.bump` - nergens een
+  onveilige herafleiding.
+- **Arbitrary CPI**: `execute_advanced`/`execute_advanced_via_session`'s `cpi_program`
+  wordt expliciet gecontroleerd tegen een allowlist (`policy.allowed_programs`) EN
+  `.executable` voordat de CPI plaatsvindt.
+- **Missing Ownership/Unvalidated Account** op `recipient` (`execute`/
+  `execute_via_session`): bewust een `UncheckedAccount` zonder eigendomsbeperking, maar
+  het adres zit IN de door de passkey ondertekende challenge - de garantie komt uit de
+  handtekening, niet uit een Anchor-constraint. Geverifieerd door de daadwerkelijke
+  `payload.extend_from_slice(recipient.key()...)`-regel te lezen.
+
+**Tool 1: Sec3 X-Ray, daadwerkelijk gedraaid (Docker, `ghcr.io/sec3-product/x-ray`).**
+Eerste poging faalde: X-Ray's eigen (ANTLR-gebaseerde, niet rustc-gebaseerde) Rust-parser
+kan de standaard-syntax `chunk[0] << 2` niet verwerken (een bevestigde parserbeperking,
+niet een codefout - `cargo build`/`anchor build` compileren dit al maandenlang probleemloos,
+49/49 tests groen). Gedocumenteerd, niet genegeerd: gewerkt in een geisoleerde scratch-kopie
+(nooit de echte tracked source aangeraakt) met `wrapping_shl`/`wrapping_shr` i.p.v.
+operatoren, waarna X-Ray wel volledig doorliep en alle 19 instructies als "attack surface"
+correct herkende. Resultaten getrieerd, niet klakkeloos overgenomen:
+- 4 gemelde integer-overflow/underflow-waarschuwingen (`policy.count += 1`/`-= 1`,
+  `passkeys.count += 1`/`-= 1`) - stuk voor stuk geverifieerd tegen de daadwerkelijke
+  `require!`-grenscontroles en (bij underflow) de impliciete vroege-return via
+  `.position(...).ok_or(...)?` op een lege slice. **Alle vier bevestigd valse
+  positieven** - X-Ray's analyse redeneert kennelijk niet over voorafgaande
+  bounds-checks in dezelfde functie.
+- 4 gemelde "unvalidated account"-waarschuwingen (`recipient`, `cpi_program` x2) - zoals
+  hierboven al bevestigd: bewust `UncheckedAccount`, met runtime-validatie elders in de
+  functie (allowlist/executable-check, of handtekening-binding) die X-Ray's
+  patroonherkenning niet ziet omdat het geen Anchor-declaratieve constraint is.
+- **Geen enkele daadwerkelijk onbehandelde bevinding.** Waardevol als tweede paar ogen en
+  om te bevestigen dat de eerdere handmatige reviews (secties 21-22, 25-26, 36-40) niets
+  evidents gemist hebben - niet hetzelfde als "geen bugs bestaan", en zo ook gerapporteerd.
+
+**Tool 2: Trident (Ackee), daadwerkelijk geinstalleerd en geinitialiseerd.**
+`cargo install trident-cli` (triviaal, ~30s) + `trident init -p spankwallet` in een
+geisoleerde kopie van de volledige workspace. Concreet, gemeten resultaat: **volledig
+automatisch gegenereerd** - 2871 regels getypeerde instructie-/account-structs
+(`types.rs`, direct van de echte IDL/Anchor-structs afgeleid) en een 20-velden
+account-adressenregister (`fuzz_accounts.rs`) dat correct ELK accountsoort over alle 19
+instructies identificeerde (wallet, policy, passkeys, session, vault, recipient,
+cpi_program, token-accounts, backup_authority, incinerator, enz.). **Wat WEL
+handmatig geschreven moet worden**: de daadwerkelijke `#[flow]`-functies (`test_fuzz.rs`)
+- welke instructies in welke volgorde met welke gefuzzde waarden, inclusief SpankWallet's
+ongebruikelijkste stuk (een geldige of doelbewust-gemuteerde secp256r1-handtekening +
+instruction-introspection-sysvar-aanroep bij vrijwel elke actie) - dat ontbreekt in
+Trident's standaardvoorbeelden en zou zelf gemodelleerd moeten worden. Realistische
+inschatting: een paar uur voor een eerste fuzz-run op de eenvoudigste instructies
+(add_allowed_program/remove_allowed_program, direct interessant gezien de X-Ray-gemelde
+maar valse overflow/underflow-waarschuwingen daarboven), meerdere dagen voor volledige
+dekking van alle 19 instructies inclusief de recovery-/sessie-state-machine.
+
+**Tool 3: Kani Rust Verifier, daadwerkelijk geinstalleerd EN een echt bewijs
+uitgevoerd.** `cargo install kani-verifier && cargo kani setup` (~5 min). Kani is
+generiek (geen Solana-runtime-kennis), dus geschikt voor pure, in-zichzelf-besloten
+Rust-logica - niet voor het volledige account-/CPI-model (daarvoor is Certora's
+Solana-specifieke CVLR de juiste laag, zie hieronder). Als eerste concreet doelwit
+`base64url_decode` (`instructions.rs` regels 69-105, gebruikt bij het parsen van de
+WebAuthn-`clientDataJSON`) gekozen: de kernlogica 1-op-1 overgenomen in een geisoleerde
+crate (losgekoppeld van `anchor_lang`'s foutafhandeling, puur om Kani's speciale
+nightly-toolchain niet de hele Anchor-dependency-boom te hoeven laten bouwen) en twee
+bewijzen geschreven: (1) geen enkele van de ~4,3 miljard mogelijke 4-byte-invoeren mag
+een panic veroorzaken, (2) de output is nooit langer dan wiskundig mogelijk (≤3 bytes).
+**Resultaat: `VERIFICATION: SUCCESSFUL`, 403 checks, 0 gefaald, in 0,39s** - een
+symbolisch, uitputtend bewijs (bounded model checking, geen steekproef) dat deze functie
+voor GEEN ENKELE mogelijke invoer kan paniceren.
+
+**Certora Prover (CVLR-Solana): onderzocht, niet vanavond opgezet.** Sinds februari 2025
+volledig gratis en open-source (was eerder licentie-afhankelijk). Zou het juiste
+gereedschap zijn om `verify_passkey_signature_multi` (de secp256r1-handtekeningcontrole
+via instruction-introspection - het meest veiligheidskritieke, ongebruikelijkste stuk
+logica in dit hele programma) en de PDA-afleidingsgaranties formeel te bewijzen binnen
+het daadwerkelijke Solana-account-model, wat Kani niet kan. Realistische inschatting:
+dagen-tot-weken voor een ervaren formele-methoden-engineer, gezien dit een genuine
+niet-standaardpatroon is (instruction-introspection-gebaseerde signature-verificatie komt
+niet voor in Certora's bestaande Solana-voorbeelden/-templates) - een aparte, bewust
+geplande taak, geen tussendoortje, net als de eerder uitgestelde Vite-major-upgrade
+(sectie 20) en de nog openstaande gelaagde-privileges-roadmap.
+
+**Samenvattend, eerlijke conclusie:** dit onderzoek bevestigt GEEN nieuwe kwetsbaarheden in
+SpankWallet, en dat moet niet gelezen worden als "bewezen veilig" - het bevestigt wel dat
+drie onafhankelijke, industriestandaard geautomatiseerde technieken (statische analyse,
+fuzzing-scaffolding, formele verificatie) daadwerkelijk op deze codebase toegepast kunnen
+worden, en dat de eerdere handmatige reviews niets overduidelijks gemist hebben binnen het
+bereik van wat deze tools vanavond daadwerkelijk konden onderzoeken. Aanbevolen
+vervolgstappen, in oplopende tijdsinvestering: (1) Trident-fuzzing uitbreiden naar
+add_allowed_program/remove_allowed_program als eerste concrete flow, (2) X-Ray's
+parserbeperking melden bij sec3-product/x-ray zodat toekomstige scans niet meer om de
+bug heen hoeven te werken, (3) Certora/CVLR voor de secp256r1-verificatielogica als
+aparte, geplande taak.

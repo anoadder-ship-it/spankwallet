@@ -2411,8 +2411,36 @@ behandeling was) overleeft die reload via `sessionStorage`. De oude, bewezen-onb
 laten staan.
 
 CDN-import (`tweetnacl@1.0.3` via esm.sh) geverifieerd bereikbaar, module-JS syntactisch
-gecontroleerd (`node --check`). **Nog NIET functioneel getest op een echt Android-toestel**
-bij het schrijven van deze sectie - dat is de eerstvolgende stap.
+gecontroleerd (`node --check`).
+
+**Eerste echte test op de telefoon: de doorverwijzing naar en goedkeuring in de Solflare-app
+werkten, maar de terugkeer naar de pagina gaf een blanco "Not Found".** Root cause
+gereproduceerd (niet aangenomen) via directe `curl`-tests tegen de draaiende server:
+`GET /wallet-signer.html?nonce=X&data=Y` gaf 200, maar `GET /?nonce=X&data=Y` (kale
+root-URL + query-string) gaf 404. `https-server.js` vergeleek `req.url === "/"` VOORDAT de
+query-string eraf ging, dus `/?nonce=...` faalde die vergelijking en het viel door naar het
+lezen van de ROOT-map zelf (EISDIR) i.p.v. `wallet-signer.html` te serveren. Dit trad enkel
+op wanneer de pagina via de kale `https://host:8766/` geopend was (`window.location.pathname`
+= "/"), waarvandaan `redirect_link` was afgeleid.
+
+Twee fixes, niet een: (1) `https-server.js` isoleert nu eerst het pathname (`req.url.split("?")[0]`)
+voordat de "/"-vergelijking gebeurt, en (2) `wallet-signer.html` leidt `redirect_link` niet
+langer af van `window.location.pathname` maar gebruikt een vaste `REDIRECT_URL`-constante
+(`window.location.origin + "/wallet-signer.html"`), zodat de deep-link-flow niet meer
+afhangt van welke URL-vorm de gebruiker toevallig intypte. Ook expliciete logging
+toegevoegd van de volledige geconstrueerde deep-link-URL vlak voor het wegnavigeren
+(`console.log` + on-page log), voor toekomstige diagnose. Beide fixes geverifieerd door de
+exacte eerder-falende `curl`-aanroep (`/?nonce=...&data=...`) opnieuw te draaien na de fix:
+nu 200. Server herstart (`setsid`/`nohup`/`disown`, ongewijzigd poort 8766).
+
+Zijdelings gemeld door de gebruiker: knop 1 (MWA) werd per ongeluk eerst aangeklikt en bleef
+op de achtergrond hangen (een late timeout-foutmelding kwam pas binnen NA het klikken op
+knop 1b). Vermoedelijk onschuldige ruis van de asynchrone MWA-`connect()`-aanroep die nog
+liep toen de pagina via knop 1b wegnavigeerde, los van het deep-link-probleem hierboven -
+niet verder onderzocht, geen aanwijzing gevonden dat het gerelateerd is.
+
+**Nog steeds niet volledig functioneel bevestigd (verbinden + minstens 1 ondertekenactie
+end-to-end) op een echt Android-toestel** - dat is de eerstvolgende stap.
 
 ## 45. Dependabot-kwetsbaarheden onderzocht: uuid gefixt, esbuild/vite blijven bewust geblokkeerd (zelfde reden als sectie 20), postcss bleek niet (meer) van toepassing
 

@@ -2654,3 +2654,79 @@ losstaand van deze wijzigingen (identieke `typescript@5.9.3` in het lockfile voo
 de uuid-fix). `npm run dev` (de dev-server zelf, geen `tsc`-stap) draait wel gewoon
 (HTTP 200, geen `Network:`-blootstelling). Niet opgelost binnen deze taak - apart
 gerapporteerd, geen scope-verruiming zonder overleg.
+
+## 46. Doorbraak: de 72u-timelock is al gestart - op voorstel #5, niet #2. De "Solflare-deep-link-internalError" was vermoedelijk nooit een transportbug
+
+Vervolg op sectie 44/45. Na het overstappen naar de Windows-pc (Wallet Standard/Phantom,
+zoals besloten) kwam DEZELFDE `-32603`/"Unexpected error" nu OOK terug op zowel de
+Windows-pc (Edge) als opnieuw de hoofdpc (Brave) - dus expliciet niet mobiel-/
+Solflare-specifiek zoals eerder aangenomen. Beide logs toonden "Goedkeuren van
+transactionIndex: 5", niet 2. Grondig on-chain onderzocht, niet aangenomen:
+
+**Alle vijf bestaande voorstellen opgevraagd:**
+
+| # | status | goedgekeurd door | aangemaakt door |
+|---|--------|-------------------|-------------------|
+| 1 | Active | 3zZcLwTX (1/2) | 3zZcLwTX (hoofdpc) |
+| 2 | Active | 3zZcLwTX (1/2) | 3zZcLwTX (hoofdpc) |
+| 3 | Active | CP2fg9zg (1/2) | CP2fg9zg (telefoon) |
+| 4 | Active | CP2fg9zg (1/2) | CP2fg9zg (telefoon) |
+| **5** | **Approved (2/2)** | **3zZcLwTX + CP2fg9zg** | CP2fg9zg (telefoon) |
+
+**Voorstel #5 heeft de volledige 2-van-2-drempel al gehaald, om 2026-08-12T15:46:49Z** -
+vermoedelijk tijdens een van de eerdere, als "mislukt" beschouwde telefoonpogingen, waarbij
+de stem wél on-chain doorging maar de versleutelde antwoordaflevering apart faalde.
+Geverifieerd dat #5 een legitiem, correct opgebouwd voorstel is (dezelfde canary-upgrade-
+instructie, dezelfde buffer/programma/vault-accounts als alle andere duplicaten) - geen
+kapot/corrupt voorstel.
+
+**Root cause van waarom knop "3. Voorstel goedkeuren"/"4. Uitvoeren" naar #5 wees i.p.v.
+#2, bevestigd in de code (geen nieuwe bug, bestaand ontwerp):** `buildApproveTx()` en
+`buildExecuteTx()` lazen altijd het HUIDIGE/hoogste `transactionIndex` uit de multisig,
+nooit een vastgepind specifiek voorstel. Zolang er maar een canoniek voorstel tegelijk
+bestond werkte dat prima; zodra vanavond herhaaldelijk duplicaten ontstonden (secties 43-44)
+dreef "huidig" weg van #2, en volgde elke latere klik automatisch het nieuwste voorstel.
+
+**De -32603-fout zelf verklaard en rechtstreeks gereproduceerd via simulatie (niet
+aangenomen):** een goedkeuringspoging op transactionIndex 5 (dat al "Approved" staat)
+rechtstreeks tegen devnet gesimuleerd:
+```
+Error Code: InvalidProposalStatus. Error Number: 6008. "Invalid proposal status."
+```
+Het Squads-programma wijst terecht een stem af op een voorstel dat al niet meer "Active"
+is - een volkomen onschuldige, verwachte afwijzing. Zowel Phantom als Solflare vertalen die
+specifieke on-chain-fout kennelijk naar dezelfde generieke, onherkenbare "Unexpected
+error"/"internalError" i.p.v. de daadwerkelijke reden te tonen - hetzelfde patroon als de
+eerder gedocumenteerde premature-execute-poging in sectie 44. **Dit betekent dat de
+uitgebreide sectie-44/45-conclusie "Solflare's deep-link-protocol heeft een niet-lokaal-
+oplosbaar transportprobleem" vermoedelijk voorbarig was** - de eerdere mislukte
+telefoonpogingen probeerden zeer waarschijnlijk dezelfde soort ongeldige herhaalde stem,
+niet een kapotte encodering. Niet met 100% zekerheid met terugwerkende kracht vast te
+stellen, en niet meer relevant om verder uit te zoeken nu de drempel al gehaald is.
+
+**Praktisch gevolg: er is niets meer te goedkeuren.** De 72u-timelock loopt al en is
+verstreken op **2026-08-15T15:46:49Z**. Voorstel #2 blijft onaangeroerd op 1-van-2 en is nu
+irrelevant - #5 is functioneel identiek (dezelfde canary-upgrade) en al verder.
+
+**Preventieve fix in `wallet-signer.html`, zodat dit type verwarring niet kan
+terugkomen:** een nieuwe `checkProposalReadyForAction()`-controle, aangeroepen vanuit
+zowel `buildApproveTx()` als `buildExecuteTx()`, die de status van het doelvoorstel VOORAF
+opvraagt en een duidelijke Nederlandse melding geeft in plaats van de transactie te
+versturen en op een cryptische walletfout te wachten:
+- Goedkeuren op een niet-"Active"-voorstel: legt uit dat het al de vereiste goedkeuringen
+  heeft en verwijst naar "4. Uitvoeren" na de timelock.
+- Uitvoeren op een niet-"Approved"-voorstel: legt uit hoeveel goedkeuringen er nog
+  ontbreken.
+- Uitvoeren vóór het verstrijken van de timelock: toont het exacte uitvoerbaar-vanaf-
+  tijdstip en de resterende tijd in uren.
+
+Daarnaast toont de pagina nu meteen bij verbinden (`logCurrentProposalStatus()`) op welk
+voorstel-nummer de knoppen zich richten en wat de status daarvan is - zodat dit nooit meer
+pas via een mislukte poging ontdekt hoeft te worden. Build-markering opgehoogd
+(`2026-08-12T16:05:00Z-proposal-status-preflight-check`), geverifieerd via `node --check`
+en dat de server de bijgewerkte pagina serveert.
+
+**Openstaand:** wachten tot 2026-08-15T15:46:49Z, daarna via `wallet-signer.html` (knop 4,
+op elk apparaat met een geregistreerd lid) voorstel #5 uitvoeren, en daarna bevestigen via
+`solana program show` + `solana program dump` (zelfde bewijspatroon als de repetitie in
+sectie 41) dat de canary-bytecode daadwerkelijk is bijgewerkt.

@@ -2463,6 +2463,42 @@ Solflare. Geverifieerd: `node --check` slaagt, de draaiende server serveert de b
 pagina (`localStorage.getItem(DEEPLINK_STORAGE_KEY)` aanwezig), en de eerdere "Not
 Found"-curl-test blijft 200 geven.
 
+**Vervolgtest: verbinden werkte volledig** (localStorage-fix hield stand, juiste adres
+`CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3` herkend als lid). **Nieuw probleem bij het
+ondertekenen:** na klikken op "3. Voorstel goedkeuren" kwam de foutmelding "Solflare wees
+het deep-link-verzoek (execute) af: DeeplinkErrorCode.internalError", terwijl niet op
+"4. Uitvoeren" geklikt was.
+
+Eerst gecontroleerd tegen Solflare's eigen documentatie of dit op een verkeerde
+methode-naam kan wijzen: nee - propose/approve/execute zijn alle drie in essentie "onderteken
+en verstuur deze reeds opgebouwde transactie", en Solflare's deep-link-protocol heeft daar
+precies EEN methode voor (`https://solflare.com/ul/v1/signAndSendTransaction`) - geen
+aparte "approve"- of "execute"-methode. Bevestigd tegen zowel de exacte spec als Solflare's
+eigen referentie-implementatie. Het "(execute)"-label in de foutmelding komt dus niet van
+Solflare - dat is uitsluitend eigen lokale boekhouding (`state.pendingAction`, uit
+localStorage), teruggegeven in het logbericht.
+
+Werkhypothese (niet met zekerheid vastgesteld, telefoon niet direct instrumenteerbaar):
+een eerdere, nooit-afgeronde executeer-poging tijdens het testen (bijv. de terug-knop van
+het toestel gebruikt om Solflare te verlaten i.p.v. een expliciete annulering in de app)
+leverde geen redirect-antwoord op, dus bleef `pendingAction` op "execute" staan in
+localStorage. Normaliter overschrijft een volgende actie (de latere klik op "3.
+Goedkeuren") dat gewoon; mogelijk leverde het toestel (MIUI, zie boven, bekend om
+vertraagd/gequeued intent-gedrag) echter alsnog een vertraagd antwoord op die OUDERE
+poging af, dat werd verward met een reactie op de nieuwe.
+
+Niet aangenomen, wel voorbereid op herhaling: drie aanvullingen aan `wallet-signer.html`
+zodat een volgende keer met zekerheid vastgesteld kan worden wat er speelt. (1) Een
+expliciete waarschuwing wanneer een NIEUWE actie gestart wordt terwijl er nog een ANDERE,
+niet-afgeronde actie openstond (dat had dit scenario meteen zichtbaar gemaakt). (2) Het
+volledige uitgaande verzoek (methode, alle payload-velden, tijdstip) wordt nu gelogd - naar
+console EN naar localStorage (overleeft de wegnavigatie, in tegenstelling tot console-/
+on-page-logs) - zodat het bij terugkomst, ook bij een foutmelding, exact valt te herleiden
+welk verzoek bij welk antwoord hoort, inclusief hoe lang geleden dat verzoek verstuurd werd.
+(3) Een nieuwe knop "Vastgelopen Solflare-deep-link-status wissen" - een manier voor de
+gebruiker om zelf een muurvast/verouderd `pendingAction` te wissen zonder tussenkomst.
+Geverifieerd: `node --check` slaagt, server herstart en serveert de bijgewerkte pagina.
+
 ## 45. Dependabot-kwetsbaarheden onderzocht: uuid gefixt, esbuild/vite blijven bewust geblokkeerd (zelfde reden als sectie 20), postcss bleek niet (meer) van toepassing
 
 Op verzoek de 6 open Dependabot-alerts (1 high, 5 moderate) grondig onderzocht via `gh api

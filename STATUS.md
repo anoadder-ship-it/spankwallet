@@ -4,7 +4,99 @@
 een nieuwe chatsessie. Legt vast waar we staan en waarom, zodat niets herhaald hoeft te
 worden.
 
-Laatst bijgewerkt: eerste volledig groene lokale testrun (8/8 passing).
+Laatst bijgewerkt: 2026-08-12 - opschonings-/documentatieronde na de UI-ontwerpfase
+(secties 49-50); volgende concrete mijlpaal is de canary-upgrade-uitvoering op
+2026-08-15T15:46:49Z.
+
+---
+
+## Huidige staat (bijgewerkt: 2026-08-12)
+
+Deze sectie is de actuele samenvatting. De genummerde secties hieronder (inmiddels 50+)
+blijven het volledige, chronologische logboek - toegevoegd, nooit ingekort of
+herschreven. Sectie 2 en sectie 4 zijn de OORSPRONKELIJKE versies van precies dit soort
+samenvatting, uit het allereerste begin van het project (8/8 lokale tests, execute/hunt
+nog niet getest) - inmiddels sterk verouderd, met opzet ongewijzigd gelaten als onderdeel
+van het logboek. Deze sectie hier is de vervanger die je als eerste moet lezen.
+
+**Bewezen werkend, end-to-end op devnet met echte hardware-passkeys:**
+- Alle 19 instructies (init_wallet t/m execute_advanced_via_session) - passkey-auth,
+  multi-passkey, session keys, recovery, programma-allowlist, hunt/anti-spam (secties
+  1-40).
+- Upgrade-authority gemigreerd van een enkele sleutel naar een 2-of-3 Squads V4-multisig
+  met 72u-timelock (secties 41-46) - de #1-prioriteit uit de externe security-review.
+- Drie onafhankelijke, industriestandaard geautomatiseerde audittechnieken (statische
+  analyse via Sec3 X-Ray, fuzzing-scaffolding via Trident, formele verificatie via Kani)
+  daadwerkelijk tegen de code gedraaid - geen nieuwe kwetsbaarheden gevonden binnen hun
+  bereik (sectie 47).
+- Een eerste, kleinste stap naar een menselijk-leesbare transactie-UI: de
+  execute-bevestiging in de testclient toont nu bedrag + ontvanger in gewone taal, met
+  een expliciete weiger-optie vóór de passkey-prompt, i.p.v. stilzwijgend hardgecodeerde
+  testwaarden (secties 49-50).
+
+**Openstaand:**
+- Canary-upgrade-uitvoering wacht op de 72u-timelock: uitvoerbaar vanaf
+  **2026-08-15T15:46:49Z** (sectie 46).
+- UI-ontwerp fase 1-3 (risicoklassen, resterende 18 instructies, eventuele
+  browserextensie) - ontwerp in sectie 49's artifact, fase 0 gebouwd in sectie 50.
+- Certora/CVLR-formele-verificatie van de secp256r1-signature-logica: geblokkeerd op twee
+  onafhankelijk bevestigde infrastructuurredenen, niet op een taalkundig-onmogelijke
+  eigenschap (sectie 48).
+- `client`'s `npm run build` faalt op een pre-bestaande TypeScript-strictheidsfout
+  (sectie 45) - losstaand, nog niet opgelost.
+- esbuild/vite Dependabot-alerts blijven bewust ongepatcht (vereist een major-upgrade,
+  sectie 45).
+
+**Eerstvolgende stap:** wachten tot 2026-08-15T15:46:49Z, dan via `wallet-signer.html`
+de canary-execute uitvoeren en on-chain bevestigen (zelfde bewijspatroon als de repetitie
+in sectie 41). Daarna, zoals afgesproken pas ná die bevestiging: sectie 50's fase 1 van de
+UI-preview oppakken (risicoklassen + resterende instructies).
+
+## Kritieke gotchas - snelle referentie
+
+Voor het volledige verhaal: zie de genoemde sectie. Dit is uitsluitend een index, geen
+vervanging van de detail.
+
+- **Solana CLI-config kan een verkeerde, gedeelde signer geven.** Zonder expliciete
+  `--keypair`/`--upgrade-authority` leunt de Solana CLI op de globale configdefault - op
+  deze machine ooit een keypair van een compleet ander, ongerelateerd project. Kwam
+  **drie keer** terug in verschillende vormen (deploy-script, `set-upgrade-authority`,
+  admin-scripts). Altijd expliciet een keypair meegeven, nooit op de globale default
+  vertrouwen. Secties 35, 41, 42.
+- **`solana program deploy` geeft standaard NUL upgrade-headroom.** Elke latere upgrade
+  met een groter binary faalt anders met `AccountDataTooSmall`. Fix: `solana program
+  extend` vooraf, ruim boven de huidige binary-grootte. Secties 41, 42.
+- **CSP `connect-src` heeft zowel `https://` als `wss://` nodig** voor elk RPC-endpoint -
+  `@solana/web3.js` leidt zelf een websocket-URL af voor confirmations/subscriptions,
+  onafhankelijk van welk protocol de client zelf expliciet aanroept. Sectie 35.
+- **Browsercache kan een oudere paginaversie serveren na een redirect-terugkeer**
+  (bijv. na een deep-link-round-trip) - zonder expliciete `Cache-Control: no-store`
+  imiteert dat onzichtbaar een "de code werkt niet"-bug. Sectie 44.
+- **Brave's ingebouwde wallet kan Wallet Standard-verbindingen onderscheppen** die voor
+  een andere extensie (bijv. Phantom) bedoeld waren - verbindt dan stilzwijgend met het
+  verkeerde account. Uitschakelen in Brave's eigen instellingen. Sectie 44.
+- **Een knop die "de huidige/hoogste transactionIndex" leest is geen vervanging voor
+  het volgen van een specifiek voorstel.** Zodra duplicaten ontstaan (bijv. door een
+  retry na een schijnbare fout), volgt zo'n knop automatisch het nieuwste voorstel, niet
+  het voorstel waar je oorspronkelijk aan begon. Sectie 46.
+- **Niet elke tool publiceert linux-aarch64-builds.** Bevestigd voor Certora's
+  Solana-platform-tools (uitsluitend linux-x86_64 en macOS) - controleer dit VOOR je een
+  toolinstallatie plant op ARM64-Linux. Sectie 48.
+- **Een eigen (niet-rustc) parser kan struikelen over geldige Rust-syntax.** Sec3 X-Ray's
+  ANTLR-parser op `<<`/`>>` in array-indexcontext - een bevestigde toolbeperking is geen
+  codefout. Verifieer altijd tegen de daadwerkelijke compiler voor je concludeert dat
+  code zelf fout is. Sectie 47.
+- **`anchor keys sync` + `--clean` is destructief voor een bestaand gedeployed
+  programma** - genereert een nieuwe willekeurige keypair en herschrijft `declare_id!`.
+  Alleen bewust gebruiken voor lokaal testen, daarna chirurgisch (niet met een blanket
+  `git checkout`) terugdraaien. Sectie 35.
+- **Overladen naamgeving tussen ongerelateerde tools kost tijd.** "Execute" betekende op
+  een gegeven moment twee compleet verschillende dingen (SpankWallet's eigen
+  SOL-verzendinstructie versus Squads' voorstel-uitvoering) - veroorzaakte een fout in
+  een eigen ontwerpdocument. Inmiddels hernoemd in `wallet-signer.html`. Zie de sectie
+  hieronder over de opschonings-/documentatieronde.
+
+---
 
 ## 1. Wat SpankWallet is
 

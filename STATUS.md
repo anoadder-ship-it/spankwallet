@@ -2856,3 +2856,124 @@ add_allowed_program/remove_allowed_program als eerste concrete flow, (2) X-Ray's
 parserbeperking melden bij sec3-product/x-ray zodat toekomstige scans niet meer om de
 bug heen hoeven te werken, (3) Certora/CVLR voor de secp256r1-verificatielogica als
 aparte, geplande taak.
+
+## 48. Certora Prover/CVLR-Solana voor verify_passkey_signature_multi: grondig geprobeerd, twee onafhankelijke, reeel-bevestigde blokkades gevonden - eerlijk gerapporteerd, geen zwakker doel als vervanging gepresenteerd
+
+Vervolg op sectie 47's aanbeveling. Op expliciet verzoek de zwaarste vervolgstap
+daadwerkelijk opgepakt: Certora Prover opzetten voor `verify_passkey_signature_multi` -
+de meest veiligheidskritieke, ongebruikelijkste logica in het hele programma
+(secp256r1-handtekeningverificatie via instruction-introspection). Zoals gevraagd
+empirisch aangepakt: elke aanname over CVLR-Solana's mogelijkheden geverifieerd tegen de
+daadwerkelijke broncode van drie repositories (`Certora/cvlr`, `Certora/cvlr-solana`,
+`Certora/CertoraProver`), niet aangenomen.
+
+**Stap 1: Certora Prover opnieuw bevestigd gratis/open-source (niet aangenomen).**
+Sinds februari 2025 GPLv3, gratis. Wel een nuance ontdekt die niet in sectie 47 stond:
+het draaien vereist een persoonlijke access key via registratie op certora.com/signup -
+dat kan niet namens de gebruiker gedaan worden. Gebruiker heeft dit zelf geregeld.
+`certora-cli` succesvol geinstalleerd (via een Python-venv, i.v.m. PEP 668
+"externally-managed-environment").
+
+**Stap 2: CVLR-Solana's daadwerkelijke mogelijkheden onderzocht - grondig, niet
+aangenomen op basis van sectie 47's eerdere (correcte, maar minder diepgaande)
+inschatting.** Alle drie de relevante repositories gekloond en doorzocht:
+- `cvlr-solana`'s eigen modulelijst (`clock`, `layout`, `log`, `macros`, `nondet`,
+  `pubkey`, `token`) bevat geen instruction-sysvar- of hash-gerelateerde module.
+- Een volledige repo-brede grep naar "sysvar", "ed25519", "secp256", "precompile",
+  "sha256", "hash", "uninterpreted", "axiom" over `cvlr`, `cvlr-solana`, EN
+  `CertoraProver` samen: uitsluitend incidentele treffers in `Cargo.lock`-bestanden
+  (afhankelijkheidsvermeldingen) of een niet-relevant Soroban(Stellar)-testbestand -
+  nergens daadwerkelijk gemodelleerde functionaliteit.
+- Alle 10 bestaande Solana-testvoorbeelden in `CertoraProver/Public/TestSolana/`
+  bekeken: uitsluitend rekenkunde (overflow, signed math, ceiling division) en
+  basale account-/CPI-flow-eigenschappen (rent, account-geschreven-check) - geen
+  enkel voorbeeld raakt cryptografische handtekeningverificatie.
+- `CpisTest`'s daadwerkelijke `spec.rs` en `cvlr_summaries_core.txt` gelezen om het
+  summarisatiemechanisme zelf te doorgronden: de "summaries" zijn LAGE-NIVEAU
+  LLVM/SBF-pointer-typeringen voor de eigen pointer-analyse van de prover (bijv.
+  `sol_get_clock_sysvar` als "dit retourneert een getal, geen pointer"), GEEN
+  mechanisme om een willekeurige Rust-functie een hoog-niveau gedragsaxioma te geven
+  (zoals "deze hashfunctie is injectief/botsingsbestendig").
+- Doorgezocht of de prover zelf zo'n mechanisme HEEFT maar dan elders: gevonden
+  (`analysis/hash/DisciplinedHashModel.kt`, `optimizer/HashOptimizations.kt`) - maar
+  bij nadere inspectie EVM-specifiek (importeert `evm.EVM_WORD_SIZE`/`evm.MASK_SIZE`,
+  Solidity/keccak256-storage-slot-machinerie), niet aangetroffen in het
+  Solana/SBF-specifieke compilatiepad.
+- **Concreet, technisch relevante ontdekking, niet eerder vastgesteld in sectie 47**:
+  `solana-keccak-hasher`'s daadwerkelijke broncode gelezen - `hashv()` compileert voor
+  het echte SBF-doel naar een AANROEP VAN DE `sol_keccak256`-SYSCALL (niet inline
+  bit-manipulatie-Rust-code). Dit is structureel identiek aan `sol_get_clock_sysvar`,
+  waarvoor WEL een summary bestaat - dit gaf reele hoop dat een summary voor
+  `sol_keccak256` toegevoegd zou kunnen worden, ook al is er nu geen precedent.
+
+**Stap 3: een concreet, beperkt eerste doel geschreven en LOKAAL gecompileerd (niet
+enkel beschreven).** Zoals gevraagd niet meteen de volledige functie geprobeerd, maar
+de kern-deeleigenschap achter de front-running-fix (sectie 21-22): een handtekening
+geldig voor challenge = hash(programma-ID, wallet, "execute", recipient||amount) mag
+nooit herbruikt kunnen worden voor een ANDER (recipient, amount)-paar. Een 1-op-1 kopie
+van `build_expected_challenge` en `execute`'s payload-opbouw
+(`programs/spankwallet/src/instructions.rs` regels 533-537, 597-599) geschreven als
+CVLR-`#[rule]`, met echte, tegen de broncode geverifieerde API's (een eerste, verkeerd
+geraden functienaam - `nondet_pubkey_bytes` - gevonden en gecorrigeerd naar de
+daadwerkelijk bestaande `cvlr_nondet_pubkey()`):
+
+```rust
+#[rule]
+pub fn rule_challenge_binding_prevents_recipient_amount_substitution() {
+    let wallet: Pubkey = cvlr_solana::cvlr_nondet_pubkey();
+    let recipient_a: Pubkey = cvlr_solana::cvlr_nondet_pubkey();
+    let amount_a: u64 = nondet();
+    let recipient_b: Pubkey = cvlr_solana::cvlr_nondet_pubkey();
+    let amount_b: u64 = nondet();
+
+    let challenge_a = build_expected_challenge(&wallet, b"execute", &build_execute_payload(&recipient_a, amount_a));
+    let challenge_b = build_expected_challenge(&wallet, b"execute", &build_execute_payload(&recipient_b, amount_b));
+
+    cvlr_assume!(challenge_a == challenge_b); // aanvalsscenario
+    cvlr_assert!(recipient_a == recipient_b); // moet gelden als de binding klopt
+    cvlr_assert!(amount_a == amount_b);
+}
+```
+
+`cargo check` slaagt zonder fouten - de spec zelf is correct Rust en gebruikt uitsluitend
+bestaande, geverifieerde CVLR-primitieven.
+
+**Stap 4: twee onafhankelijke, reele infrastructuurblokkades tegengekomen bij het
+daadwerkelijk laten draaien (niet bij het modelleren zelf).** Certora's Solana-pad
+analyseert gecompileerde SBF-bytecode, niet ruwe broncode - vereist `cargo
+certora-sbf` (een apart, Certora-eigen cargo-subcommando):
+- Certora's eigen documentatie schrijft Rust-toolchain 1.81 voor - bleek te oud voor
+  hun eigen huidige `cargo-certora-sbf 0.3.5` (gebruikt `Option::is_none_or`,
+  gestabiliseerd in Rust 1.82) - een bevestigde inconsistentie in hun eigen
+  documentatie/tooling, omzeild door de standaard-systeemtoolchain (1.97.1) te
+  gebruiken i.p.v. de voorgeschreven 1.81.
+- Daarna: `cargo certora-sbf --no-build` faalt met een HTTP 404 bij het downloaden van
+  `platform-tools-linux-aarch64.tar.bz2`. Rechtstreeks bevestigd tegen
+  `Certora/certora-solana-platform-tools`'s GitHub Releases (5+ recente versies
+  gecontroleerd, v1.43.1 t/m v1.53): er bestaat GEEN linux-aarch64-build, uitsluitend
+  linux-x86_64 en macOS (beide architecturen). Deze machine is aarch64
+  (`uname -m`).
+- Geprobeerd te omzeilen via x86_64-emulatie (Docker `--platform linux/amd64`,
+  aanwezige FEX-emu-binfmt-handler op de host) - faalde op een apart, onderliggend
+  probleem (FEX niet correct doorgekoppeld naar Docker's containeromgeving, zelfs
+  `hello-world` faalt) dat een host-brede virtualisatie-configuratiekwestie is, los van
+  Certora/CVLR-Solana zelf - buiten redelijke scope om vanavond verder op te lossen.
+
+**Eindconclusie, zoals gevraagd eerlijk gerapporteerd (geen zwakkere eigenschap
+gepresenteerd als het oorspronkelijke doel):** het originele doel - `verify_
+passkey_signature_multi`'s secp256r1-via-instruction-introspection-verificatie formeel
+bewijzen - is NIET bereikt, om TWEE onafhankelijke, allebei empirisch bevestigde
+redenen: (1) CVLR-Solana heeft momenteel geen primitief om instruction-sysvar-
+introspectie of een hashfunctie als axiomatisch injectief/botsingsbestendig te
+modelleren (een taalmogelijkheids-beperking van de huidige, publiek beschikbare
+tooling, geen fundamentele onmogelijkheid van formele verificatie in het algemeen -
+Certora's eigen EVM-tooling heeft wel vergelijkbare hash-modellering, alleen nog niet
+overgezet naar de Solana-kant), en (2) Certora's Solana-platform-tools ondersteunen
+op dit moment geen linux-aarch64-hosts, waardoor zelfs een wel-modelleerbare eigenschap
+op DEZE machine niet lokaal gecompileerd/gedraaid kan worden. De geschreven
+`#[rule]`-spec hierboven is wel degelijk het gevraagde originele modelleringswerk -
+compileert correct, gebruikt uitsluitend geverifieerde echte API's - maar kon niet
+daadwerkelijk door de prover bevestigd worden. Op de gebruiker's beslissing niet verder
+opgelost vanavond (vereist ofwel een linux-x86_64/macOS-machine, ofwel een
+sol_keccak256-summary die nog niet bestaat) - een aparte, geplande taak zodra een van
+beide beschikbaar is.

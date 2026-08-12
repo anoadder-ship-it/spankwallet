@@ -93,8 +93,7 @@ vervanging van de detail.
 - **Overladen naamgeving tussen ongerelateerde tools kost tijd.** "Execute" betekende op
   een gegeven moment twee compleet verschillende dingen (SpankWallet's eigen
   SOL-verzendinstructie versus Squads' voorstel-uitvoering) - veroorzaakte een fout in
-  een eigen ontwerpdocument. Inmiddels hernoemd in `wallet-signer.html`. Zie de sectie
-  hieronder over de opschonings-/documentatieronde.
+  een eigen ontwerpdocument. Inmiddels hernoemd in `wallet-signer.html`. Sectie 51.
 
 ---
 

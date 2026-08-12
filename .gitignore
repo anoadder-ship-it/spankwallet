@@ -5,3 +5,4 @@ test-ledger/
 *.log
 *.deb
 .xray/
+admin/*.pem

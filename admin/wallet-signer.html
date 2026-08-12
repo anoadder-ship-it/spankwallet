@@ -1,0 +1,973 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      CSP toegevoegd tijdens de opschoningsronde (STATUS.md, "Fase 3") -
+      deze pagina had voordien GEEN enkele security-header, in
+      tegenstelling tot client/'s strikte CSP (STATUS.md sectie 33+).
+      Bewust minder streng dan client/'s CSP: dit blijft doelbewust een
+      enkel HTML-bestand met inline <script>/<style> (geen build-stap
+      nodig - moet op elk signer-apparaat direct te openen zijn), dus
+      'unsafe-inline' is hier niet te vermijden zonder de hele opzet te
+      herzien. Wel afgedwongen: geen framing (frame-ancestors 'none'),
+      geen object-embeds, en connect-/script-src beperkt tot precies de
+      origins die deze pagina daadwerkelijk gebruikt (esm.sh voor
+      CDN-imports, Helius voor RPC - geverifieerd door de bestaande
+      import-/fetch-aanroepen in dit bestand na te lopen, niet aangenomen).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline'; connect-src 'self' https://devnet.helius-rpc.com; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'"
+    />
+    <title>SpankWallet upgrade-authority - Squads-ondertekenpagina</title>
+    <style>
+      body { font-family: monospace; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+      button { display: block; margin: 0.5rem 0; padding: 0.6rem 1rem; font-size: 1rem; }
+      button:disabled { opacity: 0.5; }
+      #output { white-space: pre-wrap; background: #111; color: #ddd; padding: 1rem; margin-top: 1rem; border-radius: 4px; min-height: 4rem; }
+      .log-success { color: #7fff7f; }
+      .log-error { color: #ff7f7f; }
+      .log-debug { color: #7f9fff; }
+    </style>
+  </head>
+  <body>
+    <h1>SpankWallet upgrade-authority - ondertekenen via wallet-extensie</h1>
+    <p>
+      Deze pagina bouwt de Squads-multisig-transacties zelf op en laat je
+      wallet-extensie (Phantom/Solflare) ze rechtstreeks ondertekenen via zijn
+      eigen goedkeuringspopup - de private key verlaat nooit de extensie.
+      Geen geexporteerde sleutels, geen Squads-webinterface nodig.
+    </p>
+    <p>
+      Programma: <code>9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9</code><br />
+      Multisig: <code>A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp</code><br />
+      Buffer (canary-wijziging): <code>7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh</code>
+    </p>
+    <button id="connect-btn">1. Wallet verbinden (desktop-extensie, of Mobile Wallet Adapter op Android)</button>
+    <button id="connect-solflare-deeplink-btn">1b. Verbinden via Solflare (mobiel, echte deep-link naar de app)</button>
+    <button id="propose-btn" disabled>2. Upgrade-voorstel indienen (voorstel + proposal in EEN handtekening)</button>
+    <button id="approve-btn" disabled>3. Voorstel goedkeuren</button>
+    <button id="squads-execute-btn" disabled>4. Uitvoeren (pas mogelijk na de 72u-timelock)</button>
+    <button id="reset-deeplink-state-btn">Vastgelopen Solflare-deep-link-status wissen (alleen gebruiken als een oude, nooit-afgeronde actie in de weg lijkt te zitten)</button>
+    <div id="output"></div>
+
+    <!--
+      Klassiek (niet-module) script, draait ALTIJD, ongeacht of de
+      module-imports hieronder slagen - vangt fouten op die anders
+      onzichtbaar zouden blijven (bijv. een module die faalt te laden zonder
+      duidelijke consolefout, of een fout die de devtools-console om wat voor
+      reden dan ook niet toont).
+    -->
+    <script>
+      function earlyLog(msg, cls) {
+        var el = document.getElementById("output");
+        var line = document.createElement("div");
+        if (cls) line.className = cls;
+        line.textContent = msg;
+        el.appendChild(line);
+      }
+      // Handmatige build-markering - VOORAAN geplaatst zodat hij altijd
+      // zichtbaar is, ongeacht of de module hieronder laadt. Bedoeld om
+      // definitief vast te stellen of de telefoon daadwerkelijk de nieuwste
+      // versie van dit bestand draait, of een door de browser gecachte
+      // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
+      // server.js voor de bijbehorende no-cache-headerfix). Handmatig
+      // ophogen bij elke wijziging aan deze pagina.
+      var PAGE_BUILD = "2026-08-12T23:50:00Z-admin-permanent-home-plus-csp";
+      earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
+      earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
+      earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
+      window.addEventListener("error", function (e) {
+        earlyLog("FOUT (window.onerror): " + e.message + (e.filename ? " @ " + e.filename + ":" + e.lineno : ""), "log-error");
+      });
+      window.addEventListener("unhandledrejection", function (e) {
+        earlyLog("FOUT (onbehandelde promise-afwijzing): " + (e.reason && e.reason.message ? e.reason.message : String(e.reason)), "log-error");
+      });
+    </script>
+
+    <script type="module">
+      function log(msg, cls) {
+        const el = document.getElementById("output");
+        const line = document.createElement("div");
+        if (cls) line.className = cls;
+        else if (msg.startsWith("SUCCES")) line.className = "log-success";
+        else if (msg.startsWith("FOUT")) line.className = "log-error";
+        line.textContent = msg;
+        el.appendChild(line);
+      }
+
+      log("[debug] module-script gestart, imports worden nu een voor een geladen...", "log-debug");
+
+      let Connection, PublicKey, TransactionMessage, TransactionInstruction, VersionedTransaction, SYSVAR_RENT_PUBKEY, SYSVAR_CLOCK_PUBKEY;
+      let multisig;
+      let getWallets;
+      let bs58;
+      let nacl;
+
+      try {
+        const web3 = await import("https://esm.sh/@solana/web3.js@1.98.4");
+        ({ Connection, PublicKey, TransactionMessage, TransactionInstruction, VersionedTransaction, SYSVAR_RENT_PUBKEY, SYSVAR_CLOCK_PUBKEY } = web3);
+        log("[debug] @solana/web3.js geladen.", "log-debug");
+      } catch (err) {
+        log("FOUT: @solana/web3.js kon niet geladen worden: " + err.message);
+        throw err;
+      }
+
+      try {
+        multisig = await import("https://esm.sh/@sqds/multisig@2.1.4");
+        log("[debug] @sqds/multisig geladen.", "log-debug");
+      } catch (err) {
+        log("FOUT: @sqds/multisig kon niet geladen worden: " + err.message);
+        throw err;
+      }
+
+      try {
+        const walletStandard = await import("https://esm.sh/@wallet-standard/app@1.1.0");
+        getWallets = walletStandard.getWallets;
+        log("[debug] @wallet-standard/app geladen.", "log-debug");
+      } catch (err) {
+        log("FOUT: @wallet-standard/app kon niet geladen worden: " + err.message);
+        throw err;
+      }
+
+      try {
+        const bs58mod = await import("https://esm.sh/bs58@5.0.0");
+        bs58 = bs58mod.default;
+        log("[debug] bs58 geladen.", "log-debug");
+      } catch (err) {
+        log("FOUT: bs58 kon niet geladen worden: " + err.message);
+        throw err;
+      }
+
+      try {
+        const naclMod = await import("https://esm.sh/tweetnacl@1.0.3");
+        nacl = naclMod.default;
+        log("[debug] tweetnacl geladen (nodig voor Solflare-deep-link-encryptie).", "log-debug");
+      } catch (err) {
+        log("FOUT: tweetnacl kon niet geladen worden: " + err.message);
+        throw err;
+      }
+
+      // Mobile Wallet Adapter (MWA) - het officiele Solana Mobile Stack-
+      // protocol, apart van (en aanvullend op) Wallet Standard. Op Android
+      // registreert dit zichzelf ALS een Wallet Standard-provider (via
+      // dezelfde registerWallet()-mechaniek als een browserextensie), dus
+      // de bestaande connectWallet()-code hieronder heeft geen aparte
+      // MWA-code nodig - hij vindt 'm gewoon via getWallets(). Zonder deze
+      // registratie-aanroep is er op mobiel NOOIT een Wallet Standard-
+      // provider te vinden, ongeacht welke browser: geen enkele mobiele
+      // wallet-app injecteert zichzelf vanzelf zoals een desktopextensie
+      // dat doet. Bron: solana-mobile/mobile-wallet-adapter,
+      // js/packages/wallet-standard-mobile/src/initialize.ts.
+      if (/Android/i.test(navigator.userAgent)) {
+        try {
+          const mwaMod = await import("https://esm.sh/@solana-mobile/wallet-standard-mobile@0.5.3");
+          const {
+            registerMwa,
+            createDefaultAuthorizationCache,
+            createDefaultChainSelector,
+            defaultErrorModalWalletNotFoundHandler,
+          } = mwaMod;
+          registerMwa({
+            appIdentity: { name: "SpankWallet upgrade-authority signer", uri: window.location.origin },
+            authorizationCache: createDefaultAuthorizationCache(),
+            chains: ["solana:devnet"],
+            chainSelector: createDefaultChainSelector(),
+            onWalletNotFound: defaultErrorModalWalletNotFoundHandler,
+          });
+          log("[debug] Mobile Wallet Adapter geregistreerd als Wallet Standard-provider (Android gedetecteerd).", "log-debug");
+        } catch (err) {
+          log("[debug] Mobile Wallet Adapter kon niet geregistreerd worden: " + err.message, "log-debug");
+        }
+      } else {
+        log("[debug] Geen Android gedetecteerd - Mobile Wallet Adapter wordt niet geregistreerd (niet nodig op desktop).", "log-debug");
+      }
+
+      log("[debug] alle imports geslaagd - pagina is klaar.", "log-debug");
+
+      const DEVNET_URL =
+        "https://devnet.helius-rpc.com/?api-key=f39fc413-6730-4848-a60f-a6685a6f04d3";
+
+      const SPANKWALLET_PROGRAM_ID = new PublicKey("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
+      const SPANKWALLET_PROGRAM_DATA = new PublicKey("5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq");
+      const MULTISIG_PDA = new PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
+      const VAULT_PDA = new PublicKey("89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw");
+      const BUFFER = new PublicKey("7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh");
+      const BPF_LOADER_UPGRADEABLE = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
+
+      const connection = new Connection(DEVNET_URL, "confirmed");
+
+      // Vast, expliciet redirect-doel voor de Solflare-deep-link - NIET
+      // afgeleid van window.location.pathname. Als deze pagina via het
+      // kale https://host:8766/ (pathname "/") geopend wordt i.p.v.
+      // .../wallet-signer.html, zou pathname-afgeleide redirect_link naar
+      // "/" wijzen - en de statische server had daar een bug (inmiddels
+      // gefixt in https-server.js) waarbij "/?nonce=...&data=..." niet als
+      // "/" herkend werd en op een 404 uitkwam. Door dit adres hier hard te
+      // coderen is de deep-link-flow niet meer afhankelijk van welke URL de
+      // gebruiker toevallig heeft ingetikt.
+      const REDIRECT_URL = window.location.origin + "/wallet-signer.html";
+
+      let connectedWallet = null;
+
+      // --- Solflare deep-link-protocol (docs.solflare.com/solflare/technical/deeplinks) ---
+      //
+      // Dit is NIET hetzelfde als @solflare-wallet/sdk (de iframe-aanpak die
+      // eerder knop 1b gebruikte) - dat bleek op mobiel een verkeerd,
+      // niet-bij-de-app-horend adres terug te geven, hoogstwaarschijnlijk
+      // omdat een cross-origin iframe standaard niet zelfstandig de
+      // top-level pagina mag laten navigeren naar een deep-link/intent
+      // (browsers blokkeren dit - "framebusting intervention"), waardoor de
+      // iframe nooit echt de geinstalleerde Solflare-app bereikte en in
+      // plaats daarvan zijn eigen, losse sessie leverde. Dit deep-link-
+      // protocol werkt wel: de HELE pagina navigeert zelf (volledige
+      // paginanavigatie, geen iframe) naar solflare.com/ul/v1/<methode>,
+      // Android's OS-eigen App Links-afhandeling opent daadwerkelijk de
+      // geinstalleerde app, en de app stuurt de gebruiker terug naar
+      // redirect_link met een nacl-box-versleuteld antwoord in de
+      // query-string. Geverifieerd tegen Solflare's eigen officiele
+      // referentie-implementatie (github.com/solflare-wallet/deep-link-
+      // sample-app, App.tsx) - dezelfde encrypt/decrypt-aanpak is hieronder
+      // overgenomen, alleen window.location.href i.p.v. Linking.openURL().
+      //
+      // Omdat een volledige paginanavigatie de JS-context wist, kan een
+      // knopklik hier NOOIT synchroon op een resultaat wachten zoals bij
+      // Wallet Standard - status moet dus overleven tot de pagina opnieuw
+      // laadt na de redirect terug. Bewust localStorage i.p.v.
+      // sessionStorage: MIUI/HyperOS (o.a. de Poco F7 waarop dit getest
+      // wordt) staat bekend om agressief browsertabbladen/-processen te
+      // killen zodra de gebruiker wegschakelt naar een andere app (zoals
+      // Solflare, tijdens het goedkeuren) - sessionStorage is expliciet
+      // gebonden aan de levensduur van die ene browsing-context en overleeft
+      // dat niet, terwijl localStorage aan het origin gebonden is en dat
+      // wel overleeft. Afweging: de sleutels blijven hierdoor iets langer
+      // hangen dan strikt noodzakelijk (tot de volgende succesvolle
+      // afronding, niet tot tabsluiting) - aanvaardbaar, dit zijn ephemere
+      // sessiesleutels voor het encryptiekanaal, geen langlevende geheimen.
+      const DEEPLINK_STORAGE_KEY = "spankwallet_solflare_deeplink_state";
+
+      function loadDeeplinkState() {
+        try {
+          const raw = localStorage.getItem(DEEPLINK_STORAGE_KEY);
+          return raw ? JSON.parse(raw) : null;
+        } catch (err) {
+          return null;
+        }
+      }
+
+      function saveDeeplinkState(state) {
+        localStorage.setItem(DEEPLINK_STORAGE_KEY, JSON.stringify(state));
+      }
+
+      function encryptPayload(payload, sharedSecret) {
+        const nonce = nacl.randomBytes(24);
+        const messageBytes = new TextEncoder().encode(JSON.stringify(payload));
+        const encrypted = nacl.box.after(messageBytes, nonce, sharedSecret);
+        return [nonce, encrypted];
+      }
+
+      function decryptPayload(data, nonceB58, sharedSecret) {
+        const decrypted = nacl.box.open.after(bs58.decode(data), bs58.decode(nonceB58), sharedSecret);
+        if (!decrypted) throw new Error("Kon Solflare-deep-link-antwoord niet ontsleutelen (nacl.box.open.after gaf null).");
+        return JSON.parse(new TextDecoder().decode(decrypted));
+      }
+
+      function isSolanaWallet(wallet) {
+        return (
+          "solana:signAndSendTransaction" in wallet.features ||
+          "solana:signTransaction" in wallet.features
+        );
+      }
+
+      async function connectWallet() {
+        log("[debug] connectWallet() aangeroepen.", "log-debug");
+        const { get } = getWallets();
+        const allWallets = get();
+        log("[debug] alle gedetecteerde Wallet Standard-providers (" + allWallets.length + "): " + allWallets.map((w) => w.name).join(", ") || "(geen)", "log-debug");
+
+        const wallets = allWallets.filter(isSolanaWallet);
+        log("[debug] daarvan Solana-compatibel: " + wallets.map((w) => w.name).join(", ") || "(geen)", "log-debug");
+
+        if (wallets.length === 0) {
+          throw new Error(
+            "Geen Solana-browserwallet gevonden via Wallet Standard. Mogelijke oorzaken: " +
+              "Phantom/Solflare niet geinstalleerd, extensie uitgeschakeld voor dit domein/deze site, " +
+              "of de extensie registreert zichzelf pas na een user-gesture (probeer nogmaals te klikken)."
+          );
+        }
+        const wallet = wallets[0];
+        log("[debug] gekozen wallet: " + wallet.name, "log-debug");
+
+        const connectFeature = wallet.features["standard:connect"];
+        log("[debug] standard:connect aanwezig: " + !!connectFeature, "log-debug");
+
+        log("[debug] document.hasFocus() voor connect(): " + document.hasFocus(), "log-debug");
+        log("[debug] connect() aanroepen...", "log-debug");
+
+        const timeoutHandle = setTimeout(() => {
+          log(
+            "[debug] connect() na 5s nog niet teruggekeerd (nog geen resolve of reject) - " +
+              "dit is een hang, geen silent reject. Controleer of er een nieuw Phantom-venster/" +
+              "tabblad geopend is (ook buiten beeld, op een ander scherm, of achter dit venster), " +
+              "of een rood bolletje/badge op het Phantom-extensie-icoon in de browserbalk staat. " +
+              "document.hasFocus() nu: " + document.hasFocus(),
+            "log-debug"
+          );
+        }, 5000);
+
+        let accounts;
+        try {
+          const result = await connectFeature.connect();
+          accounts = result.accounts;
+          log("[debug] connect() teruggekeerd (resolved), aantal accounts: " + accounts.length, "log-debug");
+        } catch (connectErr) {
+          log("FOUT bij connect(): " + connectErr.message, "log-error");
+          log("[debug] error.name: " + connectErr.name, "log-debug");
+          log("[debug] error.stack: " + (connectErr.stack || "(geen stack beschikbaar)"), "log-debug");
+          throw connectErr;
+        } finally {
+          clearTimeout(timeoutHandle);
+          log("[debug] document.hasFocus() na connect()-afhandeling: " + document.hasFocus(), "log-debug");
+        }
+
+        if (accounts.length === 0) throw new Error("Verbinding gaf geen accounts terug.");
+        const account = accounts[0];
+        const publicKey = new PublicKey(account.publicKey);
+
+        const signAndSendFeature = wallet.features["solana:signAndSendTransaction"];
+        if (!signAndSendFeature) {
+          throw new Error(`Wallet "${wallet.name}" ondersteunt solana:signAndSendTransaction niet.`);
+        }
+
+        return {
+          mode: "sync",
+          publicKey,
+          walletName: wallet.name,
+          signAndSendTransaction: async (versionedTx) => {
+            const serialized = versionedTx.serialize();
+            const results = await signAndSendFeature.signAndSendTransaction({
+              transaction: serialized,
+              account,
+              chain: "solana:devnet",
+            });
+            return { signature: bs58.encode(results[0].signature) };
+          },
+        };
+      }
+
+      async function fetchMultisig() {
+        return multisig.accounts.Multisig.fromAccountAddress(connection, MULTISIG_PDA);
+      }
+
+      // Logt zo veel mogelijk van een fout - niet enkel err.message, dat bij
+      // Anchor/Squads-fouten regelmatig niets zinnigs bevat ("Unexpected
+      // error") terwijl de daadwerkelijke reden elders op het object zit
+      // (name, stack, logs, of geneste error/cause-velden - zelfde SDK-
+      // foutvertaalprobleem als tijdens de devnet-repetitie, STATUS.md
+      // sectie 41).
+      function logFullError(prefix, err) {
+        log("FOUT: " + prefix + ": " + (err && err.message ? err.message : String(err)));
+        if (err) {
+          if (err.name) log("[debug] error.name: " + err.name, "log-debug");
+          if (err.code !== undefined) log("[debug] error.code: " + err.code, "log-debug");
+          if (err.logs) log("[debug] error.logs: " + JSON.stringify(err.logs), "log-debug");
+          if (err.cause) log("[debug] error.cause: " + (err.cause.message || JSON.stringify(err.cause)), "log-debug");
+          if (err.stack) log("[debug] error.stack: " + err.stack, "log-debug");
+          try {
+            const ownProps = Object.getOwnPropertyNames(err).filter(
+              (k) => !["message", "name", "stack", "code", "logs", "cause"].includes(k)
+            );
+            if (ownProps.length > 0) {
+              const extra = {};
+              for (const k of ownProps) extra[k] = err[k];
+              log("[debug] overige error-velden: " + JSON.stringify(extra), "log-debug");
+            }
+          } catch (jsonErr) {
+            log("[debug] (kon overige error-velden niet serialiseren: " + jsonErr.message + ")", "log-debug");
+          }
+        }
+        console.error(err);
+      }
+
+      // Controleert of het verbonden adres daadwerkelijk een geregistreerd
+      // lid van de multisig is - Phantom kan meerdere accounts onder een
+      // seed hebben, en connect() geeft standaard het actief-geselecteerde
+      // account terug, niet noodzakelijk het account dat lid is. Zonder deze
+      // check faalt propose/approve pas later, on-chain, met een vage fout.
+      async function checkMembership(pubkey) {
+        const multisigInfo = await fetchMultisig();
+        const memberKeys = multisigInfo.members.map((m) => m.key.toBase58());
+        log("[debug] geregistreerde leden: " + memberKeys.join(", "), "log-debug");
+        const isMember = memberKeys.includes(pubkey.toBase58());
+        log("[debug] verbonden adres is lid: " + isMember, "log-debug");
+        return isMember;
+      }
+
+      function enableActionButtons() {
+        document.getElementById("propose-btn").disabled = false;
+        document.getElementById("approve-btn").disabled = false;
+        document.getElementById("squads-execute-btn").disabled = false;
+      }
+
+      // Gedeelde afronding na een geslaagde verbinding, ongeacht via welk
+      // pad (Wallet Standard/MWA synchroon, of Solflare-deep-link na een
+      // paginareload) - verwacht dat connectedWallet al gezet is.
+      async function finishConnectUI() {
+        log("SUCCES - verbonden met " + connectedWallet.walletName + ": " + connectedWallet.publicKey.toBase58());
+
+        const isMember = await checkMembership(connectedWallet.publicKey);
+        if (!isMember) {
+          log(
+            "FOUT: dit account (" + connectedWallet.publicKey.toBase58() + ") is GEEN geregistreerd " +
+              "lid van de multisig. Wissel naar het juiste account en verbind opnieuw. De propose/" +
+              "approve/execute-knoppen blijven uit tot een geregistreerd lid verbonden is."
+          );
+          return;
+        }
+
+        enableActionButtons();
+        await logCurrentProposalStatus();
+      }
+
+      // Toont meteen bij verbinden welk voorstel de knoppen 2/3/4 op dit
+      // moment zouden raken (altijd het HUIDIGE/hoogste transactionIndex -
+      // zie de toelichting bij checkProposalReadyForAction) en zijn status,
+      // zodat dat nooit meer pas ontdekt wordt via een mislukte
+      // goedkeur-/uitvoerpoging.
+      async function logCurrentProposalStatus() {
+        try {
+          const multisigInfo = await fetchMultisig();
+          const transactionIndex = BigInt(Number(multisigInfo.transactionIndex));
+          const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
+          const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
+          log(
+            "[info] Knop 2/3/4 richten zich nu op voorstel #" + transactionIndex + " (het huidige/hoogste). " +
+              "Status: " + JSON.stringify(proposal.status) + ", goedgekeurd door: [" +
+              proposal.approved.map((k) => k.toBase58()).join(", ") + "]."
+          );
+        } catch (err) {
+          log("[debug] kon huidige voorstel-status niet ophalen: " + err.message, "log-debug");
+        }
+      }
+
+      const connectBtn = document.getElementById("connect-btn");
+      log("[debug] connect-btn element gevonden: " + !!connectBtn, "log-debug");
+
+      connectBtn.addEventListener("click", async () => {
+        log("[debug] connect-btn geklikt - handler wordt uitgevoerd.", "log-debug");
+        try {
+          connectedWallet = await connectWallet();
+          await finishConnectUI();
+        } catch (err) {
+          logFullError("connect-btn-handler", err);
+        }
+      });
+
+      document.getElementById("reset-deeplink-state-btn").addEventListener("click", () => {
+        const state = loadDeeplinkState();
+        if (state) {
+          log(
+            "[debug] status gewist. Voor het wissen: pendingAction='" + state.pendingAction +
+              "', gestart om " + (state.pendingActionStartedAt || "(onbekend)") + ".",
+            "log-debug"
+          );
+        }
+        localStorage.removeItem(DEEPLINK_STORAGE_KEY);
+        connectedWallet = null;
+        document.getElementById("propose-btn").disabled = true;
+        document.getElementById("approve-btn").disabled = true;
+        document.getElementById("squads-execute-btn").disabled = true;
+        log("Solflare-deep-link-status gewist - verbind opnieuw via knop 1b.");
+      });
+
+      document.getElementById("connect-solflare-deeplink-btn").addEventListener("click", () => {
+        log("[debug] connect-solflare-deeplink-btn geklikt - deep-link-sessiesleutel genereren en doorsturen naar de Solflare-app...", "log-debug");
+        try {
+          const dappKeyPair = nacl.box.keyPair();
+          saveDeeplinkState({
+            dappSecretKey: Array.from(dappKeyPair.secretKey),
+            dappPublicKey: Array.from(dappKeyPair.publicKey),
+            sharedSecret: null,
+            session: null,
+            walletPublicKey: null,
+            pendingAction: "connect",
+          });
+
+          const params = new URLSearchParams({
+            dapp_encryption_public_key: bs58.encode(dappKeyPair.publicKey),
+            cluster: "devnet",
+            app_url: window.location.origin,
+            redirect_link: REDIRECT_URL,
+          });
+
+          const fullUrl = "https://solflare.com/ul/v1/connect?" + params.toString();
+          log("[debug] redirect_link die wordt meegegeven: " + REDIRECT_URL, "log-debug");
+          log("[debug] volledige deep-link-URL: " + fullUrl, "log-debug");
+          console.log("[SpankWallet deep-link] connect ->", fullUrl);
+          log("Doorsturen naar de Solflare-app om te verbinden (volledige paginanavigatie - dit tabblad verlaat nu SpankWallet en komt terug na goedkeuring in Solflare)...");
+          window.location.href = fullUrl;
+        } catch (err) {
+          logFullError("connect-solflare-deeplink-btn-handler", err);
+        }
+      });
+
+      // --- Voorstel bouwen/afronden (gedeeld tussen synchrone en deep-link-paden) ---
+
+      async function buildProposeTx() {
+        log("Voorstel indienen - EEN transactie met TWEE instructies (vaultTransactionCreate + proposalCreate), dus maar EEN handtekening/popup nodig.");
+
+        const multisigInfo = await fetchMultisig();
+        const transactionIndex = BigInt(Number(multisigInfo.transactionIndex) + 1);
+        log("Nieuwe transactionIndex: " + transactionIndex.toString());
+
+        const { blockhash } = await connection.getLatestBlockhash();
+
+        // UpgradeableLoaderInstruction::Upgrade - u32 LE waarde 3,
+        // account-volgorde geverifieerd tegen de Agave-broncode en Squads'
+        // eigen officiele GitHub-Action tijdens de devnet-repetitie
+        // (STATUS.md sectie 41).
+        const upgradeData = new Uint8Array(4);
+        new DataView(upgradeData.buffer).setUint32(0, 3, true);
+        const keys = [
+          { pubkey: SPANKWALLET_PROGRAM_DATA, isWritable: true, isSigner: false },
+          { pubkey: SPANKWALLET_PROGRAM_ID, isWritable: true, isSigner: false },
+          { pubkey: BUFFER, isWritable: true, isSigner: false },
+          { pubkey: VAULT_PDA, isWritable: true, isSigner: false }, // spill
+          { pubkey: SYSVAR_RENT_PUBKEY, isWritable: false, isSigner: false },
+          { pubkey: SYSVAR_CLOCK_PUBKEY, isWritable: false, isSigner: false },
+          { pubkey: VAULT_PDA, isWritable: false, isSigner: true }, // upgrade authority
+        ];
+        const innerMessage = new TransactionMessage({
+          payerKey: VAULT_PDA,
+          recentBlockhash: blockhash,
+          instructions: [
+            new TransactionInstruction({ programId: BPF_LOADER_UPGRADEABLE, data: upgradeData, keys }),
+          ],
+        });
+
+        const vaultTxIx = multisig.instructions.vaultTransactionCreate({
+          multisigPda: MULTISIG_PDA,
+          transactionIndex,
+          creator: connectedWallet.publicKey,
+          vaultIndex: 0,
+          ephemeralSigners: 0,
+          transactionMessage: innerMessage,
+          memo: "SpankWallet canary-upgrade (STATUS.md sectie 42)",
+        });
+
+        const proposalIx = multisig.instructions.proposalCreate({
+          multisigPda: MULTISIG_PDA,
+          creator: connectedWallet.publicKey,
+          transactionIndex,
+        });
+
+        const combinedMessage = new TransactionMessage({
+          payerKey: connectedWallet.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [vaultTxIx, proposalIx],
+        }).compileToV0Message();
+
+        return new VersionedTransaction(combinedMessage);
+      }
+
+      async function finishPropose(signature) {
+        log("Verstuurd. Signature: " + signature);
+        await connection.confirmTransaction(signature, "confirmed");
+        log("Bevestigd.");
+
+        const multisigInfo = await fetchMultisig();
+        const transactionIndex = BigInt(Number(multisigInfo.transactionIndex));
+        const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
+        const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
+        log("SUCCES - voorstel status: " + JSON.stringify(proposal.status));
+      }
+
+      // Voorkomt het versturen van een gedoemde goedkeuring/uitvoering op
+      // een voorstel dat daar al voorbij is (bijv. al "Approved", of nog
+      // "Active" voor uitvoeren) - het Squads-programma wijst zo'n
+      // transactie terecht af (InvalidProposalStatus, foutcode 6008 -
+      // rechtstreeks tegen devnet bevestigd), maar zowel Phantom als
+      // Solflare vertalen die specifieke, onschuldige afwijzing naar een
+      // generieke, verwarrende "Unexpected error"/"internalError" i.p.v.
+      // de daadwerkelijke reden te tonen. Door dit VOORAF zelf te
+      // controleren en een duidelijke Nederlandse melding te geven, hoeft
+      // niemand die cryptische foutmelding meer te zien voor dit specifieke,
+      // volkomen onschuldige geval.
+      async function checkProposalReadyForAction(actionName, transactionIndex, multisigInfo) {
+        const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
+        const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
+        const kind = proposal.status.__kind;
+
+        if (actionName === "approve" && kind !== "Active") {
+          throw new Error(
+            "Voorstel #" + transactionIndex + " staat niet meer open voor goedkeuring (status: " + kind + "). " +
+              (kind === "Approved"
+                ? "Het heeft al de vereiste " + multisigInfo.threshold + " goedkeuringen (goedgekeurd door: " +
+                  proposal.approved.map((k) => k.toBase58()).join(", ") + "). Geen actie nodig - wacht de " +
+                  "72u-timelock af en klik daarna op '4. Uitvoeren'."
+                : "Geen verdere actie via deze pagina nodig/mogelijk.")
+          );
+        }
+
+        if (actionName === "execute") {
+          if (kind !== "Approved") {
+            throw new Error(
+              "Voorstel #" + transactionIndex + " heeft nog niet de vereiste " + multisigInfo.threshold +
+                " goedkeuringen (status: " + kind + ", tot nu toe goedgekeurd door: " +
+                proposal.approved.map((k) => k.toBase58()).join(", ") + "). Nog niet uit te voeren."
+            );
+          }
+          const approvedAt = parseInt(proposal.status.timestamp, 16);
+          const executableAt = new Date((approvedAt + multisigInfo.timeLock) * 1000);
+          if (Date.now() < executableAt.getTime()) {
+            const remainingHours = ((executableAt.getTime() - Date.now()) / 3600000).toFixed(2);
+            throw new Error(
+              "Voorstel #" + transactionIndex + " is goedgekeurd, maar de 72u-timelock is nog niet verstreken. " +
+                "Uitvoerbaar vanaf: " + executableAt.toISOString() + " (nog ongeveer " + remainingHours + " uur)."
+            );
+          }
+        }
+
+        return proposal;
+      }
+
+      async function buildApproveTx() {
+        const multisigInfo = await fetchMultisig();
+        const transactionIndex = BigInt(Number(multisigInfo.transactionIndex));
+        log("Goedkeuren van transactionIndex: " + transactionIndex.toString());
+        await checkProposalReadyForAction("approve", transactionIndex, multisigInfo);
+
+        const { blockhash } = await connection.getLatestBlockhash();
+        return multisig.transactions.proposalApprove({
+          blockhash,
+          feePayer: connectedWallet.publicKey,
+          multisigPda: MULTISIG_PDA,
+          transactionIndex,
+          member: connectedWallet.publicKey,
+        });
+      }
+
+      async function finishApprove(signature) {
+        log("Verstuurd. Signature: " + signature);
+        await connection.confirmTransaction(signature, "confirmed");
+        log("Bevestigd.");
+
+        const multisigInfo = await fetchMultisig();
+        const transactionIndex = BigInt(Number(multisigInfo.transactionIndex));
+        const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
+        const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
+        log("SUCCES - status: " + JSON.stringify(proposal.status) + ", goedgekeurd door: " + proposal.approved.map((k) => k.toBase58()).join(", "));
+      }
+
+      async function buildSquadsExecuteTx() {
+        const multisigInfo = await fetchMultisig();
+        const transactionIndex = BigInt(Number(multisigInfo.transactionIndex));
+        log("Uitvoeren van transactionIndex: " + transactionIndex.toString());
+        await checkProposalReadyForAction("execute", transactionIndex, multisigInfo);
+
+        const { blockhash } = await connection.getLatestBlockhash();
+        return multisig.transactions.vaultTransactionExecute({
+          connection,
+          blockhash,
+          feePayer: connectedWallet.publicKey,
+          multisigPda: MULTISIG_PDA,
+          transactionIndex,
+          member: connectedWallet.publicKey,
+        });
+      }
+
+      async function finishSquadsExecute(signature) {
+        log("Verstuurd. Signature: " + signature);
+        await connection.confirmTransaction(signature, "confirmed");
+        log("SUCCES - uitgevoerd. Signature: " + signature);
+      }
+
+      // Start een deep-link-ondertekenverzoek voor propose/approve/execute -
+      // navigeert de HELE pagina weg (JS-context wordt gewist), het
+      // antwoord wordt pas verwerkt wanneer de pagina na de redirect
+      // opnieuw laadt (zie resumeDeeplinkIfNeeded hieronder). Vereist een
+      // actieve, met "connect" tot stand gekomen sessie (sharedSecret +
+      // session in localStorage).
+      function startDeeplinkSignAndSend(actionName, versionedTx) {
+        const state = loadDeeplinkState();
+        if (!state || !state.sharedSecret || !state.session) {
+          throw new Error("Geen actieve Solflare-deep-link-sessie gevonden - verbind opnieuw via knop 1b.");
+        }
+
+        // Waarschuw expliciet als er nog een ANDERE, niet-afgeronde actie
+        // openstaat - dat wijst op een eerdere deep-link-poging die nooit
+        // een redirect terugkreeg (bijv. via de terug-knop van het toestel
+        // uit Solflare gestapt i.p.v. een expliciete annulering binnenin de
+        // app), waardoor een oud "pendingAction" is blijven hangen. Zonder
+        // deze check overschrijft de nieuwe actie dat stilzwijgend, en kan
+        // een later, vertraagd/gewachteud antwoord van de OUDE actie
+        // verwarrend als "van de nieuwe actie" ogen.
+        if (state.pendingAction && state.pendingAction !== actionName) {
+          log(
+            "[debug] WAARSCHUWING: er stond nog een niet-afgeronde actie open ('" + state.pendingAction +
+              "', gestart op " + (state.pendingActionStartedAt || "onbekend tijdstip") + ") toen '" + actionName +
+              "' werd gestart. Als een foutmelding hierna '(" + state.pendingAction + ")' noemt i.p.v. '(" +
+              actionName + ")', is dat vermoedelijk een vertraagd antwoord op DIE oudere poging, niet op deze.",
+            "log-debug"
+          );
+        }
+
+        const sharedSecret = Uint8Array.from(state.sharedSecret);
+        const serialized = versionedTx.serialize();
+        const payload = { session: state.session, transaction: bs58.encode(serialized) };
+        const [nonce, encryptedPayload] = encryptPayload(payload, sharedSecret);
+
+        const startedAt = new Date().toISOString();
+        state.pendingAction = actionName;
+        state.pendingActionStartedAt = startedAt;
+        saveDeeplinkState(state);
+
+        const params = new URLSearchParams({
+          dapp_encryption_public_key: bs58.encode(Uint8Array.from(state.dappPublicKey)),
+          nonce: bs58.encode(nonce),
+          redirect_link: REDIRECT_URL,
+          payload: bs58.encode(encryptedPayload),
+        });
+
+        const fullUrl = "https://solflare.com/ul/v1/signAndSendTransaction?" + params.toString();
+
+        // Volledig, exact verzoek loggen VOORDAT er weggenavigeerd wordt -
+        // zowel on-page/console (voor het geval de navigatie iets vertraagt)
+        // als in localStorage (overleeft de navigatie zelf, in
+        // tegenstelling tot console/on-page-logs, dus nog te controleren na
+        // terugkomst).
+        const requestSummary = {
+          method: "signAndSendTransaction",
+          actionName,
+          startedAt,
+          dapp_encryption_public_key: bs58.encode(Uint8Array.from(state.dappPublicKey)),
+          redirect_link: REDIRECT_URL,
+          payload_plaintext: { session: state.session, transaction_bytes: serialized.length, transaction_b58_prefix: payload.transaction.slice(0, 24) + "..." },
+        };
+        state.lastRequestSummary = requestSummary;
+        saveDeeplinkState(state);
+        log("[debug] volledig verzoek (methode + payload-velden, vóór versleuteling): " + JSON.stringify(requestSummary), "log-debug");
+        console.log("[SpankWallet deep-link] verzoek voor '" + actionName + "':", requestSummary, "volledige URL:", fullUrl);
+
+        log("Doorsturen naar de Solflare-app om te ondertekenen (" + actionName + ") - dit tabblad komt terug na goedkeuring...");
+        window.location.href = fullUrl;
+      }
+
+      // Onvoorwaardelijke, definitieve klik-logging - VOORAAN in elke
+      // handler, voor welke andere logica dan ook, en volledig los van
+      // connectedWallet/async-status. Doel: onomstotelijk vaststellen welk
+      // DOM-element de browser zelf als geklikt rapporteert (e.currentTarget
+      // .id EN .textContent), zodat een label-mismatch verderop in de flow
+      // (zoals eerder gezien: "(execute)" na een klik op "3. Goedkeuren")
+      // empirisch te herleiden is tot ofwel een echte interne bug (als dit
+      // hier al "execute-btn" zou loggen bij een bedoelde klik op knop 3),
+      // ofwel bevestigt dat de klik zelf op het andere element viel.
+      function logButtonClick(e) {
+        const record = {
+          id: e.currentTarget.id,
+          text: e.currentTarget.textContent.trim(),
+          at: new Date().toISOString(),
+        };
+        log(
+          "[debug] KLIK GEREGISTREERD DOOR BROWSER: element.id='" + record.id +
+            "', element.textContent='" + record.text + "'",
+          "log-debug"
+        );
+        // Ook persisteren (overleeft de wegnavigatie), zodat dit na
+        // terugkomst nog te vergelijken is met welke actie uiteindelijk
+        // verstuurd/afgehandeld werd.
+        const state = loadDeeplinkState();
+        if (state) {
+          state.lastButtonClick = record;
+          saveDeeplinkState(state);
+        }
+      }
+
+      document.getElementById("propose-btn").addEventListener("click", async (e) => {
+        logButtonClick(e);
+        if (!connectedWallet) return;
+        try {
+          if (!(await checkMembership(connectedWallet.publicKey))) {
+            log("FOUT: verbonden account is geen lid van de multisig - zie de melding bij 'Wallet verbinden'.");
+            return;
+          }
+          const versionedTx = await buildProposeTx();
+          if (connectedWallet.mode === "deeplink") {
+            startDeeplinkSignAndSend("propose", versionedTx);
+          } else {
+            log("Keur de transactie goed in je wallet-extensie...");
+            const { signature } = await connectedWallet.signAndSendTransaction(versionedTx);
+            await finishPropose(signature);
+          }
+        } catch (err) {
+          logFullError("propose-btn-handler", err);
+        }
+      });
+
+      document.getElementById("approve-btn").addEventListener("click", async (e) => {
+        logButtonClick(e);
+        if (!connectedWallet) return;
+        try {
+          if (!(await checkMembership(connectedWallet.publicKey))) {
+            log("FOUT: verbonden account is geen lid van de multisig - zie de melding bij 'Wallet verbinden'.");
+            return;
+          }
+          const tx = await buildApproveTx();
+          if (connectedWallet.mode === "deeplink") {
+            startDeeplinkSignAndSend("approve", tx);
+          } else {
+            log("Keur de goedkeuring goed in je wallet-extensie...");
+            const { signature } = await connectedWallet.signAndSendTransaction(tx);
+            await finishApprove(signature);
+          }
+        } catch (err) {
+          logFullError("approve-btn-handler", err);
+        }
+      });
+
+      document.getElementById("squads-execute-btn").addEventListener("click", async (e) => {
+        logButtonClick(e);
+        if (!connectedWallet) return;
+        try {
+          if (!(await checkMembership(connectedWallet.publicKey))) {
+            log("FOUT: verbonden account is geen lid van de multisig - zie de melding bij 'Wallet verbinden'.");
+            return;
+          }
+          const tx = await buildSquadsExecuteTx();
+          if (connectedWallet.mode === "deeplink") {
+            startDeeplinkSignAndSend("execute", tx);
+          } else {
+            log("Keur de uitvoering goed in je wallet-extensie...");
+            const { signature } = await connectedWallet.signAndSendTransaction(tx);
+            await finishSquadsExecute(signature);
+          }
+        } catch (err) {
+          logFullError("squads-execute-btn-handler", err);
+        }
+      });
+
+      // Herstelt een al lopende Solflare-deep-link-sessie na een gewone
+      // paginareload (bijv. de gebruiker verbond eerder deze tab-sessie en
+      // klikt nu op propose/approve/execute) - los van of dit specifiek een
+      // net-teruggekeerde-van-Solflare-redirect is.
+      async function restoreDeeplinkSessionIfPresent() {
+        const state = loadDeeplinkState();
+        if (state && state.sharedSecret && state.session && state.walletPublicKey) {
+          connectedWallet = {
+            mode: "deeplink",
+            publicKey: new PublicKey(state.walletPublicKey),
+            walletName: "Solflare (mobiel, deep-link)",
+          };
+          log("[debug] Solflare-deep-link-sessie hersteld uit deze browsertab: " + state.walletPublicKey, "log-debug");
+          await finishConnectUI();
+          return true;
+        }
+        return false;
+      }
+
+      // Verwerkt een terugkeer van de Solflare-app (na connect/propose/
+      // approve/execute) - leest de query-string die Solflare aan
+      // redirect_link plakte, ontsleutelt met nacl.box, en rondt de
+      // bijbehorende actie af. Draait automatisch bij elke paginalading,
+      // zonder knopklik nodig, want de pagina IS de teruggekeerde redirect.
+      async function resumeDeeplinkIfNeeded() {
+        const state = loadDeeplinkState();
+        if (!state || !state.pendingAction) return;
+
+        const params = new URLSearchParams(window.location.search);
+
+        if (params.has("errorCode")) {
+          const startedAt = state.pendingActionStartedAt;
+          const ageSeconds = startedAt ? Math.round((Date.now() - new Date(startedAt).getTime()) / 1000) : null;
+          log(
+            "FOUT: Solflare wees het deep-link-verzoek (" + state.pendingAction + ") af: " +
+              params.get("errorCode") + " - " + (params.get("errorMessage") || "(geen verdere uitleg)")
+          );
+          log(
+            "[debug] dit antwoord hoort bij de actie die gestart werd om " + (startedAt || "onbekend tijdstip") +
+              (ageSeconds !== null ? " (" + ageSeconds + "s geleden)" : "") +
+              " - klopt dat met wanneer je zojuist klikte? Zo niet (bijv. als je nu net iets anders " +
+              "klikte maar dit tijdstip veel eerder ligt), dan is dit vermoedelijk een vertraagd antwoord " +
+              "op een oudere, nooit-afgeronde poging, niet op je meest recente klik.",
+            "log-debug"
+          );
+          if (state.lastRequestSummary) {
+            log("[debug] bijbehorend verzoek (zoals verstuurd): " + JSON.stringify(state.lastRequestSummary), "log-debug");
+          }
+          if (state.lastButtonClick) {
+            log(
+              "[debug] laatst geregistreerde knopklik (rechtstreeks door de browser, vóór alle andere " +
+                "logica): " + JSON.stringify(state.lastButtonClick), "log-debug"
+            );
+          }
+          state.pendingAction = null;
+          saveDeeplinkState(state);
+          history.replaceState({}, "", window.location.pathname);
+          return;
+        }
+
+        if (!params.has("data") || !params.has("nonce")) {
+          // Geen deep-link-terugkeer (gewone paginalading) - niets te doen.
+          return;
+        }
+
+        const action = state.pendingAction;
+        try {
+          if (action === "connect") {
+            if (!params.has("solflare_encryption_public_key")) {
+              throw new Error("Connect-antwoord mist solflare_encryption_public_key.");
+            }
+            const dappSecretKey = Uint8Array.from(state.dappSecretKey);
+            const solflarePubkey = bs58.decode(params.get("solflare_encryption_public_key"));
+            const sharedSecret = nacl.box.before(solflarePubkey, dappSecretKey);
+            const connectData = decryptPayload(params.get("data"), params.get("nonce"), sharedSecret);
+
+            state.sharedSecret = Array.from(sharedSecret);
+            state.session = connectData.session;
+            state.walletPublicKey = connectData.public_key;
+            state.pendingAction = null;
+            saveDeeplinkState(state);
+
+            connectedWallet = {
+              mode: "deeplink",
+              publicKey: new PublicKey(connectData.public_key),
+              walletName: "Solflare (mobiel, deep-link)",
+            };
+            await finishConnectUI();
+          } else {
+            if (!state.sharedSecret) throw new Error("Geen sharedSecret in localStorage - kan antwoord niet ontsleutelen.");
+            const sharedSecret = Uint8Array.from(state.sharedSecret);
+            const responseData = decryptPayload(params.get("data"), params.get("nonce"), sharedSecret);
+            log(
+              "[debug] geslaagd antwoord hoort bij actie '" + action + "', gestart om " +
+                (state.pendingActionStartedAt || "onbekend tijdstip") + ". Bijbehorend verzoek: " +
+                JSON.stringify(state.lastRequestSummary || "(niet beschikbaar)"),
+              "log-debug"
+            );
+            state.pendingAction = null;
+            saveDeeplinkState(state);
+
+            if (!connectedWallet) await restoreDeeplinkSessionIfPresent();
+
+            if (action === "propose") await finishPropose(responseData.signature);
+            else if (action === "approve") await finishApprove(responseData.signature);
+            else if (action === "execute") await finishSquadsExecute(responseData.signature);
+            else log("[debug] onbekende pendingAction bij terugkeer: " + action, "log-debug");
+          }
+        } catch (err) {
+          logFullError("deeplink-resume (" + action + ")", err);
+        } finally {
+          // Voorkomt herverwerking van dezelfde versleutelde data bij een
+          // handmatige paginaverversing.
+          history.replaceState({}, "", window.location.pathname);
+        }
+      }
+
+      if (!(await restoreDeeplinkSessionIfPresent())) {
+        log("[debug] geen eerder-opgeslagen Solflare-deep-link-sessie in deze tab.", "log-debug");
+      }
+      await resumeDeeplinkIfNeeded();
+    </script>
+  </body>
+</html>

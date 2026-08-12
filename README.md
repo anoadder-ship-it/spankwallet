@@ -166,14 +166,17 @@ in twee delen:
      --keypair ~/.config/solana/id.json \
      --url https://api.devnet.solana.com
    ```
-2. **Upgrade voorstellen/goedkeuren/uitvoeren via de multisig** - op `app.squads.so`
-   (NIET `devnet.squads.so`, dat is het legacy V3-domein), met devnet geselecteerd in
-   zowel de wallet-extensie als de Squads-UI zelf. Twee van de drie leden (telefoon,
-   hoofd-pc, Windows-pc) moeten goedkeuren, en de 72u-timelock moet verstrijken voordat
-   uitvoering mogelijk is. Zie STATUS.md sectie 41-42 voor de volledige achtergrond,
-   inclusief een aantal reeel tegengekomen valkuilen (SDK-foutvertaalbugs,
-   ProgramData-headroom-tekort, RPC-timing-races) die de moeite waard zijn om te kennen
-   voordat je dit voor het eerst zelf doet.
+2. **Upgrade voorstellen/goedkeuren/uitvoeren via `admin/wallet-signer.html`** - NIET via
+   `app.squads.so`: die webinterface bleek onbetrouwbaar (toonde herhaaldelijk alleen
+   demodata, kon de echte multisig niet vinden - zie STATUS.md sectie 43). `admin/`
+   bevat een zelfgebouwde, sleutelloze ondertekenpagina die dezelfde Squads-transacties
+   opbouwt en door de wallet-extensie/-app zelf laat ondertekenen - zie `admin/README.md`
+   voor de volledige, actuele instructies. Twee van de drie leden (telefoon, hoofdpc,
+   Windows-pc) moeten goedkeuren, en de 72u-timelock moet verstrijken voordat uitvoering
+   mogelijk is. Zie STATUS.md sectie 41-46 voor de volledige achtergrond, inclusief een
+   aantal reeel tegengekomen valkuilen (SDK-foutvertaalbugs, ProgramData-headroom-tekort,
+   RPC-timing-races, browsercaching, transactionIndex-verwarring) die de moeite waard
+   zijn om te kennen voordat je dit voor het eerst zelf doet.
 
 Controleer de huidige authority altijd met:
 ```bash

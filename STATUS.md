@@ -287,6 +287,13 @@ De Wallet Standard-integratie (wallet.ts) blijft de juiste architectuur voor de
 uiteindelijke productie-client — dit vereist later gerichter onderzoek (mogelijk Solflare
 als alternatief testen, of Phantom's exacte RPC-configuratie-opties verder uitzoeken).
 
+**Afgerond, via een andere route (opschoningsronde):** het onderliggende probleem
+(wallet-extensies bereiken een lokale validator niet) is nooit letterlijk opgelost, maar
+werd overbodig gemaakt door de architecturale keuze om elke test met een echte
+wallet-extensie voortaan altijd tegen devnet te draaien, nooit tegen localnet - vastgelegd
+in README.md's "Deployen naar devnet"-sectie en sindsdien in tientallen secties
+consequent zo gedaan.
+
 **Zijdelingse observatie:** de payer-pubkey uit ~/.config/solana/id.json
 (G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp) bleek anders dan de eerder geziene deploy-
 authority (GaU7itnumyaKbXmVDQtbEurimomGk4K3uFzur1Nbx9X2) — dat keypair-bestand is op enig
@@ -389,6 +396,14 @@ gesimuleerde data.
 - Fase 2 (fee-gated PDA-inbox) en fase 3 (USB 2-of-2, post-quantum): nog niet begonnen
 - npm audit-kwetsbaarheden (8, 2 high) nog niet opgeruimd - browser-dev-dependencies,
   niet in productiecode, maar wel netjes om op te ruimen voor een echte release
+
+**Afgerond (bijgewerkt tijdens de opschoningsronde, STATUS.md-top):** hunt → sectie 17,
+cancel_recovery → sectie 16, execute's no-op-placeholder → sectie 25 (en later herbouwd
+naar een gesloten, getypeerde actie). npm-audit-kwetsbaarheden: dit specifieke, oude
+"8, 2 high"-overzicht is inmiddels vervangen door een grondiger doorlopen ronde in sectie
+45 (uuid gefixt, esbuild/vite bewust nog open om een gedocumenteerde reden). Fase 2/3 van
+de gelaagde-privileges-roadmap staan nog steeds echt open - zie de "Huidige staat"-sectie
+bovenaan.
 
 ## 16. DOORBRAAK 3: volledige recovery-flow bewezen met echte handtekeningen
 
@@ -899,6 +914,10 @@ volgt hetzelfde principe dat vandaag is vastgesteld: elke nieuwe mogelijkheid al
 apart getypeerde instructie met eigen challenge-domain, nooit als generieke CPI-doorgeefluik.
 
 ## 27. Concrete uitwerking programma-allowlist (besproken, nog niet gebouwd - startpunt voor volgende sessie)
+
+**Afgerond (opschoningsronde):** het "startpunt voor volgende sessie" hier werd exact dat
+- de allowlist zelf is gebouwd in sectie 34, transfer_token in dezelfde periode. Titel
+bewust ongewijzigd gelaten (logboek), deze regel is uitsluitend de doorverwijzing.
 
 Vervolg op de roadmap uit sectie 26, na een gesprek over de praktische balans tussen
 veiligheid en bruikbaarheid (SOL/SPL-tokens vrij laten stromen, DeFi-platforms
@@ -2463,6 +2482,12 @@ telefoon:**
    (`setsid`/`nohup`/`disown`) zodat hij blijft draaien; geen actie nodig om 'm morgen
    weer te bereiken.
 
+**Afgerond (opschoningsronde):** punt 1 (tweede goedkeuring) is gehaald, zij het op
+voorstel #5 i.p.v. #2 - zie sectie 46 voor het volledige, verrassende verhaal waarom.
+Punt 2 (uitvoeren na de timelock) staat nog steeds open, nu concreet gepland voor
+2026-08-15T15:46:49Z - zie de "Huidige staat"-sectie bovenaan. Punt 3 is mooi geworden:
+`wallet-signer.html` heeft inmiddels een permanente plek in de repo (`admin/`).
+
 ## 44. Mobiele Solflare-verbinding: root cause van het verkeerde-adres-probleem gevonden, `@solflare-wallet/sdk` vervangen door het echte deep-link-protocol
 
 Vervolg op sectie 43's ongeteste mobiele fix. De gebruiker testte knop "1b" (destijds de
@@ -3138,3 +3163,51 @@ wijzigen, weigeren, bevestigen → passkey-prompt) - dat vereist een echte
 platform-authenticator, zoals de rest van deze testclient. Volgende stap: de gebruiker
 test dit zelf en beoordeelt of fase 0 het gewenste effect heeft voordat er naar de
 overige instructies uitgebreid wordt.
+
+## 51. Opschonings-/documentatieronde: code-consistentie-audit, STATUS.md-structuur, wallet-signer.html permanent in de repo
+
+Op verzoek een grondige verfijnings- en opschoningsronde uitgevoerd over alles wat
+vanavond en in eerdere sessies gebouwd is - vier fasen, elk met een eigen commit.
+
+**Fase 1 - code-consistentie-audit, eerst gerapporteerd, pas daarna gewijzigd:**
+doorgelopen op dode code, inconsistente foutafhandeling, verouderde sectieverwijzingen,
+en verwarrende naamgeving. Concrete bevindingen: (1) een echt ongebruikte variabele
+(`mwaRegistered`) in `wallet-signer.html`, verwijderd; (2) de "execute"-naamsoverlap
+tussen SpankWallet's eigen instructie en Squads' voorstel-uitvoering (precies de
+verwarring die tot de correctie in sectie 50 leidde) - `wallet-signer.html`'s interne
+`execute-btn`/`buildExecuteTx`/`finishExecute` hernoemd naar `squads-execute-btn`/
+`buildSquadsExecuteTx`/`finishSquadsExecute`; (3-7) een steekproef van 6
+STATUS.md-sectieverwijzingen in Rust/TS-commentaar geverifieerd tegen de daadwerkelijke
+sectie-inhoud, allemaal accuraat bevonden; de ogenschijnlijke inconsistentie in
+`wallet-signer.html`'s foutafhandelingsstijl bleek bij inspectie een bewuste, correcte
+gradatie (fatale laadfouten vs. best-effort achtergrondacties vs. primaire
+knop-handlers) - gecontroleerd en verworpen als non-issue, niet gewijzigd.
+
+**Fase 2 - STATUS.md gestructureerd zonder informatie te verliezen:** een
+"Huidige staat" en "Kritieke gotchas"-sectie toegevoegd vóór sectie 1, buiten het
+genummerde schema (dus visueel onderscheiden van het chronologische logboek). De
+bestaande, sterk verouderde oorspronkelijke sectie 2/4 (uit het allereerste begin van het
+project) bewust ongewijzigd gelaten als logboek-onderdeel. Enige verwijderde tekst: de
+verouderde "Laatst bijgewerkt"-regel.
+
+**Fase 3 - losse eindjes:** `wallet-signer.html` + `https-server.js` kregen een
+permanente plek in `admin/` (met `admin/README.md` die uitlegt wanneer/hoe te gebruiken,
+expliciet losstaand van `client/` om de naamsverwarring uit fase 1 niet te herhalen).
+Toegevoegd: een CSP (voorheen volledig afwezig) - bewust minder streng dan `client/`'s
+CSP omdat dit doelbewust een enkel HTML-bestand zonder build-stap blijft, met
+`'unsafe-inline'` als noodzakelijke uitzondering, wel met `frame-ancestors 'none'` en
+origins beperkt tot exact wat het bestand daadwerkelijk aanroept (geverifieerd via de
+werkelijke import-/fetch-URL's, niet aangenomen). `README.md`'s eigen "Deployen naar
+devnet"-sectie bleek zelf verouderd (verwees nog naar het onbruikbare `app.squads.so` -
+sectie 43) en is bijgewerkt naar `admin/wallet-signer.html`. Zes oude, allang-opgeloste
+"openstaand"/"volgende sessie"-markeringen door de hele historie (secties 12, 15, 27, 43)
+kregen een korte "Afgerond, zie sectie X"-toevoeging - de oorspronkelijke tekst zelf
+overal ongewijzigd gelaten. Eén was geen stale item: sectie 9's fase 2/3
+(gelaagde-privileges-roadmap) en de watcher-notificatiefunctie staan na verificatie nog
+steeds echt open - niet ten onrechte als afgerond gemarkeerd.
+
+Elke fase geverifieerd voor het committen: `node --check` op de module-JS na elke
+wijziging aan `wallet-signer.html`, de server herstart en getest vanaf de nieuwe
+`admin/`-locatie (200, juiste build-marker, CSP aanwezig, de eerder gefixte
+query-string-routing nog intact), `git check-ignore` bevestigd dat de `.pem`-bestanden
+(certificaat/sleutel) niet meegecommit worden.

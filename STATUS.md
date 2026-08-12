@@ -2977,3 +2977,72 @@ daadwerkelijk door de prover bevestigd worden. Op de gebruiker's beslissing niet
 opgelost vanavond (vereist ofwel een linux-x86_64/macOS-machine, ofwel een
 sol_keccak256-summary die nog niet bestaat) - een aparte, geplande taak zodra een van
 beide beschikbaar is.
+
+## 49. Ontwerpvoorstel voor een productie-waardige UI-laag: menselijk-leesbare transactiepreviews
+
+Op verzoek een ontwerpfase (geen code) uitgewerkt voor het meest zichtbare open punt uit
+zowel de externe security-review (sectie 41) als een onafhankelijke latere beoordeling:
+de bestaande testpagina's zijn functioneel bewezen maar volledig ontwikkelaarsgericht
+(20+ debug-knoppen, ruwe logs) - een technisch geldige handtekening beschermt niemand die
+niet begrijpt waarvoor hij tekent. Onderzocht en uitgewerkt: (1) alle 19 instructies
+vertaald naar mensentaal, met de vier gevaarlijkste categorieën (geld versturen,
+execute_advanced, sleutelbeheer, herstel) als volledig uitgewerkte kaart-mockups; (2)
+anti-namaak-principes - Bank of America's SiteKey onderzocht en bewust afgewezen
+(aantoonbaar gebroken door relay-aanvallen), Ledger's Clear-Signing/ERC-7730 als
+uitgangspunt maar met SpankWallet's gesloten instructieset als structureel voordeel (geen
+extern, vergiftigbaar beschrijvingsregister nodig), WebAuthn's eigen origin-binding
+erkend als reeds-bestaande fundamentele bescherming die SiteKey nooit had; (3) een
+lokaal-bepaald risicoklassensysteem (bekend adres/programma, actietype, bedrag t.o.v.
+geschiedenis) met oplopende bevestigingswrijving tot hold-to-confirm bij hoog risico -
+bewust geen externe Blockaid-achtige serverchecks, om geen transactiedetails aan een
+derde partij te hoeven tonen; (4) een gefaseerd bouwplan (webpagina eerst structureel
+verbeteren, browserextensie als latere, architecturaal sterkere stap) met concrete
+Manifest-V3-permissie-aanbevelingen. Volledig gepubliceerd als artifact, inclusief
+vergelijkingstabel tegen Phantom/MetaMask/Ledger. Expliciet bevestigd: geen enkele
+wijziging aan `programs/spankwallet/src/` nodig. Goedgekeurd door de gebruiker.
+
+## 50. Fase 0 gebouwd: menselijk-leesbare bevestigingskaart voor execute (SOL versturen), in de echte SpankWallet-testclient
+
+**Belangrijke correctie op sectie 49's eigen tekst, gevonden vóór er iets gebouwd werd:**
+het ontwerpvoorstel noemde per ongeluk `wallet-signer.html` als locatie voor fase 0 - een
+verwarring tussen twee gelijknamige maar volledig ongerelateerde dingen. `wallet-signer.html`
+is vanavond's wegwerptool voor de Squads-multisig die het SpankWallet-*programma zelf*
+upgradet (secties 43-46), gebruikt door de 3 admin-signers - niet SpankWallet's eigen
+`execute`-instructie (SOL versturen door een eindgebruiker). Die laatste hoort, en leeft
+al, in `client/src/execute.ts` + `client/index.html`/`main.ts` (SpankWallet's eigen
+testclient, met een eigen, al-bestaande strikte CSP - sectie 33+). Gecorrigeerd voordat
+er iets in de verkeerde plek gebouwd werd.
+
+Precies stap 3 aangepast, verder niets: een nieuwe, aparte module
+`client/src/executePreview.ts` toont een kaart (bedrag + ontvanger in gewone taal,
+bewerkbare velden, Weiger/Bevestig-en-teken) en geeft de gekozen waarden pas terug na
+expliciete bevestiging - de aanroep naar `buildExecuteTransaction()` (en dus de
+`navigator.credentials.get()`-passkey-prompt) gebeurt pas daarna, nooit ervoor. Bij
+weigering: geen passkey-prompt, geen on-chain-actie. Bewust, zoals in het ontwerp
+afgesproken, NOG GEEN risicoklassen/geschiedenis-check/identiconbeeld - dat is fase 1.
+
+Wijziging beperkt tot precies wat nodig was: 1 nieuw bestand
+(`client/src/executePreview.ts`), 1 regel toegevoegd aan `client/index.html`
+(`<div id="preview-root">` als ankerpunt), de hardcoded testwaarden in `runStep3()`
+(`main.ts`) vervangen door de kaart-uitkomst, en toegevoegde (niet herschreven) CSS in
+`style.css` voor de kaart - een bewust lichte "eiland"-kaart in het donkere
+dev-terminal-thema eromheen, om het contrast tussen de oude en nieuwe laag letterlijk
+zichtbaar te maken. Geen van de andere 19 stappen/knoppen aangeraakt. Geen inline
+`<style>`/`<script>` toegevoegd - blijft binnen de bestaande CSP (`style-src 'self'`,
+`script-src 'self'`).
+
+Geverifieerd, niet aangenomen: `npx tsc --noEmit` gaf één nieuwe fout
+(`'root' is possibly 'null'` in de event-listener-closures - een echte TypeScript-
+beperking, geen valse melding) - gefixt door de na-null-check-waarde in een eigen
+`const` te herbinden. Daarna nog uitsluitend de vier al-vóór-vanavond bestaande,
+gedocumenteerde fouten in `initWallet.ts`/`webauthnSign.ts` (sectie 45) over - bevestigd
+identiek, geen nieuwe. `npm run dev` gestart en getest: hoofdpagina 200, bevat het nieuwe
+`preview-root`-ankerpunt, `executePreview.ts` laadt (200), `main.ts` roept
+`showExecutePreview` aan, `style.css` bevat de nieuwe kaart-regels, CSP-meta-tag
+ongewijzigd aanwezig.
+
+**Nog niet getest: het daadwerkelijke gedrag in de browser** (kaart tonen, invoer
+wijzigen, weigeren, bevestigen → passkey-prompt) - dat vereist een echte
+platform-authenticator, zoals de rest van deze testclient. Volgende stap: de gebruiker
+test dit zelf en beoordeelt of fase 0 het gewenste effect heeft voordat er naar de
+overige instructies uitgebreid wordt.

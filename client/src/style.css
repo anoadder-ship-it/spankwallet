@@ -33,3 +33,116 @@ button:disabled { background: #333; cursor: not-allowed; color: #777; }
 }
 .log-success { color: #4ade80; font-weight: bold; }
 .log-error { color: #f87171; font-weight: bold; }
+
+/* ---------------------------------------------------------------------
+   Menselijk-leesbare bevestigingskaart (execute) - STATUS.md sectie 50,
+   fase 0. Bewust een lichte "eiland"-kaart in het donkere dev-terminal-
+   thema hierboven: het is precies het punt van deze kaart dat hij zich
+   visueel onderscheidt van de ontwikkelaarslogs eromheen - de gebruiker
+   die dit ooit ziet, hoeft nooit de rest van deze pagina te lezen.
+   --------------------------------------------------------------------- */
+
+#preview-root:empty { display: none; }
+
+.preview-card {
+  background: #fbfaf7;
+  color: #1c2321;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -12px rgba(0, 0, 0, 0.5);
+  padding: 22px 24px 24px;
+  margin: 24px 0;
+  max-width: 420px;
+}
+
+.preview-eyebrow {
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #93602a;
+  margin-bottom: 10px;
+}
+
+.preview-headline {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.3;
+  margin-bottom: 18px;
+  word-break: break-word;
+}
+
+.preview-amount-echo { color: #93602a; }
+.preview-recipient-echo {
+  font-family: monospace;
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.preview-field { margin-bottom: 14px; }
+
+.preview-label {
+  display: block;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: #5b6460;
+  margin-bottom: 5px;
+}
+
+.preview-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: monospace;
+  font-size: 14px;
+  padding: 9px 10px;
+  border: 1px solid #c9cec4;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1c2321;
+}
+
+.preview-input:focus {
+  outline: 2px solid #93602a;
+  outline-offset: 1px;
+}
+
+.preview-error {
+  color: #a1392c;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  min-height: 0;
+  margin-bottom: 4px;
+}
+.preview-error:empty { margin-bottom: 0; }
+
+.preview-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.preview-btn {
+  flex: 1;
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 11px 14px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.preview-deny {
+  background: #ffffff;
+  color: #4b544f;
+  border-color: #c9cec4;
+}
+.preview-deny:hover { background: #f1f2ee; }
+
+.preview-confirm {
+  background: #1c2321;
+  color: #fbfaf7;
+}
+.preview-confirm:hover { background: #33403a; }

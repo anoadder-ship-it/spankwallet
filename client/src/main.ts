@@ -11,6 +11,7 @@ import { createSpankWalletPasskey } from "./passkey";
 import { connectWallet, ConnectedWallet } from "./wallet";
 import { buildInitWalletTransaction, InitWalletPdas } from "./initWallet";
 import { buildExecuteTransaction } from "./execute";
+import { showExecutePreview } from "./executePreview";
 import { buildTransferTokenTransaction } from "./transferToken";
 import {
   readWalletAccount,
@@ -239,8 +240,18 @@ async function runStep3(): Promise<void> {
   const { signature: fundSig } = await lastWallet.signAndSendTransaction(fundTx);
   await connection.confirmTransaction(fundSig, "confirmed");
   log("Vault gefund. Signature: " + fundSig);
-  const testRecipient = lastWallet.publicKey;
-  const testAmountLamports = 1000n;
+
+  log("");
+  log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 50, fase 0) -");
+  log("geen passkey-prompt totdat daar expliciet op 'Bevestig en teken' geklikt wordt.");
+  const choice = await showExecutePreview(lastWallet.publicKey, 1000n);
+  if (choice === null) {
+    log("Geweigerd in de bevestigingskaart - execute NIET aangeroepen, geen passkey-prompt.");
+    return;
+  }
+  const testRecipient = choice.recipient;
+  const testAmountLamports = choice.amountLamports;
+  log("Bevestigd: " + testAmountLamports.toString() + " lamports naar " + testRecipient.toBase58() + ".");
   log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
 
   try {

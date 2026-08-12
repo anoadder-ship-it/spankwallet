@@ -2442,6 +2442,27 @@ niet verder onderzocht, geen aanwijzing gevonden dat het gerelateerd is.
 **Nog steeds niet volledig functioneel bevestigd (verbinden + minstens 1 ondertekenactie
 end-to-end) op een echt Android-toestel** - dat is de eerstvolgende stap.
 
+**Aanvullend, op aangeven van de gebruiker: het testtoestel is een Poco F7 (Xiaomi/HyperOS-
+MIUI, geen stock Android).** Onderzocht (via websearch, niet aangenomen) of dat relevant is
+naast de al-gevonden en -gefixte "Not Found"-bug hierboven. Bevestigd: MIUI/HyperOS staat
+gedocumenteerd bekend om (a) agressief browsertabbladen/-processen te killen zodra de
+gebruiker wegschakelt naar een andere app (precies wat er gebeurt tijdens het goedkeuren in
+Solflare), en (b) inconsistent gedrag van Android App Links-verificatie. De al-gefixte
+"Not Found" wordt daar niet door verklaard - dat was een deterministische serverbug,
+gereproduceerd los van welk toestel dan ook. Wel een REEEL, ander risico: als MIUI het
+tabblad/proces killt terwijl de gebruiker in Solflare zit, overleeft `sessionStorage` dat
+niet (gebonden aan de levensduur van die ene browsing-context) - dat zou zich later, anders,
+uiten als "Geen actieve Solflare-deep-link-sessie gevonden" bij propose/approve, niet als
+"Not Found" bij connect. Preventief gefixt voordat de gebruiker daarop stuitte:
+`wallet-signer.html` gebruikt nu `localStorage` (aan het origin gebonden, overleeft een
+processkill) in plaats van `sessionStorage` voor de sleutelpaar/sessie-status. Bewuste
+afweging, niet stilzwijgend gekozen: de ephemere sessiesleutels blijven hierdoor iets langer
+liggen dan strikt nodig (tot de volgende succesvolle afronding, niet tot tabsluiting) -
+aanvaardbaar, dit zijn geen langlevende geheimen, enkel voor het encryptiekanaal met
+Solflare. Geverifieerd: `node --check` slaagt, de draaiende server serveert de bijgewerkte
+pagina (`localStorage.getItem(DEEPLINK_STORAGE_KEY)` aanwezig), en de eerdere "Not
+Found"-curl-test blijft 200 geven.
+
 ## 45. Dependabot-kwetsbaarheden onderzocht: uuid gefixt, esbuild/vite blijven bewust geblokkeerd (zelfde reden als sectie 20), postcss bleek niet (meer) van toepassing
 
 Op verzoek de 6 open Dependabot-alerts (1 high, 5 moderate) grondig onderzocht via `gh api

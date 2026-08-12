@@ -2499,6 +2499,33 @@ welk verzoek bij welk antwoord hoort, inclusief hoe lang geleden dat verzoek ver
 gebruiker om zelf een muurvast/verouderd `pendingAction` te wissen zonder tussenkomst.
 Geverifieerd: `node --check` slaagt, server herstart en serveert de bijgewerkte pagina.
 
+**De werkhypothese bleek onjuist: de gebruiker wiste de status met de nieuwe knop,
+verbond opnieuw, klikte op "3. Voorstel goedkeuren", en kreeg DEZELFDE fout - nu met een
+verse timestamp (6 seconden oud), nog steeds gelabeld "(execute)".** Dat sluit een
+verouderde/nooit-afgeronde status als verklaring uit.
+
+De volledige `approve-btn`-handler, `buildApproveTx`, en `startDeeplinkSignAndSend`
+regel voor regel herlezen: geen bug gevonden - de code roept ondubbelzinnig
+`startDeeplinkSignAndSend("approve", tx)` aan, geen enkel codepad kan daar "execute" van
+maken. Dit verlegt de verdenking naar iets dat niet in de broncode zelf zichtbaar is:
+of de telefoon daadwerkelijk de nieuwste versie van het bestand draait. `https-
+server.js` stuurde nooit cache-headers mee, en elke terugkeer van Solflare is een gewone
+GET naar exact dezelfde URL - een reeel scenario waarbij MIUI/HyperOS (al eerder in deze
+sectie bevestigd als non-standaard agressief) een VEROUDERDE, gecachte versie van de
+pagina serveert in plaats van vers op te halen. Belangrijk: dit zou ook een verse
+timestamp verklaren, aangezien die client-side op het moment van klikken gegenereerd
+wordt, ongeacht hoe oud de daadwerkelijk draaiende JS is.
+
+Gefixt: `https-server.js` stuurt nu expliciet `Cache-Control: no-store, no-cache,
+must-revalidate, max-age=0`, `Pragma: no-cache`, en `Expires: 0` mee bij elke response.
+Daarnaast een handmatige, zichtbare build-markering (`PAGE_BUILD`, in het klassieke
+script vooraan - zichtbaar zelfs als de module faalt) toegevoegd, zodat een volgende test
+DEFINITIEF kan bevestigen welke versie daadwerkelijk draait, in plaats van daarover te
+moeten gissen. Geverifieerd: `curl -I` toont de nieuwe cache-headers, de build-markering
+staat in de geserveerde pagina, en de eerdere fixes (query-string-routing, localStorage)
+blijven intact. Nog te bevestigen: of dit de daadwerkelijke oorzaak was - dat blijkt pas
+bij de volgende test op het toestel.
+
 ## 45. Dependabot-kwetsbaarheden onderzocht: uuid gefixt, esbuild/vite blijven bewust geblokkeerd (zelfde reden als sectie 20), postcss bleek niet (meer) van toepassing
 
 Op verzoek de 6 open Dependabot-alerts (1 high, 5 moderate) grondig onderzocht via `gh api

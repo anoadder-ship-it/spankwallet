@@ -3211,3 +3211,87 @@ wijziging aan `wallet-signer.html`, de server herstart en getest vanaf de nieuwe
 `admin/`-locatie (200, juiste build-marker, CSP aanwezig, de eerder gefixte
 query-string-routing nog intact), `git check-ignore` bevestigd dat de `.pem`-bestanden
 (certificaat/sleutel) niet meegecommit worden.
+
+## 52. Eerlijke eindstand - niet verkocht, gewogen
+
+Geen samenvatting die het mooier maakt dan het is. Wat vanavond en in eerdere sessies
+daadwerkelijk bereikt is, wat er oprecht nog open staat (inclusief dingen die haast
+verdienden en dat merkbaar hebben), en een concrete volgorde voor de volgende sessie.
+
+**Waar dit vandaan komt vs. waar het nu staat.** Het project begon (sectie 1-2) als een
+lokaal-getest passkey-wallet-concept met 8/8 groene tests en een enkele lokale
+deploy-sleutel. Het staat nu op: 19 instructies, stuk voor stuk end-to-end bewezen met
+ECHTE hardware-passkeys (niet gesimuleerd) op devnet; een upgrade-authority die niet meer
+een enkel privésleutelbestand is maar een 2-of-3 Squads-multisig met een echte 72u-
+timelock - de #1-geprioriteerde bevinding uit de externe security-review, structureel
+gesloten, niet slechts gedocumenteerd als "later op te lossen"; drie onafhankelijke,
+industriestandaard geautomatiseerde audittechnieken die daadwerkelijk tegen de code
+gedraaid zijn (niet enkel beschreven), zonder nieuwe bevindingen binnen hun bereik; en een
+eerste, echt werkende stap naar een niet-ontwikkelaarsgerichte gebruikersinterface. Dat is
+een reeel, meetbaar verschil in volwassenheid, niet alleen meer regels code.
+
+**Oprecht nog open - niet alleen "nog te bouwen", ook "verdient extra aandacht":**
+
+1. **De canary-upgrade zelf is nog NIET uitgevoerd.** Het hele punt van de
+   multisig-migratie - bewijzen dat een echte upgrade via de nieuwe authority werkt -
+   staat nog open tot 2026-08-15T15:46:49Z. Tot die tijd is de migratie bewezen tot en met
+   "goedgekeurd", niet tot en met "werkt".
+2. **`admin/wallet-signer.html`'s CSP (deze ronde toegevoegd) is NIET in een echte
+   browser tegen een live signing-poging getest** - alleen gecontroleerd dat de pagina
+   laadt en de module-JS syntactisch klopt. Als de CSP toch iets blokkeert wat nodig is
+   (bijv. een geneste sub-resource-fetch binnen een van de esm.sh-CDN-packages), is de
+   slechtst denkbare ontdekkingsmoment vlak vóór of tijdens de echte executie op 15
+   augustus. **Concrete aanbeveling: minstens één keer verbinden + een voorstel bekijken
+   (niet per se uitvoeren) vóór die datum, met genoeg speling om terug te draaien als de
+   CSP iets breekt.**
+3. **Vier dode/dubbele Squads-voorstellen staan permanent on-chain** (transactionIndex
+   1-4), ontstaan tijdens vanavond se debugging-rondes - onschadelijk (kunnen nooit meer
+   uitgevoerd worden zodra voorstel #5 dat is) maar wel blijvende rent-geconsumeerde
+   accounts en een hoger transactionIndex-startpunt dan strikt nodig. Geen actie vereist,
+   wel vermeldenswaardig.
+4. **Het mobiele Solflare-deep-link-pad werkt, maar kostte ongewoon veel iteraties om
+   daar te komen** (browsercaching, MIUI-agressiviteit, stale localStorage-state, een
+   labelbug die uiteindelijk cache bleek). Dat patroon - veel losse, elkaar opvolgende
+   randgevallen - is zelf een signaal dat dit pad brozer aanvoelt dan de
+   Wallet-Standard-desktoproute, ook al is elk individueel probleem nu opgelost en
+   begrepen. Verdient een rustige, niet-onder-tijdsdruk hertest voordat er blind op
+   vertrouwd wordt voor een volgende, echte migratie.
+5. **`client`'s `npm run build` is nog steeds kapot** (pre-bestaande TypeScript-
+   strictheidsfout, sectie 45) - `npm run dev` werkt, dus dit is nooit blokkerend geweest
+   voor vanavond se werk, maar het betekent dat er momenteel geen schone productie-build
+   van de client mogelijk is. Klein, geïsoleerd, al maanden(?) niet aangepakt simpelweg
+   omdat het nooit op het kritieke pad lag.
+6. **Certora/CVLR-formele-verificatie van de daadwerkelijke handtekeningverificatielogica
+   - het meest veiligheidskritieke stuk code in het hele programma - blijft onbewezen**
+   door tooling-infrastructuurbeperkingen (sectie 48), niet doordat de eigenschap zelf
+   onwaar zou zijn. Reeel gat, geen spookprobleem.
+7. **Geen enkele geautomatiseerde test dekt `admin/wallet-signer.html` of de
+   UI-preview-laag.** Beide zijn volledig handmatig geverifieerd (curl, `node --check`,
+   handmatig doorklikken). Een toekomstige wijziging kan iets stilzwijgend breken zonder
+   dat er een test faalt om dat te melden.
+8. **Deze sessie was extreem lang.** Dat is zelf een risicofactor: de "execute"-
+   naamsverwarring die tot een fout in het eigen ontwerpdocument leidde, gebeurde
+   laat in een marathonsessie. Niets wat vanavond gebouwd is, is daardoor aantoonbaar
+   fout - maar het is een eerlijke reden om, zeker aan de laat-in-de-sessie-gebouwde
+   onderdelen (fase 0 van de UI, de opschoningsronde zelf), bij twijfel extra kritisch te
+   kijken in plaats van blind te vertrouwen omdat het "vanavond nog getest is".
+
+**Concrete prioriteitsvolgorde voor de volgende sessie:**
+
+1. Vóór 2026-08-15: `admin/wallet-signer.html` minstens één keer laden en verbinden om de
+   nieuwe CSP te verifiëren (punt 2 hierboven) - klein, snel, voorkomt een vervelende
+   verrassing.
+2. Op/na 2026-08-15T15:46:49Z: de canary-upgrade daadwerkelijk uitvoeren, en bevestigen
+   via `solana program show` + `solana program dump` (zelfde bewijspatroon als de
+   repetitie in sectie 41).
+3. `client`'s TypeScript-build-fout oplossen - klein, geïsoleerd, ruimt een al langer
+   openstaand euvel op.
+4. UI-ontwerp fase 1 oppakken (risicoklassen + resterende 18 instructies), zoals in
+   sectie 50 afgesproken pas ná bevestiging van fase 0's effect door de gebruiker.
+5. Het mobiele Solflare-pad (punt 4 hierboven) een keer rustig hertesten, niet onder
+   tijdsdruk, om vertrouwen te bevestigen los van vanavond se drukte.
+6. Certora/CVLR: alleen oppakken als een linux-x86_64- of macOS-machine beschikbaar komt,
+   of als een `sol_keccak256`-summary in cvlr-solana verschijnt - anders blijft dit een
+   apart, niet-dringend traject.
+7. esbuild/vite-Dependabot-major-upgrade: een aparte, bewust geplande taak zoals al sinds
+   sectie 20 vastgesteld - geen tussendoortje.

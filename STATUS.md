@@ -2549,6 +2549,60 @@ bedoelde klik op knop 3) versus de klik die daadwerkelijk op een ander element v
 bedoeld. Build-markering opgehoogd (`2026-08-12T13:20:00Z-click-target-logging`),
 geverifieerd via `node --check` en dat de server de bijgewerkte pagina serveert.
 
+**Klik-target-logging bevestigde de juiste knop ("approve-btn"/"3. Voorstel goedkeuren")
+- het label-probleem was dus wel degelijk browsercaching, inmiddels opgelost. De
+onderliggende `internalError` bleef echter bestaan.** Grondig onderzocht of dit aan de
+transactie zelf lag, met harde bewijzen i.p.v. aannames:
+- 247 bytes lokaal gereproduceerd, exacte match met de gelogde `transaction_bytes`.
+- De approve-transactie (247 bytes, 4 accounts, 1 instructie) rechtstreeks tegen devnet
+  gesimuleerd (`connection.simulateTransaction`, `sigVerify: false`): `err: null`,
+  programma-logs tonen "Instruction: ProposalApprove" ... "success". **De transactie is
+  bewezen 100% geldig.**
+- Vergeleken met de propose-transactie (598 bytes, 6 accounts, 2 instructies) die WEL
+  slaagde via hetzelfde deep-link-pad - groter en complexer, dus een blanket
+  "VersionedTransaction wordt niet ondersteund"-verklaring houdt geen stand.
+- `buildApproveTx()` wordt door zowel het synchrone (hoofdpc/Wallet Standard) als het
+  deep-link-pad (telefoon) identiek aangeroepen - er is geen apart constructiepad dat kan
+  afwijken.
+
+Solflare's eigen foutcode-documentatie (`docs.solflare.com/solflare/technical/deeplinks/
+limitations`) opgehaald: `-32603 (Internal Error)` is letterlijk hun eigen, ongedifferen-
+tieerde vangnet-foutcode ("Something went wrong within Solflare") - geen verdere diagnose
+mogelijk vanaf de client-kant. Een aanverwante, wel specifieke code bestaat apart
+(`-32002`, "een ander goedkeuringsvenster staat al open"), niet met zekerheid onze situatie
+maar een plausibele onderliggende oorzaak gezien de vele afgebroken/gekilde Solflare-
+sessies op dit toestel vanavond.
+
+**Besluit van de gebruiker, na eigen aanvullend onderzoek dat bevestigt dat dit een breed
+bekend, langlevend probleem is bij zowel Phantom- als Solflare-deeplinks (meerdere
+onafhankelijke ontwikkelaars met exact hetzelfde probleem, geen oplossing beschikbaar) -
+dus bij de wallet-provider ligt, niet in `wallet-signer.html`: overstappen naar de
+Windows-pc voor de tweede goedkeuring, via hetzelfde bewezen Wallet Standard-pad als de
+hoofdpc (knop 1, niet 1b).** Bij het voorbereiden hiervan bleek het door de gebruiker
+opgegeven Windows-pc-adres (`AHy1bU6pMv4NQ2H8zivtW3AFvzaXY836yx2BaTyJfcwG`) niet
+overeen te komen met de daadwerkelijke, on-chain geregistreerde multisig-leden - opnieuw
+gecontroleerd i.p.v. aangenomen. De echte, geregistreerde ledenset (`threshold: 2`):
+`2jDzaP3FbW5583hb4FeGZVU9MYseqBeFHwxycjzcvT7Q` (Windows-pc, de juiste),
+`3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3` (hoofdpc, al goedgekeurd),
+`CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3` (telefoon). Dit komt overeen met de
+eerder in dit project al vastgestelde correctie (het oorspronkelijk opgegeven
+Windows-pc-adres bleek nooit een echte, controleerbare wallet te zijn).
+
+**Aandachtspunt voor toekomstige, grotere mobiele deep-link-payloads:** de gebruiker vond
+via extern onderzoek een melding van een andere ontwikkelaar die tegen dezelfde
+`-32603`-fout liep en een vermoeden had van een ongedocumenteerde payload-grootte-limiet
+(diens payload was 802 bytes). Onze approve-payload (247 bytes) is kleiner, dus dit
+verklaart vermoedelijk niet dit specifieke geval, maar is de moeite waard om te onthouden
+mocht er ooit een complexere multisig-actie via het mobiele deep-link-pad moeten (grotere
+transacties, meer instructies/accounts).
+
+**Mobiele ondertekening blijft bij het afsluiten van dit spoor onbevestigd/onbetrouwbaar
+via Solflare's deep-link-protocol specifiek voor deze actie** (propose werkte, connect
+werkte, approve niet) - de telefoon blijft bruikbaar als derde, ongebruikte reserve-signer
+zoals oorspronkelijk ontworpen (2-of-3), maar niet als actief gebruikte tweede signer voor
+deze migratie. Vervolg: de tweede goedkeuring wordt in plaats daarvan via de Windows-pc
+gedaan (Wallet Standard, hetzelfde bewezen pad als de hoofdpc).
+
 ## 45. Dependabot-kwetsbaarheden onderzocht: uuid gefixt, esbuild/vite blijven bewust geblokkeerd (zelfde reden als sectie 20), postcss bleek niet (meer) van toepassing
 
 Op verzoek de 6 open Dependabot-alerts (1 high, 5 moderate) grondig onderzocht via `gh api

@@ -2370,3 +2370,98 @@ telefoon:**
    afsluiten van deze sessie los van de Claude Code-sessie losgekoppeld gestart
    (`setsid`/`nohup`/`disown`) zodat hij blijft draaien; geen actie nodig om 'm morgen
    weer te bereiken.
+
+## 44. Mobiele Solflare-verbinding: root cause van het verkeerde-adres-probleem gevonden, `@solflare-wallet/sdk` vervangen door het echte deep-link-protocol
+
+Vervolg op sectie 43's ongeteste mobiele fix. De gebruiker testte knop "1b" (destijds de
+`@solflare-wallet/sdk`-iframe-aanpak) op de telefoon: verbinding lukte, maar gaf een
+account terug (`CdReSUq9eX2BKv5kwom12LLJFgyZuYoATfthotUjgE6V`) dat NIET het daadwerkelijke,
+enige account in de Solflare-app is (bevestigd: `CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3`
+is het juiste, correct geregistreerde multisig-lid).
+
+**Root cause, met primair bewijs (broncode, geen documentatie-samenvatting):**
+`@solflare-wallet/sdk`'s `connect()` injecteert een iframe naar `connect.solflare.com` en
+wacht op een `postMessage`-antwoord (`src/index.ts`, `_injectElement`/`_handleEvent`).
+Browsers blokkeren standaard dat een cross-origin iframe de bovenliggende pagina
+zelfstandig laat navigeren naar een deep-link/intent ("framebusting intervention" -
+vereist een user-gesture direct op de top-level pagina). Zonder die navigatie kan de
+iframe de echte, geinstalleerde Solflare-app nooit bereiken, en levert in plaats daarvan
+kennelijk zijn eigen, losse sessie/adres. **Dit was dus geen verkeerd account aan de kant
+van de gebruiker, maar een structurele beperking van de iframe-SDK-aanpak zelf op mobiel.**
+
+**Oplossing: Solflare's officieel gedocumenteerde deep-link-protocol** (los van de SDK),
+geverifieerd tegen de exacte specificatie (`docs.solflare.com/solflare/technical/deeplinks`)
+EN Solflare's eigen referentie-implementatie (`github.com/solflare-wallet/deep-link-sample-app`,
+`App.tsx`) - dezelfde encrypt/decrypt-aanpak (nacl-box, x25519-sleuteluitwisseling) is
+overgenomen, alleen `window.location.href` i.p.v. React Native's `Linking.openURL()`. Dit is
+een VOLLEDIGE paginanavigatie (geen iframe): `wallet-signer.html` navigeert zelf naar
+`https://solflare.com/ul/v1/<methode>`, Android's eigen App Links-afhandeling opent de
+geinstalleerde app, en de app stuurt de gebruiker terug naar `redirect_link` met een
+nacl-box-versleuteld antwoord in de query-string.
+
+Belangrijke architecturale consequentie: een volledige paginanavigatie wist de JS-context,
+dus een knopklik kan nooit meer synchroon op een resultaat wachten zoals bij Wallet
+Standard. De pagina is herstructureerd zodat elke actie (connect/propose/approve/execute)
+in een "build"- en een "finish"-functie is opgesplitst; voor het deep-link-pad wordt na
+`build` de versleutelde aanvraag weggestuurd en de paginacontext verlaten, en wordt
+`finish` pas aangeroepen wanneer de pagina na de redirect opnieuw laadt. Sessie-status
+(het x25519-sleutelpaar, het gedeelde geheim, het sessietoken, en welke actie in
+behandeling was) overleeft die reload via `sessionStorage`. De oude, bewezen-onbetrouwbare
+`@solflare-wallet/sdk`-iframe-knop is volledig verwijderd, niet naast de nieuwe knop
+laten staan.
+
+CDN-import (`tweetnacl@1.0.3` via esm.sh) geverifieerd bereikbaar, module-JS syntactisch
+gecontroleerd (`node --check`). **Nog NIET functioneel getest op een echt Android-toestel**
+bij het schrijven van deze sectie - dat is de eerstvolgende stap.
+
+## 45. Dependabot-kwetsbaarheden onderzocht: uuid gefixt, esbuild/vite blijven bewust geblokkeerd (zelfde reden als sectie 20), postcss bleek niet (meer) van toepassing
+
+Op verzoek de 6 open Dependabot-alerts (1 high, 5 moderate) grondig onderzocht via `gh api
+repos/.../dependabot/alerts` (primaire bron, niet de korte pushmelding). Werkelijke
+samenstelling week af van de aangeleverde samenvatting - postcss bleek geen open alert
+(al op 8.5.26, ruim boven elke bekende kwetsbare grens); in plaats daarvan bleek `uuid`
+tweemaal aanwezig (root + client), niet eerder genoemd.
+
+**Gefixt: `uuid` (medium, GHSA-w5hq-g745-h8pq, `<11.1.1`).** Zowel root als client hadden
+`uuid@8.3.2` als transitieve afhankelijkheid van `jayson` (zelf een afhankelijkheid van
+`@solana/web3.js`, uitsluitend gebruikt voor `require('uuid').v4()` bij het genereren van
+JSON-RPC-request-ID's - geverifieerd door `jayson`'s broncode zelf te lezen). Precies
+gericht gefixt via een geneste `overrides`-regel (`"jayson": { "uuid": "^11.1.1" }`) in
+beide `package.json`-bestanden, in plaats van een blanket-override die ook de al-veilige
+`uuid@14.0.1` van `rpc-websockets` had geraakt. Geverifieerd: `npm ls uuid` toont nu
+`uuid@11.1.1` onder `jayson`, `rpc-websockets` ongewijzigd op `14.0.1`. Functioneel getest
+(niet alleen aangenomen) met een directe `jayson.utils.request()`-aanroep (geeft een geldige
+uuid-v4-string) EN een echte devnet-RPC-round-trip via `Connection.getVersion()` - beide
+slagen. `npm audit` in root: 0 kwetsbaarheden.
+
+**Bewust NIET gefixt: `esbuild` (moderate, GHSA-67mh-4wv8-2f99) en `vite`** (drie alerts:
+GHSA-4w7w-66w2-5vf9 - de uit sectie 20 al bekende - plus twee nieuwe, GHSA-v6wh-96g9-6wx3 en
+GHSA-fx2h-pf6j-xcff, hoog). Gecontroleerd of de aanbevolen fix-versies (`esbuild@0.25.0`,
+`vite@6.4.2`/`6.4.3`) binnen de huidige major vallen: nee - `npm audit` in `client/` geeft
+zelf expliciet aan dat de fix `vite@8.2.1` vereist (nog verder dan de vite 6 uit sectie 20).
+`esbuild` is bovendien geen losse afhankelijkheid maar een transitieve dependency die
+`vite@5.4.21` zelf vastzet op `^0.21.3` - een geforceerde override naar 0.25.0 zou tegen
+vite's eigen gedeclareerde bereik ingaan en een echt risico op build-/dev-server-breuk
+vormen (esbuild's interne API is tussen die versies niet stabiel gebleven), dus dat is
+geen "veilige losse patch" zoals bij `uuid`. Dit is dezelfde, al in sectie 20 bewust
+uitgestelde situatie - een major-upgrade naar Vite 6+ blijft een aparte, apart geplande
+taak, geen tussendoortje.
+
+**De twee nieuwe vite-CVE's onderzocht (primaire advisory-tekst, niet aangenomen) - beide
+blijken al net zo effectief gemitigeerd als de oorspronkelijke:** GHSA-v6wh-96g9-6wx3
+(`launch-editor`, NTLM-hashlek via UNC-paden) vereist expliciet Windows EN een naar het
+netwerk blootgestelde dev-server. GHSA-fx2h-pf6j-xcff (`server.fs.deny`-omzeiling via
+NTFS-ADS/8.3-shortnames) vereist expliciet zowel Windows als "explicitly exposes the Vite
+dev server to the network (using `--host` of `server.host`)". Beide zijn dus (a)
+Windows-specifiek - dit ontwikkelmachine draait Linux - en (b) afhankelijk van precies de
+netwerkblootstelling die sectie 20's `server.host: false`-fix al structureel onmogelijk
+maakt. Het praktische aanvalsrisico blijft dus net zo gesloten als eerder vastgesteld,
+ondanks dat de onderliggende versie niet gepatcht is.
+
+**Zijdelings ontdekt, los van deze taak: `client`'s `npm run build` faalt momenteel** op
+een TypeScript-strictheidsfout (`Uint8Array<ArrayBufferLike>` niet toewijsbaar aan
+`BufferSource`, in `webauthnSign.ts`/`initWallet.ts`) - bevestigd PRE-BESTAAND en
+losstaand van deze wijzigingen (identieke `typescript@5.9.3` in het lockfile voor en na
+de uuid-fix). `npm run dev` (de dev-server zelf, geen `tsc`-stap) draait wel gewoon
+(HTTP 200, geen `Network:`-blootstelling). Niet opgelost binnen deze taak - apart
+gerapporteerd, geen scope-verruiming zonder overleg.

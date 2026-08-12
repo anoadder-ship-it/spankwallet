@@ -22,6 +22,9 @@
     "@solana/spl-token": "^0.4.9"
   },
   "overrides": {
-    "bigint-buffer": "npm:@trufflesuite/bigint-buffer@^1.1.10"
+    "bigint-buffer": "npm:@trufflesuite/bigint-buffer@^1.1.10",
+    "jayson": {
+      "uuid": "^11.1.1"
+    }
   }
 }

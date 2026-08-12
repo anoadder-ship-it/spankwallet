@@ -2526,6 +2526,29 @@ staat in de geserveerde pagina, en de eerdere fixes (query-string-routing, local
 blijven intact. Nog te bevestigen: of dit de daadwerkelijke oorzaak was - dat blijkt pas
 bij de volgende test op het toestel.
 
+**De caching-hypothese is weerlegd: de gebruiker bevestigde de nieuwe build-markering in
+de log, en dezelfde fout kwam alsnog terug.** On-chain opnieuw gecontroleerd (niet
+aangenomen): `transactionIndex` bleef ditmaal op 4 staan (geen nieuw duplicaat-voorstel,
+in tegenstelling tot de eerdere "execute"-pogingen die wel #3 en #4 creeerden) en voorstel
+#2 heeft nog steeds precies 1 van de 2 vereiste goedkeuringen (`3zZcLwTXUn...`, de
+poging vanaf de telefoon is niet geregistreerd). **Belangrijkste conclusie voor de veiligheid:
+geen premature execute, geen nieuw duplicaat deze keer - de poging faalde voordat er iets
+on-chain werd bevestigd.**
+
+`approve-btn`'s handler, `buildApproveTx`, en `startDeeplinkSignAndSend` nogmaals
+regel-voor-regel herlezen: nergens een hardcoded "execute"-string te vinden - de
+knop-handler geeft ondubbelzinnig de letterlijke string "approve" door. Verdere statische
+codereview leverde dus niets nieuws meer op. In plaats daarvan definitieve, empirische
+klik-logging toegevoegd: elke knop-handler (propose/approve/execute) logt nu, als EERSTE
+regel, vóór alle andere logica, welk DOM-element de browser zelf als geklikt rapporteert
+(`element.id` + `element.textContent`) - zowel on-page/console als gepersisteerd in
+localStorage (`lastButtonClick`), zodat dit na een deep-link-terugkeer nog te vergelijken
+is met de uiteindelijke foutmelding. Dit isoleert definitief tussen twee resterende
+mogelijkheden: een echte interne bug (als deze log zelf al "execute-btn" toont bij een
+bedoelde klik op knop 3) versus de klik die daadwerkelijk op een ander element viel dan
+bedoeld. Build-markering opgehoogd (`2026-08-12T13:20:00Z-click-target-logging`),
+geverifieerd via `node --check` en dat de server de bijgewerkte pagina serveert.
+
 ## 45. Dependabot-kwetsbaarheden onderzocht: uuid gefixt, esbuild/vite blijven bewust geblokkeerd (zelfde reden als sectie 20), postcss bleek niet (meer) van toepassing
 
 Op verzoek de 6 open Dependabot-alerts (1 high, 5 moderate) grondig onderzocht via `gh api

@@ -65,7 +65,13 @@ export function deriveSessionPda(walletPda: PublicKey, sessionKey: PublicKey): P
 // SessionKeyAccount-layout (state.rs): discriminator(8) + wallet(32) +
 // session_key(32) + bump(1) + expiry_slot(8) + can_execute(1) +
 // can_transfer_token(1) + can_execute_advanced(1) + count(1) +
-// allowed_programs([Pubkey; 8]).
+// allowed_programs([Pubkey; 8]) + max_lamports_per_tx(8) +
+// max_lamports_total(8) + spent_lamports(8) + token_mint(32) +
+// max_token_amount_per_tx(8) + max_token_amount_total(8) +
+// spent_token_amount(8). De spend-limit-velden staan bewust ACHTERAAN (zie
+// spend-limits-ontwerpdocument, backwards-compatibiliteit §7) - vandaar dat
+// alleen deze zes nieuwe offsets aan het EIND van de bestaande layout zijn
+// toegevoegd, niets ervoor is verschoven.
 const OFFSET_SESSION_KEY = 8 + 32;
 const OFFSET_BUMP = OFFSET_SESSION_KEY + 32;
 const OFFSET_EXPIRY_SLOT = OFFSET_BUMP + 1;
@@ -74,6 +80,13 @@ const OFFSET_CAN_TRANSFER_TOKEN = OFFSET_CAN_EXECUTE + 1;
 const OFFSET_CAN_EXECUTE_ADVANCED = OFFSET_CAN_TRANSFER_TOKEN + 1;
 const OFFSET_COUNT = OFFSET_CAN_EXECUTE_ADVANCED + 1;
 const OFFSET_ALLOWED_PROGRAMS = OFFSET_COUNT + 1;
+const OFFSET_MAX_LAMPORTS_PER_TX = OFFSET_ALLOWED_PROGRAMS + 32 * 8;
+const OFFSET_MAX_LAMPORTS_TOTAL = OFFSET_MAX_LAMPORTS_PER_TX + 8;
+const OFFSET_SPENT_LAMPORTS = OFFSET_MAX_LAMPORTS_TOTAL + 8;
+const OFFSET_TOKEN_MINT = OFFSET_SPENT_LAMPORTS + 8;
+const OFFSET_MAX_TOKEN_AMOUNT_PER_TX = OFFSET_TOKEN_MINT + 32;
+const OFFSET_MAX_TOKEN_AMOUNT_TOTAL = OFFSET_MAX_TOKEN_AMOUNT_PER_TX + 8;
+const OFFSET_SPENT_TOKEN_AMOUNT = OFFSET_MAX_TOKEN_AMOUNT_TOTAL + 8;
 
 export interface ParsedSessionKeyAccount {
   sessionKey: PublicKey;
@@ -83,6 +96,13 @@ export interface ParsedSessionKeyAccount {
   canExecuteAdvanced: boolean;
   count: number;
   allowedPrograms: PublicKey[];
+  maxLamportsPerTx: bigint;
+  maxLamportsTotal: bigint;
+  spentLamports: bigint;
+  tokenMint: PublicKey;
+  maxTokenAmountPerTx: bigint;
+  maxTokenAmountTotal: bigint;
+  spentTokenAmount: bigint;
 }
 
 export async function readSessionKeyAccount(
@@ -105,7 +125,29 @@ export async function readSessionKeyAccount(
     const start = OFFSET_ALLOWED_PROGRAMS + i * 32;
     allowedPrograms.push(new PublicKey(data.subarray(start, start + 32)));
   }
-  return { sessionKey, expirySlot, canExecute, canTransferToken, canExecuteAdvanced, count, allowedPrograms };
+  const maxLamportsPerTx = data.readBigUInt64LE(OFFSET_MAX_LAMPORTS_PER_TX);
+  const maxLamportsTotal = data.readBigUInt64LE(OFFSET_MAX_LAMPORTS_TOTAL);
+  const spentLamports = data.readBigUInt64LE(OFFSET_SPENT_LAMPORTS);
+  const tokenMint = new PublicKey(data.subarray(OFFSET_TOKEN_MINT, OFFSET_TOKEN_MINT + 32));
+  const maxTokenAmountPerTx = data.readBigUInt64LE(OFFSET_MAX_TOKEN_AMOUNT_PER_TX);
+  const maxTokenAmountTotal = data.readBigUInt64LE(OFFSET_MAX_TOKEN_AMOUNT_TOTAL);
+  const spentTokenAmount = data.readBigUInt64LE(OFFSET_SPENT_TOKEN_AMOUNT);
+  return {
+    sessionKey,
+    expirySlot,
+    canExecute,
+    canTransferToken,
+    canExecuteAdvanced,
+    count,
+    allowedPrograms,
+    maxLamportsPerTx,
+    maxLamportsTotal,
+    spentLamports,
+    tokenMint,
+    maxTokenAmountPerTx,
+    maxTokenAmountTotal,
+    spentTokenAmount,
+  };
 }
 
 export interface AddSessionKeyResult {
@@ -132,6 +174,11 @@ export async function buildAddSessionKeyTransaction(
   canTransferToken: boolean,
   canExecuteAdvanced: boolean,
   sessionAllowedPrograms: PublicKey[],
+  maxLamportsPerTx: bigint,
+  maxLamportsTotal: bigint,
+  tokenMint: PublicKey,
+  maxTokenAmountPerTx: bigint,
+  maxTokenAmountTotal: bigint,
   signingPasskeyCompressedPublicKey: Uint8Array,
   credentialId: Uint8Array,
   rpId: string
@@ -141,11 +188,27 @@ export async function buildAddSessionKeyTransaction(
 
   const expirySlotBytes = new Uint8Array(8);
   new DataView(expirySlotBytes.buffer).setBigUint64(0, expirySlot, true);
+  const maxLamportsPerTxBytes = new Uint8Array(8);
+  new DataView(maxLamportsPerTxBytes.buffer).setBigUint64(0, maxLamportsPerTx, true);
+  const maxLamportsTotalBytes = new Uint8Array(8);
+  new DataView(maxLamportsTotalBytes.buffer).setBigUint64(0, maxLamportsTotal, true);
+  const maxTokenAmountPerTxBytes = new Uint8Array(8);
+  new DataView(maxTokenAmountPerTxBytes.buffer).setBigUint64(0, maxTokenAmountPerTx, true);
+  const maxTokenAmountTotalBytes = new Uint8Array(8);
+  new DataView(maxTokenAmountTotalBytes.buffer).setBigUint64(0, maxTokenAmountTotal, true);
+
+  // Spend-limits-ontwerpdocument §3: alle vijf nieuwe parameters worden mee
+  // ondertekend, exact zoals elk ander sessieveld - zie instructions.rs::add_session_key.
   const payload = concatBytes(
     sessionKey.toBytes(),
     expirySlotBytes,
     Uint8Array.from([canExecute ? 1 : 0, canTransferToken ? 1 : 0, canExecuteAdvanced ? 1 : 0]),
-    encodeVecPubkey(sessionAllowedPrograms)
+    encodeVecPubkey(sessionAllowedPrograms),
+    maxLamportsPerTxBytes,
+    maxLamportsTotalBytes,
+    tokenMint.toBytes(),
+    maxTokenAmountPerTxBytes,
+    maxTokenAmountTotalBytes
   );
 
   const expectedChallenge = buildExpectedChallenge(walletPda, "add_session_key", payload);
@@ -168,6 +231,11 @@ export async function buildAddSessionKeyTransaction(
     expirySlotBytes,
     Uint8Array.from([canExecute ? 1 : 0, canTransferToken ? 1 : 0, canExecuteAdvanced ? 1 : 0]),
     encodeVecPubkey(sessionAllowedPrograms),
+    maxLamportsPerTxBytes,
+    maxLamportsTotalBytes,
+    tokenMint.toBytes(),
+    maxTokenAmountPerTxBytes,
+    maxTokenAmountTotalBytes,
     encodeBorshVecU8(clientDataJSON)
   );
 

@@ -120,6 +120,11 @@ pub mod spankwallet {
         can_transfer_token: bool,
         can_execute_advanced: bool,
         session_allowed_programs: Vec<Pubkey>,
+        max_lamports_per_tx: u64,
+        max_lamports_total: u64,
+        token_mint: Pubkey,
+        max_token_amount_per_tx: u64,
+        max_token_amount_total: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
         instructions::add_session_key(
@@ -130,6 +135,11 @@ pub mod spankwallet {
             can_transfer_token,
             can_execute_advanced,
             session_allowed_programs,
+            max_lamports_per_tx,
+            max_lamports_total,
+            token_mint,
+            max_token_amount_per_tx,
+            max_token_amount_total,
             client_data_json,
         )
     }

@@ -115,4 +115,19 @@ pub enum SpankWalletError {
 
     #[msg("De sub-allowlist van deze sessiesleutel zit vol (maximum aantal programma's bereikt)")]
     SessionAllowlistFull,
+
+    #[msg("Dit bedrag overschrijdt de maximale lamports/tokens per transactie van deze sessiesleutel")]
+    SessionSpendPerTxExceeded,
+
+    #[msg("Dit bedrag zou de cumulatieve sessie-limiet van deze sessiesleutel overschrijden")]
+    SessionSpendTotalExceeded,
+
+    #[msg("Onverwachte overflow bij het optellen van het verplaatste bedrag op deze sessiesleutel")]
+    SessionSpendOverflow,
+
+    #[msg("Deze mint komt niet overeen met de mint waarop deze sessiesleutel is vastgepind")]
+    SessionTokenMintNotAllowed,
+
+    #[msg("token_mint is verplicht wanneer can_transfer_token true is")]
+    SessionTokenMintRequired,
 }

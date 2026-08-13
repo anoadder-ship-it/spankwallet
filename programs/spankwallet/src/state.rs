@@ -209,12 +209,64 @@ pub struct SessionKeyAccount {
     /// een programma van de wallet-brede allowlist verwijderen moet
     /// onmiddellijk ook bestaande sessies raken.
     pub allowed_programs: [Pubkey; MAX_SESSION_PROGRAMS],
+
+    // --- Spend-limits (STATUS.md, spend-limits-ontwerpdocument) ---
+    // Bewust ACHTERAAN toegevoegd, nooit ertussenin: Anchor/Borsh-
+    // deserialisatie is offset-strikt. Bestaande, kleinere accounts (oude
+    // layout, 341 bytes) falen hierdoor SCHOON op deserialisatie (fail-
+    // closed) i.p.v. dat elk veld na een tussenvoeging stilzwijgend uit de
+    // verkeerde bytes zou worden gelezen. Geen enkel veld hier heeft een
+    // impliciete default die "onbeperkt" betekent - 0 is altijd een
+    // letterlijke waarde ("nul toegestaan"), nooit een sentinel.
+    /// Maximum lamports die één enkele execute_via_session-aanroep mag
+    /// verplaatsen. Verplicht ingesteld bij add_session_key, geen default.
+    pub max_lamports_per_tx: u64,
+    /// Maximum cumulatieve lamports die deze sessie in TOTAAL over haar
+    /// hele levensduur mag verplaatsen via execute_via_session.
+    pub max_lamports_total: u64,
+    /// Reeds verplaatste lamports via execute_via_session, opgehoogd met
+    /// checked_add binnen dezelfde instructie die de transfer uitvoert
+    /// (atomisch, geen TOCTOU-gat - zie het ontwerpdocument).
+    pub spent_lamports: u64,
+
+    /// De ENIGE SPL-mint die deze sessie mag verplaatsen via
+    /// transfer_token_via_session - Pubkey::default() tenzij
+    /// can_transfer_token true is. Zonder deze pin zou een enkele
+    /// mint-onafhankelijke teller betekenisloos zijn (verschillende mints
+    /// hebben verschillende decimalen/waarde) - zie het ontwerpdocument.
+    pub token_mint: Pubkey,
+    /// Maximum tokens (in de kleinste eenheid van `token_mint`) die één
+    /// enkele transfer_token_via_session-aanroep mag verplaatsen.
+    pub max_token_amount_per_tx: u64,
+    /// Maximum cumulatieve tokens die deze sessie in TOTAAL mag verplaatsen.
+    pub max_token_amount_total: u64,
+    /// Reeds verplaatste tokens via transfer_token_via_session, zelfde
+    /// atomische checked_add-patroon als spent_lamports.
+    pub spent_token_amount: u64,
 }
 
 impl SessionKeyAccount {
     // discriminator(8) + wallet(32) + session_key(32) + bump(1) + expiry_slot(8)
     // + can_execute(1) + can_transfer_token(1) + can_execute_advanced(1) + count(1)
     // + allowed_programs(32 * MAX_SESSION_PROGRAMS)
-    pub const LEN: usize =
-        8 + 32 + 32 + 1 + 8 + 1 + 1 + 1 + 1 + (32 * MAX_SESSION_PROGRAMS);
+    // + max_lamports_per_tx(8) + max_lamports_total(8) + spent_lamports(8)
+    // + token_mint(32) + max_token_amount_per_tx(8) + max_token_amount_total(8)
+    // + spent_token_amount(8)
+    pub const LEN: usize = 8
+        + 32
+        + 32
+        + 1
+        + 8
+        + 1
+        + 1
+        + 1
+        + 1
+        + (32 * MAX_SESSION_PROGRAMS)
+        + 8
+        + 8
+        + 8
+        + 32
+        + 8
+        + 8
+        + 8;
 }

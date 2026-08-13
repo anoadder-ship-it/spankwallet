@@ -4,13 +4,13 @@
 een nieuwe chatsessie. Legt vast waar we staan en waarom, zodat niets herhaald hoeft te
 worden.
 
-Laatst bijgewerkt: 2026-08-12 - opschonings-/documentatieronde na de UI-ontwerpfase
-(secties 49-50); volgende concrete mijlpaal is de canary-upgrade-uitvoering op
-2026-08-15T15:46:49Z.
+Laatst bijgewerkt: 2026-08-13 - spend-limits voor session keys ontworpen, geïmplementeerd
+en volledig getest (sectie 53); volgende concrete mijlpaal blijft de canary-upgrade-
+uitvoering op 2026-08-15T15:46:49Z.
 
 ---
 
-## Huidige staat (bijgewerkt: 2026-08-12)
+## Huidige staat (bijgewerkt: 2026-08-13)
 
 Deze sectie is de actuele samenvatting. De genummerde secties hieronder (inmiddels 50+)
 blijven het volledige, chronologische logboek - toegevoegd, nooit ingekort of
@@ -34,9 +34,17 @@ van het logboek. Deze sectie hier is de vervanger die je als eerste moet lezen.
   een expliciete weiger-optie vóór de passkey-prompt, i.p.v. stilzwijgend hardgecodeerde
   testwaarden (secties 49-50).
 
+**Geïmplementeerd en volledig getest, nog NIET gedeployed naar devnet:**
+- Spend-limits voor session keys: verplichte, expliciete max-per-tx/max-totaal-caps voor
+  zowel lamports als (per mint vastgepinde) SPL-tokens, atomisch bijgehouden met checked
+  arithmetic, fail-closed backwards-compat voor bestaande accounts (sectie 53). Volledige
+  testsuite 54/54 groen (was 49/49). Deploy is een apart, later multisig-voorstel.
+
 **Openstaand:**
 - Canary-upgrade-uitvoering wacht op de 72u-timelock: uitvoerbaar vanaf
   **2026-08-15T15:46:49Z** (sectie 46).
+- Spend-limits-wijziging (sectie 53) deployen naar devnet - apart multisig-voorstel, nog
+  niet ingediend.
 - UI-ontwerp fase 1-3 (risicoklassen, resterende 18 instructies, eventuele
   browserextensie) - ontwerp in sectie 49's artifact, fase 0 gebouwd in sectie 50.
 - Certora/CVLR-formele-verificatie van de secp256r1-signature-logica: geblokkeerd op twee
@@ -50,7 +58,8 @@ van het logboek. Deze sectie hier is de vervanger die je als eerste moet lezen.
 **Eerstvolgende stap:** wachten tot 2026-08-15T15:46:49Z, dan via `wallet-signer.html`
 de canary-execute uitvoeren en on-chain bevestigen (zelfde bewijspatroon als de repetitie
 in sectie 41). Daarna, zoals afgesproken pas ná die bevestiging: sectie 50's fase 1 van de
-UI-preview oppakken (risicoklassen + resterende instructies).
+UI-preview oppakken (risicoklassen + resterende instructies). De spend-limits-deploy
+(sectie 53) is een onafhankelijke, aparte beslissing die niet op de canary-timing wacht.
 
 ## Kritieke gotchas - snelle referentie
 
@@ -3294,3 +3303,106 @@ een reeel, meetbaar verschil in volwassenheid, niet alleen meer regels code.
    apart, niet-dringend traject.
 7. esbuild/vite-Dependabot-major-upgrade: een aparte, bewust geplande taak zoals al sinds
    sectie 20 vastgesteld - geen tussendoortje.
+
+## 53. Spend-limits voor session keys: ontworpen, geïmplementeerd, volledig getest (nog niet gedeployed)
+
+Vervolgstap op sectie 40's session-key-model, uit de roadmap van sectie 26: harde
+uitgaven-limieten toevoegen aan `SessionKeyAccount`, zodat een gecompromitteerde
+sessiesleutel niet langer de volledige vaultbalans in één keer kan leegtrekken. Zelfde
+werkwijze als het multi-passkey/session-key-ontwerp destijds: eerst een volledig
+dreigingsmodel-document (geen code), pas na expliciete goedkeuring geïmplementeerd.
+
+**Empirische grondslag vóór het ontwerp.** `getProgramAccounts` gefilterd op de
+`SessionKeyAccount`-discriminator (`JcuU1RDuE87` base58) leverde precies drie accounts op
+devnet op. Vergelijking van hun `expiry_slot` tegen de toenmalige slot (483457284) toonde:
+alle drie al verlopen (482743050 / 482751268 / 483285709). Deze bevinding bepaalde direct
+de aanpak voor backwards-compatibiliteit hieronder - het reele risico van een breaking
+change was "nul actieve sessies", niet hypothetisch.
+
+**Drie ontwerpbeslissingen, alle drie expliciet goedgekeurd voordat er code geschreven werd:**
+1. **Mint-pinning.** `token_mint` was een los, per-aanroep-parameter in
+   `transfer_token_via_session` - een sessie was nooit aan één token gebonden. Een
+   losstaande, mint-onafhankelijke `spent_token_amount`-teller zou daardoor betekenisloos
+   zijn geweest (verschillende mints hebben verschillende decimalen/waarde). Opgelost door
+   een sessie met `can_transfer_token=true` bij `add_session_key` vast te pinnen op
+   precies één mint (nieuw veld `session.token_mint`), met een nieuwe on-chain check
+   (`SessionTokenMintNotAllowed`) die elke aanroep van `transfer_token_via_session`
+   daartegen valideert. Bewuste beperking: één sessie kan nog altijd maar één token-soort
+   versturen (was al zo, nu is het expliciet i.p.v. impliciet) - een sessie die meerdere
+   tokens met elk hun eigen cap mag versturen is een latere, aparte uitbreiding
+   (vergelijkbaar met hoe `allowed_programs` een array is), geen scope van deze ronde.
+2. **Backwards-compat: bewust fail-closed, geen migratie-instructie gebouwd.** Nieuwe
+   velden staan uitsluitend ACHTERAAN `SessionKeyAccount` (nooit ertussenin) - Anchor/Borsh-
+   deserialisatie is offset-strikt, dus een bestaand, kortere-layout-account faalt hierdoor
+   schoon op deserialisatie (`AccountDidNotDeserialize`) in plaats van met giswaarden
+   ingelezen te worden. Gegeven de empirische bevinding hierboven (nul actieve sessies) is
+   dit geaccepteerd voor nu: de drie bestaande, al-verlopen devnet-accounts (~0,0098 SOL
+   rent totaal) worden na een toekomstige deploy permanent onbruikbaar/onsluitbaar zonder
+   een aparte migratie-instructie - een bewust aanvaarde, kleine en volledig
+   fail-safe kost, geen fail-open risico. Een concreet migratiepad (`UncheckedAccount` +
+   handmatige oude-layout-parsing + een verse, passkey-ondertekende her-autorisatie per
+   sessie) is geschetst voor het moment dat dit om echte, actieve mainnet-sessies gaat, maar
+   bewust niet gebouwd.
+3. **Geen enkele impliciete "onbeperkt"-default.** Elke sessie met `can_execute=true` en/of
+   `can_transfer_token=true` MOET expliciete, verplichte `max_..._per_tx`/`max_..._total`-
+   parameters meekrijgen bij `add_session_key` - geen `Option<u64>`, geen sentinel-waarde.
+   `0` betekent altijd letterlijk "nul toegestaan", nooit "onbeperkt" - wie een sessie met
+   een zeer hoge cap wil, vult zelf bewust een groot getal in (bv. `u64::MAX`).
+
+**Implementatie, on-chain (`programs/spankwallet/src/`):**
+- `state.rs`: zeven nieuwe velden op `SessionKeyAccount`
+  (`max_lamports_per_tx`/`max_lamports_total`/`spent_lamports`/`token_mint`/
+  `max_token_amount_per_tx`/`max_token_amount_total`/`spent_token_amount`), +80 bytes,
+  `LEN` 341 -> 421.
+- `errors.rs`: vijf nieuwe foutcodes (`SessionSpendPerTxExceeded`,
+  `SessionSpendTotalExceeded`, `SessionSpendOverflow`, `SessionTokenMintNotAllowed`,
+  `SessionTokenMintRequired`).
+- `add_session_key`: vijf nieuwe verplichte parameters, mee ondertekend in de
+  challenge-payload (zelfde patroon als elk ander sessieveld - een spend-limiet die niet
+  cryptografisch aan de eigenaar's passkey-handtekening gebonden is, zou de hele
+  beveiligingswaarde ondermijnen). `token_mint != Pubkey::default()` afgedwongen zodra
+  `can_transfer_token=true`.
+- `execute_via_session`/`transfer_token_via_session`: `session` is nu `mut`; beide
+  controleren en verhogen hun spend-teller (`checked_add`, geen wrapping/saturating) VOOR
+  de daadwerkelijke lamport-/tokenbeweging - zelfde check-voor-mutatie-patroon als de
+  bestaande rent-exempt-floor-check. `execute_advanced_via_session` blijft bewust
+  ONVERANDERD: CPI-instructiedata is ondoorzichtig, er is geen generiek "bedrag" om te
+  begrenzen - een bestaand, ongewijzigd risico, begrensd door de programma-allowlist zoals
+  voorheen, geen onderdeel van deze ronde.
+- **Race-/atomiciteitsanalyse (dreigingsmodel):** Solana's write-lock op een schrijfbaar
+  account (`session` is nu `mut`) serialiseert elke transactie die hetzelfde session-PDA
+  raakt - twee parallel ingediende aanroepen kunnen nooit dezelfde, verouderde
+  `spent_lamports`-waarde zien. Binnen één instructie is een gedeeltelijke uitvoering
+  onmogelijk (elke `Err` rolt de HELE instructie terug, inclusief eerder in dezelfde
+  instructie al uitgevoerde lamportbewegingen) - er is dus geen TOCTOU-gat tussen de
+  limiet-check en de daadwerkelijke transfer, empirisch bevestigd door de nieuwe
+  "mislukte poging telt niets op"-asserties in de tests hieronder.
+
+**Implementatie, client (`client/src/`):** `sessionKeys.ts` uitgebreid met dezelfde vijf
+parameters in `buildAddSessionKeyTransaction` (payload + instructiedata, in dezelfde
+volgorde als de Rust-kant) en zeven nieuwe offsets/velden in `readSessionKeyAccount`.
+`main.ts` stap 16 (sessiesleutel-aanmaak) zet nu expliciete, echte caps
+(`max_lamports_per_tx=50_000`, `max_lamports_total=100_000`, ruim boven de 1000-lamport-
+aanroepen in stap 17/19) i.p.v. impliciet niets.
+
+**Testresultaten - volledige suite groen, geen regressies.** `tests/sessionKeys.ts` ging
+van 19 naar 24 tests (5 nieuw), totale suite van 49 naar 54 (`54 passing, 0 failing`).
+Nieuwe tests dekken: per-tx-limiet-overschrijding (lamports), cumulatieve-limiet-
+overschrijding met expliciete `spent_lamports`-boekhoudingscontrole vóór/na een mislukte
+poging, `SessionTokenMintRequired` bij `add_session_key` zonder mint, mint-mismatch bij
+`transfer_token_via_session`, en dezelfde per-tx-/cumulatieve-limietcontrole met
+boekhouding voor tokens. Eén test-eigen fout onderweg gevonden en gefixt (geen bug in de
+programma-code): de eerste versie van de cumulatieve-lamport-test stuurde exact 500.000
+lamports naar een vers, leeg account - onder Solana's rent-exempt-minimum voor een
+0-byte-account (890.880 lamports) - waardoor de test faalde op een runtime-rent-invariant,
+niet op de spend-limit-logica zelf. Opgelost door alle testbedragen ruim boven die drempel
+te zetten. `anchor build` compileert schoon; `client`'s `tsc --noEmit` toont exact dezelfde,
+al langer bekende 4 pre-existing TypeScript-fouten in `initWallet.ts`/`webauthnSign.ts`
+(sectie 45) - geen nieuwe fouten.
+
+**Nog niet gedeployed naar devnet.** De upgrade-authority is sinds sectie 42 een 2-of-3
+Squads-multisig met 72u-timelock - een deploy van deze wijziging is een apart, later
+multisig-voorstel, bewust geen onderdeel van deze implementatieronde (zelfde scheiding als
+steeds: "code klaar en getest" is niet hetzelfde als "live"). De drie bestaande,
+al-verlopen devnet-sessies zullen na een toekomstige deploy fail-closed onbruikbaar worden
+zoals hierboven voorzien - geen verrassing, al gedocumenteerd vóór implementatie.

@@ -1601,6 +1601,11 @@ pub fn add_session_key(
     can_transfer_token: bool,
     can_execute_advanced: bool,
     session_allowed_programs: Vec<Pubkey>,
+    max_lamports_per_tx: u64,
+    max_lamports_total: u64,
+    token_mint: Pubkey,
+    max_token_amount_per_tx: u64,
+    max_token_amount_total: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
     require!(
@@ -1613,6 +1618,19 @@ pub fn add_session_key(
         expiry_slot > current_slot,
         SpankWalletError::SessionExpirySlotNotInFuture
     );
+
+    // Spend-limits-ontwerpdocument §3: token_mint is verplicht zodra
+    // can_transfer_token true is - zonder vastgepinde mint zou
+    // max_token_amount_* betekenisloos zijn (verschillende mints hebben
+    // verschillende decimalen/waarde). Geen check dat max_*_per_tx/_total
+    // > 0 is: 0 is een geldige, letterlijke "nul toegestaan"-keuze, geen
+    // foutcase (zie ontwerpdocument §3, expliciet geen "0 = onbeperkt").
+    if can_transfer_token {
+        require!(
+            token_mint != Pubkey::default(),
+            SpankWalletError::SessionTokenMintRequired
+        );
+    }
 
     if can_execute_advanced {
         let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
@@ -1638,7 +1656,13 @@ pub fn add_session_key(
         );
     }
 
-    let mut payload = Vec::with_capacity(32 + 8 + 3 + 4 + session_allowed_programs.len() * 32);
+    // Spend-limits-ontwerpdocument §3: alle vijf nieuwe parameters worden
+    // mee ondertekend, exact zoals elk ander sessieveld - zonder dit zou een
+    // sessie's spend-limiet niet cryptografisch gebonden zijn aan wat de
+    // eigenaar daadwerkelijk goedkeurde.
+    let mut payload = Vec::with_capacity(
+        32 + 8 + 3 + 4 + session_allowed_programs.len() * 32 + 8 + 8 + 32 + 8 + 8,
+    );
     payload.extend_from_slice(session_key.as_ref());
     payload.extend_from_slice(&expiry_slot.to_le_bytes());
     payload.push(can_execute as u8);
@@ -1648,6 +1672,11 @@ pub fn add_session_key(
     for program_id in session_allowed_programs.iter() {
         payload.extend_from_slice(program_id.as_ref());
     }
+    payload.extend_from_slice(&max_lamports_per_tx.to_le_bytes());
+    payload.extend_from_slice(&max_lamports_total.to_le_bytes());
+    payload.extend_from_slice(token_mint.as_ref());
+    payload.extend_from_slice(&max_token_amount_per_tx.to_le_bytes());
+    payload.extend_from_slice(&max_token_amount_total.to_le_bytes());
 
     let expected_challenge =
         build_expected_challenge(&ctx.accounts.wallet.key(), b"add_session_key", &payload);
@@ -1671,6 +1700,13 @@ pub fn add_session_key(
     session.allowed_programs = [Pubkey::default(); MAX_SESSION_PROGRAMS];
     session.allowed_programs[..session_allowed_programs.len()]
         .copy_from_slice(&session_allowed_programs);
+    session.max_lamports_per_tx = max_lamports_per_tx;
+    session.max_lamports_total = max_lamports_total;
+    session.spent_lamports = 0;
+    session.token_mint = token_mint;
+    session.max_token_amount_per_tx = max_token_amount_per_tx;
+    session.max_token_amount_total = max_token_amount_total;
+    session.spent_token_amount = 0;
 
     Ok(())
 }
@@ -1823,7 +1859,10 @@ pub struct ExecuteViaSession<'info> {
     #[account(mut)]
     pub recipient: UncheckedAccount<'info>,
 
+    // mut: spend-limits-ontwerpdocument §4 - spent_lamports wordt atomisch
+    // opgehoogd binnen dezelfde instructie die de transfer uitvoert.
     #[account(
+        mut,
         seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
         bump = session.bump,
     )]
@@ -1838,7 +1877,7 @@ pub struct ExecuteViaSession<'info> {
 }
 
 pub fn execute_via_session(ctx: Context<ExecuteViaSession>, amount: u64) -> Result<()> {
-    let session = &ctx.accounts.session;
+    let session = &mut ctx.accounts.session;
     let current_slot = Clock::get()?.slot;
     require!(
         current_slot <= session.expiry_slot,
@@ -1848,6 +1887,26 @@ pub fn execute_via_session(ctx: Context<ExecuteViaSession>, amount: u64) -> Resu
         session.can_execute,
         SpankWalletError::SessionInstructionNotAllowed
     );
+
+    // Spend-limits-ontwerpdocument §1/§4: check-en-optellen gebeurt VOOR de
+    // daadwerkelijke lamportbeweging (zelfde check-voor-mutatie-patroon als
+    // de rent-exempt-floor-check hieronder). Solana's write-lock op dit
+    // session-PDA serialiseert elke transactie die het schrijvend aanraakt -
+    // er is geen TOCTOU-gat waarin twee parallelle aanroepen dezelfde,
+    // verouderde spent_lamports-waarde zouden kunnen zien.
+    require!(
+        amount <= session.max_lamports_per_tx,
+        SpankWalletError::SessionSpendPerTxExceeded
+    );
+    let new_spent = session
+        .spent_lamports
+        .checked_add(amount)
+        .ok_or(SpankWalletError::SessionSpendOverflow)?;
+    require!(
+        new_spent <= session.max_lamports_total,
+        SpankWalletError::SessionSpendTotalExceeded
+    );
+    session.spent_lamports = new_spent;
 
     // Zelfde lamport-verplaatsing als execute() - bewust gedupliceerd, zie
     // de toelichting bovenaan dit blok.
@@ -1908,7 +1967,10 @@ pub struct TransferTokenViaSession<'info> {
     /// eigendoms-/mint-constraints hierboven, zelfde patroon als transfer_token.
     pub token_mint: UncheckedAccount<'info>,
 
+    // mut: spend-limits-ontwerpdocument §4 - spent_token_amount wordt
+    // atomisch opgehoogd binnen dezelfde instructie die de transfer uitvoert.
     #[account(
+        mut,
         seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
         bump = session.bump,
     )]
@@ -1920,7 +1982,7 @@ pub struct TransferTokenViaSession<'info> {
 }
 
 pub fn transfer_token_via_session(ctx: Context<TransferTokenViaSession>, amount: u64) -> Result<()> {
-    let session = &ctx.accounts.session;
+    let session = &mut ctx.accounts.session;
     let current_slot = Clock::get()?.slot;
     require!(
         current_slot <= session.expiry_slot,
@@ -1930,6 +1992,28 @@ pub fn transfer_token_via_session(ctx: Context<TransferTokenViaSession>, amount:
         session.can_transfer_token,
         SpankWalletError::SessionInstructionNotAllowed
     );
+
+    // Spend-limits-ontwerpdocument §5: deze sessie is bij add_session_key
+    // vastgepind op precies één mint - een enkele, mint-onafhankelijke
+    // teller zou betekenisloos zijn (verschillende mints hebben
+    // verschillende decimalen/waarde).
+    require!(
+        ctx.accounts.token_mint.key() == session.token_mint,
+        SpankWalletError::SessionTokenMintNotAllowed
+    );
+    require!(
+        amount <= session.max_token_amount_per_tx,
+        SpankWalletError::SessionSpendPerTxExceeded
+    );
+    let new_spent = session
+        .spent_token_amount
+        .checked_add(amount)
+        .ok_or(SpankWalletError::SessionSpendOverflow)?;
+    require!(
+        new_spent <= session.max_token_amount_total,
+        SpankWalletError::SessionSpendTotalExceeded
+    );
+    session.spent_token_amount = new_spent;
 
     // Zelfde SPL-CPI als transfer_token() - bewust gedupliceerd, zie de
     // toelichting bovenaan dit blok.

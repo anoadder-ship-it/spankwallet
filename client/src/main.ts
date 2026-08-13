@@ -1437,6 +1437,12 @@ async function runStep16(): Promise<void> {
     log("vereist ALTIJD een echte passkey-handtekening (het wijzigt WIE toegang");
     log("heeft), zelfs al is de sessiesleutel zelf geen passkey.");
 
+    // Spend-limits (ontwerpdocument): max_lamports_per_tx=50_000,
+    // max_lamports_total=100_000 - ruim genoeg voor de 1000-lamport-
+    // aanroepen in stap 17/19 hieronder, maar wel expliciete, echte caps
+    // (geen "0 = onbeperkt"-val) i.p.v. een toevallig groot getal. Geen
+    // token-limiet nodig (canTransferToken=false), dus token_mint blijft
+    // PublicKey.default() en de token-caps blijven 0n.
     const { transaction, sessionPda } = await buildAddSessionKeyTransaction(
       connection,
       lastWallet.publicKey,
@@ -1447,6 +1453,11 @@ async function runStep16(): Promise<void> {
       false,
       false,
       [],
+      50_000n,
+      100_000n,
+      PublicKey.default,
+      0n,
+      0n,
       lastPasskeyPublicKey,
       lastCredentialId,
       window.location.hostname

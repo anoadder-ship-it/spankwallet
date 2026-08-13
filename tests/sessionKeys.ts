@@ -29,6 +29,12 @@ const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ
 const MINT_LEN = 82;
 const TOKEN_ACCOUNT_LEN = 165;
 
+// Default "effectief onbeperkt" spend-limit voor tests die niet zelf de
+// limiet-logica testen - ontwerpdocument §3: 0 betekent altijd "nul
+// toegestaan", dus tests die niet om caps geven moeten een expliciet groot
+// getal meegeven, geen sentinel.
+const MAX_U64 = new BN("18446744073709551615");
+
 function encodeInitializeMintIx(
   mint: PublicKey,
   decimals: number,
@@ -183,6 +189,59 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
   }
 
+  /// Zet een verse SPL-mint + vault-/ontvanger-token-account op en mint
+  /// `mintAmount` naar het vault-token-account - gedeelde opzet voor de
+  /// spend-limit-tests van transfer_token_via_session hieronder, zelfde
+  /// stappen als de reeds bestaande inline-opzet in de eerdere
+  /// transfer_token_via_session-tests.
+  async function setupTokenMintAndAccounts(
+    vaultPda: PublicKey,
+    recipientOwner: PublicKey,
+    mintAmount: number
+  ): Promise<{ mint: Keypair; vaultTokenAccount: Keypair; recipientTokenAccount: Keypair }> {
+    const mint = Keypair.generate();
+    const vaultTokenAccount = Keypair.generate();
+    const recipientTokenAccount = Keypair.generate();
+    const mintRent = await provider.connection.getMinimumBalanceForRentExemption(MINT_LEN);
+    const tokenAccountRent =
+      await provider.connection.getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_LEN);
+
+    const setupTx = new anchor.web3.Transaction().add(
+      SystemProgram.createAccount({
+        fromPubkey: provider.wallet.publicKey,
+        newAccountPubkey: mint.publicKey,
+        lamports: mintRent,
+        space: MINT_LEN,
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      encodeInitializeMintIx(mint.publicKey, 0, provider.wallet.publicKey),
+      SystemProgram.createAccount({
+        fromPubkey: provider.wallet.publicKey,
+        newAccountPubkey: vaultTokenAccount.publicKey,
+        lamports: tokenAccountRent,
+        space: TOKEN_ACCOUNT_LEN,
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      encodeInitializeAccountIx(vaultTokenAccount.publicKey, mint.publicKey, vaultPda),
+      SystemProgram.createAccount({
+        fromPubkey: provider.wallet.publicKey,
+        newAccountPubkey: recipientTokenAccount.publicKey,
+        lamports: tokenAccountRent,
+        space: TOKEN_ACCOUNT_LEN,
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      encodeInitializeAccountIx(recipientTokenAccount.publicKey, mint.publicKey, recipientOwner),
+      encodeMintToIx(
+        mint.publicKey,
+        vaultTokenAccount.publicKey,
+        provider.wallet.publicKey,
+        mintAmount
+      )
+    );
+    await provider.sendAndConfirm(setupTx, [mint, vaultTokenAccount, recipientTokenAccount]);
+    return { mint, vaultTokenAccount, recipientTokenAccount };
+  }
+
   async function callAddAllowedProgram(
     signingPasskey: TestPasskey,
     walletPda: PublicKey,
@@ -261,7 +320,12 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     canExecute: boolean,
     canTransferToken: boolean,
     canExecuteAdvanced: boolean,
-    sessionAllowedPrograms: PublicKey[]
+    sessionAllowedPrograms: PublicKey[],
+    maxLamportsPerTx: BN,
+    maxLamportsTotal: BN,
+    tokenMint: PublicKey,
+    maxTokenAmountPerTx: BN,
+    maxTokenAmountTotal: BN
   ): Buffer {
     const expirySlotBuf = Buffer.alloc(8);
     expirySlotBuf.writeBigUInt64LE(BigInt(expirySlot), 0);
@@ -273,6 +337,11 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       Buffer.from([canExecute ? 1 : 0, canTransferToken ? 1 : 0, canExecuteAdvanced ? 1 : 0]),
       countBuf,
       ...sessionAllowedPrograms.map((p) => p.toBuffer()),
+      maxLamportsPerTx.toArrayLike(Buffer, "le", 8),
+      maxLamportsTotal.toArrayLike(Buffer, "le", 8),
+      tokenMint.toBuffer(),
+      maxTokenAmountPerTx.toArrayLike(Buffer, "le", 8),
+      maxTokenAmountTotal.toArrayLike(Buffer, "le", 8),
     ]);
   }
 
@@ -286,15 +355,50 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     canExecute: boolean,
     canTransferToken: boolean,
     canExecuteAdvanced: boolean,
-    sessionAllowedPrograms: PublicKey[] = []
+    sessionAllowedPrograms: PublicKey[] = [],
+    spendLimits: {
+      maxLamportsPerTx?: BN;
+      maxLamportsTotal?: BN;
+      tokenMint?: PublicKey;
+      maxTokenAmountPerTx?: BN;
+      maxTokenAmountTotal?: BN;
+    } = {}
   ) {
+    // Defaults: "effectief onbeperkt" voor tests die de spend-limit-logica
+    // zelf niet testen (zie MAX_U64 hierboven). Voor token_mint: als
+    // can_transfer_token true is maar de aanroeper geen echte mint opgeeft,
+    // gebruiken we een verse, ongebruikte placeholder-pubkey - alleen om te
+    // voldoen aan add_session_key's SessionTokenMintRequired-check (§3 van
+    // het ontwerpdocument, geen Pubkey::default() toegestaan). Tests die
+    // daadwerkelijk transfer_token_via_session aanroepen MOETEN spendLimits
+    // expliciet met de echte mint invullen.
+    const maxLamportsPerTx = spendLimits.maxLamportsPerTx ?? MAX_U64;
+    const maxLamportsTotal = spendLimits.maxLamportsTotal ?? MAX_U64;
+    const tokenMint =
+      spendLimits.tokenMint ??
+      (canTransferToken ? Keypair.generate().publicKey : PublicKey.default);
+    // maxTokenAmount-defaults: 0 (niet MAX_U64) zodra can_transfer_token
+    // false is - functioneel moot (transfer_token_via_session weigert
+    // sowieso op de can_transfer_token-vlag), maar 0 maakt in testasserties
+    // meteen zichtbaar dat het veld ongebruikt is, i.p.v. een groot getal
+    // dat per ongeluk de indruk van een echte limiet zou wekken.
+    const maxTokenAmountPerTx =
+      spendLimits.maxTokenAmountPerTx ?? (canTransferToken ? MAX_U64 : new BN(0));
+    const maxTokenAmountTotal =
+      spendLimits.maxTokenAmountTotal ?? (canTransferToken ? MAX_U64 : new BN(0));
+
     const payload = buildAddSessionKeyPayload(
       sessionKey,
       expirySlot,
       canExecute,
       canTransferToken,
       canExecuteAdvanced,
-      sessionAllowedPrograms
+      sessionAllowedPrograms,
+      maxLamportsPerTx,
+      maxLamportsTotal,
+      tokenMint,
+      maxTokenAmountPerTx,
+      maxTokenAmountTotal
     );
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
@@ -322,6 +426,11 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
         canTransferToken,
         canExecuteAdvanced,
         sessionAllowedPrograms,
+        maxLamportsPerTx,
+        maxLamportsTotal,
+        tokenMint,
+        maxTokenAmountPerTx,
+        maxTokenAmountTotal,
         clientDataJSON
       )
       .accounts({
@@ -393,7 +502,12 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       expirySlot,
       true,
       false,
-      false
+      false,
+      [],
+      {
+        maxLamportsPerTx: new BN(5_000_000),
+        maxLamportsTotal: new BN(10_000_000),
+      }
     );
 
     const sessionPda = deriveSessionPda(walletPda, sessionKeypair.publicKey);
@@ -405,6 +519,13 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     assert.isFalse(session.canTransferToken);
     assert.isFalse(session.canExecuteAdvanced);
     assert.equal(session.count, 0);
+    assert.equal(session.maxLamportsPerTx.toNumber(), 5_000_000);
+    assert.equal(session.maxLamportsTotal.toNumber(), 10_000_000);
+    assert.equal(session.spentLamports.toNumber(), 0);
+    assert.equal(session.tokenMint.toBase58(), PublicKey.default.toBase58());
+    assert.equal(session.maxTokenAmountPerTx.toNumber(), 0);
+    assert.equal(session.maxTokenAmountTotal.toNumber(), 0);
+    assert.equal(session.spentTokenAmount.toNumber(), 0);
   });
 
   it("een net toegevoegde sessiesleutel kan zelfstandig execute_via_session ondertekenen (spend-bewijs, geen passkey nodig)", async () => {
@@ -445,6 +566,145 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
 
     const recipientBalance = await provider.connection.getBalance(recipient);
     assert.equal(recipientBalance, 1_000_000);
+  });
+
+  it("execute_via_session faalt als amount de per-tx-limiet overschrijdt (SessionSpendPerTxExceeded)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await fundVault(vaultPda, 10_000_000);
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      true,
+      false,
+      false,
+      [],
+      { maxLamportsPerTx: new BN(500_000), maxLamportsTotal: new BN(10_000_000) }
+    );
+
+    let threw = false;
+    try {
+      await program.methods
+        .executeViaSession(new BN(500_001))
+        .accounts({
+          wallet: walletPda,
+          vault: vaultPda,
+          recipient: Keypair.generate().publicKey,
+          session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+          sessionKey: sessionKeypair.publicKey,
+        })
+        .signers([sessionKeypair])
+        .rpc();
+    } catch (err) {
+      threw = true;
+      assert.include(err.toString(), "SessionSpendPerTxExceeded");
+    }
+    assert.isTrue(threw, "amount boven max_lamports_per_tx had moeten falen");
+
+    // De teller mag niet zijn opgehoogd door de mislukte poging - een
+    // gefaalde transactie draait de HELE instructie terug (Solana-
+    // atomiciteit, zie ontwerpdocument §1).
+    const session = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypair.publicKey)
+    );
+    assert.equal(session.spentLamports.toNumber(), 0);
+  });
+
+  it("execute_via_session faalt zodra de cumulatieve sessie-limiet wordt overschreden (SessionSpendTotalExceeded), en spent_lamports telt correct op", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await fundVault(vaultPda, 10_000_000);
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      true,
+      false,
+      false,
+      [],
+      { maxLamportsPerTx: new BN(2_000_000), maxLamportsTotal: new BN(3_000_000) }
+    );
+
+    const sessionPda = deriveSessionPda(walletPda, sessionKeypair.publicKey);
+
+    // Elke transfer gaat naar een VERS, leeg account - Solana's rent-
+    // invariant eist dat zo'n account na de transactie ofwel 0 lamports
+    // heeft, ofwel rent-exempt is (~890_880 lamports op het standaard
+    // rent-schema). Alle bedragen hieronder zitten daar ruim boven, zodat
+    // uitsluitend de spend-limit-logica zelf getest wordt, niet een
+    // onbedoelde rent-fout.
+
+    // Eerste transfer (2_000_000) blijft binnen zowel de per-tx- als de
+    // cumulatieve limiet.
+    await program.methods
+      .executeViaSession(new BN(2_000_000))
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        recipient: Keypair.generate().publicKey,
+        session: sessionPda,
+        sessionKey: sessionKeypair.publicKey,
+      })
+      .signers([sessionKeypair])
+      .rpc();
+
+    let sessionAfterFirst = await program.account.sessionKeyAccount.fetch(sessionPda);
+    assert.equal(sessionAfterFirst.spentLamports.toNumber(), 2_000_000);
+
+    // Tweede transfer (1_000_001) blijft binnen de per-tx-limiet
+    // (<=2_000_000), maar 2_000_000 + 1_000_001 = 3_000_001 >
+    // max_lamports_total (3_000_000) - moet dus falen VOORDAT er ooit
+    // lamports bewegen (geen rent-fout mogelijk, de require! zit ervoor).
+    let threw = false;
+    try {
+      await program.methods
+        .executeViaSession(new BN(1_000_001))
+        .accounts({
+          wallet: walletPda,
+          vault: vaultPda,
+          recipient: Keypair.generate().publicKey,
+          session: sessionPda,
+          sessionKey: sessionKeypair.publicKey,
+        })
+        .signers([sessionKeypair])
+        .rpc();
+    } catch (err) {
+      threw = true;
+      assert.include(err.toString(), "SessionSpendTotalExceeded");
+    }
+    assert.isTrue(threw, "cumulatief bedrag boven max_lamports_total had moeten falen");
+
+    // spent_lamports blijft op de stand na de EERSTE, succesvolle transfer -
+    // de mislukte tweede poging heeft niets opgeteld.
+    const sessionAfterSecond = await program.account.sessionKeyAccount.fetch(sessionPda);
+    assert.equal(sessionAfterSecond.spentLamports.toNumber(), 2_000_000);
+
+    // Exact de resterende 1_000_000 (tot precies op de grens) slaagt wel.
+    await program.methods
+      .executeViaSession(new BN(1_000_000))
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        recipient: Keypair.generate().publicKey,
+        session: sessionPda,
+        sessionKey: sessionKeypair.publicKey,
+      })
+      .signers([sessionKeypair])
+      .rpc();
+
+    const sessionAfterThird = await program.account.sessionKeyAccount.fetch(sessionPda);
+    assert.equal(sessionAfterThird.spentLamports.toNumber(), 3_000_000);
   });
 
   it("execute_via_session faalt als de sessie niet gescoped is voor execute (SessionInstructionNotAllowed)", async () => {
@@ -868,7 +1128,13 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       currentSlot + 1000,
       false,
       true,
-      false
+      false,
+      [],
+      {
+        tokenMint: mint.publicKey,
+        maxTokenAmountPerTx: new BN(1000),
+        maxTokenAmountTotal: new BN(1000),
+      }
     );
 
     await program.methods
@@ -892,6 +1158,187 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
     assert.equal(readTokenAccountAmount(vaultAcctInfo.data), BigInt(500));
     assert.equal(readTokenAccountAmount(recipientAcctInfo.data), BigInt(500));
+  });
+
+  it("add_session_key faalt als can_transfer_token=true zonder token_mint (SessionTokenMintRequired)", async () => {
+    const { passkey, walletPda, passkeysPda, policyPda } = await createWallet();
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+
+    let threw = false;
+    try {
+      await callAddSessionKey(
+        passkey,
+        walletPda,
+        passkeysPda,
+        policyPda,
+        sessionKeypair.publicKey,
+        currentSlot + 1000,
+        false,
+        true,
+        false,
+        [],
+        { tokenMint: PublicKey.default }
+      );
+    } catch (err) {
+      threw = true;
+      assert.include(err.toString(), "SessionTokenMintRequired");
+    }
+    assert.isTrue(threw, "can_transfer_token=true zonder token_mint had moeten falen");
+  });
+
+  it("transfer_token_via_session faalt als de meegegeven mint niet de vastgepinde sessie-mint is (SessionTokenMintNotAllowed)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+
+    // Twee ONAFHANKELIJKE mints - de sessie wordt hieronder vastgepind op
+    // `pinnedMint`, maar de aanroep gebruikt token-accounts van `otherMint`.
+    const { mint: pinnedMint } = await setupTokenMintAndAccounts(
+      vaultPda,
+      provider.wallet.publicKey,
+      1000
+    );
+    const {
+      mint: otherMint,
+      vaultTokenAccount: otherVaultTokenAccount,
+      recipientTokenAccount: otherRecipientTokenAccount,
+    } = await setupTokenMintAndAccounts(vaultPda, provider.wallet.publicKey, 1000);
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      true,
+      false,
+      [],
+      {
+        tokenMint: pinnedMint.publicKey,
+        maxTokenAmountPerTx: new BN(1000),
+        maxTokenAmountTotal: new BN(1000),
+      }
+    );
+
+    let threw = false;
+    try {
+      await program.methods
+        .transferTokenViaSession(new BN(500))
+        .accounts({
+          wallet: walletPda,
+          vault: vaultPda,
+          vaultTokenAccount: otherVaultTokenAccount.publicKey,
+          recipientTokenAccount: otherRecipientTokenAccount.publicKey,
+          tokenMint: otherMint.publicKey,
+          session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+          sessionKey: sessionKeypair.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([sessionKeypair])
+        .rpc();
+    } catch (err) {
+      threw = true;
+      assert.include(err.toString(), "SessionTokenMintNotAllowed");
+    }
+    assert.isTrue(threw, "transfer met een niet-vastgepinde mint had moeten falen");
+  });
+
+  it("transfer_token_via_session faalt bij overschrijding van de per-tx- of cumulatieve token-limiet, en spent_token_amount telt correct op", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+
+    const { mint, vaultTokenAccount, recipientTokenAccount } = await setupTokenMintAndAccounts(
+      vaultPda,
+      provider.wallet.publicKey,
+      1000
+    );
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      true,
+      false,
+      [],
+      {
+        tokenMint: mint.publicKey,
+        maxTokenAmountPerTx: new BN(300),
+        maxTokenAmountTotal: new BN(400),
+      }
+    );
+
+    const sessionPda = deriveSessionPda(walletPda, sessionKeypair.publicKey);
+    const transferAccounts = {
+      wallet: walletPda,
+      vault: vaultPda,
+      vaultTokenAccount: vaultTokenAccount.publicKey,
+      recipientTokenAccount: recipientTokenAccount.publicKey,
+      tokenMint: mint.publicKey,
+      session: sessionPda,
+      sessionKey: sessionKeypair.publicKey,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    };
+
+    // 301 > max_token_amount_per_tx (300).
+    let threwPerTx = false;
+    try {
+      await program.methods
+        .transferTokenViaSession(new BN(301))
+        .accounts(transferAccounts)
+        .signers([sessionKeypair])
+        .rpc();
+    } catch (err) {
+      threwPerTx = true;
+      assert.include(err.toString(), "SessionSpendPerTxExceeded");
+    }
+    assert.isTrue(threwPerTx, "301 boven max_token_amount_per_tx had moeten falen");
+
+    // Eerste geslaagde transfer: 300 (binnen per-tx- en cumulatieve limiet).
+    await program.methods
+      .transferTokenViaSession(new BN(300))
+      .accounts(transferAccounts)
+      .signers([sessionKeypair])
+      .rpc();
+
+    let session = await program.account.sessionKeyAccount.fetch(sessionPda);
+    assert.equal(session.spentTokenAmount.toNumber(), 300);
+
+    // Tweede poging van 300 blijft onder de per-tx-limiet, maar
+    // 300 + 300 = 600 > max_token_amount_total (400).
+    let threwTotal = false;
+    try {
+      await program.methods
+        .transferTokenViaSession(new BN(300))
+        .accounts(transferAccounts)
+        .signers([sessionKeypair])
+        .rpc();
+    } catch (err) {
+      threwTotal = true;
+      assert.include(err.toString(), "SessionSpendTotalExceeded");
+    }
+    assert.isTrue(threwTotal, "cumulatief bedrag boven max_token_amount_total had moeten falen");
+
+    // spent_token_amount blijft op 300 - de mislukte poging telde niets op.
+    session = await program.account.sessionKeyAccount.fetch(sessionPda);
+    assert.equal(session.spentTokenAmount.toNumber(), 300);
+
+    // Exact de resterende 100 (tot precies op de grens) slaagt wel.
+    await program.methods
+      .transferTokenViaSession(new BN(100))
+      .accounts(transferAccounts)
+      .signers([sessionKeypair])
+      .rpc();
+
+    session = await program.account.sessionKeyAccount.fetch(sessionPda);
+    assert.equal(session.spentTokenAmount.toNumber(), 400);
   });
 
   it("transfer_token_via_session faalt als de sessie niet gescoped is voor transfer_token (SessionInstructionNotAllowed)", async () => {

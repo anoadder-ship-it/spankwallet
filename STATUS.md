@@ -4,9 +4,10 @@
 een nieuwe chatsessie. Legt vast waar we staan en waarom, zodat niets herhaald hoeft te
 worden.
 
-Laatst bijgewerkt: 2026-08-13 - spend-limits voor session keys ontworpen, geïmplementeerd
-en volledig getest (sectie 53); volgende concrete mijlpaal blijft de canary-upgrade-
-uitvoering op 2026-08-15T15:46:49Z.
+Laatst bijgewerkt: 2026-08-15 - twee dode duplicaat-voorstellen (#6, #7) empirisch
+verklaard en de onderliggende structurele bug (blinde "hoogste transactionIndex")
+definitief gefixt in `wallet-signer.html` (sectie 54); voorstel #5 (2-van-2, timelock
+verstreken sinds 2026-08-15T15:46:49Z) staat klaar om uitgevoerd te worden.
 
 ---
 
@@ -55,11 +56,14 @@ van het logboek. Deze sectie hier is de vervanger die je als eerste moet lezen.
 - esbuild/vite Dependabot-alerts blijven bewust ongepatcht (vereist een major-upgrade,
   sectie 45).
 
-**Eerstvolgende stap:** wachten tot 2026-08-15T15:46:49Z, dan via `wallet-signer.html`
-de canary-execute uitvoeren en on-chain bevestigen (zelfde bewijspatroon als de repetitie
-in sectie 41). Daarna, zoals afgesproken pas ná die bevestiging: sectie 50's fase 1 van de
-UI-preview oppakken (risicoklassen + resterende instructies). De spend-limits-deploy
-(sectie 53) is een onafhankelijke, aparte beslissing die niet op de canary-timing wacht.
+**Eerstvolgende stap:** timelock is al verstreken (2026-08-15T15:46:49Z) en
+`wallet-signer.html` is inmiddels gefixt (sectie 54) zodat knop 4 gegarandeerd voorstel #5
+target, ook al bestaan er 6 andere open duplicaten (#1-4, #6, #7). Via `wallet-signer.html`
+op de hoofd-pc (meest betrouwbare apparaat) knop 4 klikken, daarna on-chain bevestigen
+(zelfde bewijspatroon als de repetitie in sectie 41). Daarna, zoals afgesproken pas ná die
+bevestiging: sectie 50's fase 1 van de UI-preview oppakken (risicoklassen + resterende
+instructies). De spend-limits-deploy (sectie 53) is een onafhankelijke, aparte beslissing
+die niet op de canary-timing wacht.
 
 ## Kritieke gotchas - snelle referentie
 
@@ -86,8 +90,14 @@ vervanging van de detail.
   verkeerde account. Uitschakelen in Brave's eigen instellingen. Sectie 44.
 - **Een knop die "de huidige/hoogste transactionIndex" leest is geen vervanging voor
   het volgen van een specifiek voorstel.** Zodra duplicaten ontstaan (bijv. door een
-  retry na een schijnbare fout), volgt zo'n knop automatisch het nieuwste voorstel, niet
-  het voorstel waar je oorspronkelijk aan begon. Sectie 46.
+  retry na een schijnbare fout, of door uit gewoonte knop 2 te klikken terwijl er al een
+  goedgekeurd voorstel klaarstaat), volgt zo'n knop automatisch het nieuwste voorstel, niet
+  het voorstel waar je oorspronkelijk aan begon. Sectie 46 loste alleen de symptomen op
+  (duidelijke foutmelding); de onderliggende oorzaak leefde voort en produceerde op
+  2026-08-15 twee nieuwe dode duplicaten (#6, #7). Structureel gefixt in sectie 54: een
+  canonieke-voorstel-lookup (verst-gevorderde status wint, nooit blind de hoogste index),
+  plus een harde blokkade + expliciete aparte bevestiging vóór een nieuw voorstel
+  aangemaakt mag worden.
 - **Niet elke tool publiceert linux-aarch64-builds.** Bevestigd voor Certora's
   Solana-platform-tools (uitsluitend linux-x86_64 en macOS) - controleer dit VOOR je een
   toolinstallatie plant op ARM64-Linux. Sectie 48.
@@ -3406,3 +3416,81 @@ multisig-voorstel, bewust geen onderdeel van deze implementatieronde (zelfde sch
 steeds: "code klaar en getest" is niet hetzelfde als "live"). De drie bestaande,
 al-verlopen devnet-sessies zullen na een toekomstige deploy fail-closed onbruikbaar worden
 zoals hierboven voorzien - geen verrassing, al gedocumenteerd vóór implementatie.
+
+## 54. Voorstellen #6/#7: dezelfde bugklasse als sectie 46 kwam terug - ditmaal structureel gefixt, niet alleen de symptomen
+
+**Aanleiding:** de gebruiker probeerde de canary-upgrade uit te voeren nadat de
+72u-timelock op voorstel #5 verstreken was (2026-08-15T15:46:49Z), maar `wallet-signer.html`
+bleek nergens meer bereikbaar - niet op Android, niet op Windows, later ook niet meer op de
+hoofd-pc.
+
+**Deel 1 - bereikbaarheidsprobleem, apart en eerst opgelost:** `ss -tlnp` bevestigde geen
+listener op poort 8766. `uptime -s`/`who -b` toonden een systeem-reboot om 2026-08-15T19:08
+- de server was in een eerdere sessie bewust losgekoppeld gestart (`setsid`/`nohup`/
+`disown`, zie sectie 43), wat een sessie-afsluiting overleeft maar GEEN reboot. Opgelost
+door een systemd user-service (`~/.config/systemd/user/wallet-signer.service`,
+`Restart=on-failure`) plus `loginctl enable-linger` (start ook zonder actieve login-sessie
+bij boot). Geverifieerd: crash-recovery getest door het proces `kill -9` te sturen - systemd
+herstartte het binnen ~2s automatisch.
+
+**Deel 2 - het echte, structurele probleem.** Na herstart van de server bleek on-chain
+(rechtstreeks bevraagd via `@sqds/multisig`, geen aannames) dat er intussen TWEE nieuwe
+dode voorstellen waren bijgekomen bovenop de vier uit sectie 43-46:
+
+| # | status | aangemaakt door | timestamp |
+|---|--------|-------------------|-----------|
+| **5** | **Approved (2/2)** - klaar om uit te voeren | CP2fg9zg (telefoon) | 2026-08-12T15:46:49Z |
+| 6 | Active (0/2) | 3zZcLwTX (hoofd-pc) | 2026-08-15T16:35:32Z |
+| 7 | Active (0/2) | 2jDzaP3F (Windows-pc) | 2026-08-15T16:52:25Z |
+
+Voorstel #5 zelf bleek onaangetast: nog gewoon `Approved`, niet verlopen of gecorrumpeerd.
+
+**Root cause, herleid via codeanalyse (niet gegokt):** `buildSquadsExecuteTx()` (het pad
+achter knop "4. Uitvoeren") roept nergens `proposalCreate` aan - dat pad kan dus fysiek geen
+nieuw voorstel aanmaken. Alleen de click-handler van knop "2. Voorstel indienen" doet dat,
+zonder enige voorafgaande check. #6 en #7 kunnen dus alleen ontstaan zijn doordat op de
+hoofd-pc en de Windows-pc knop 2 werd geklikt - vermoedelijk uit gewoonte (1→2→3→4), zonder
+dat de pagina liet zien dat #5 al lang klaarstond. Serverlogs bestaan niet
+(`https-server.js` had nooit request-logging) en bash-history bleek leeg, dus dit is de
+volledige beschikbare bewijslaag - maar wel een sluitende, omdat het codepad ondubbelzinnig
+is: geen ander mechanisme in de pagina kan `proposalCreate` aanroepen.
+
+**Waarom sectie 46 dit niet al voorkwam:** die sectie loste alleen het SYMPTOOM op (een
+duidelijke Nederlandse foutmelding i.p.v. een cryptische walletfout bij een ongeldige
+stem/uitvoering op een verkeerd voorstel). De onderliggende oorzaak - `buildApproveTx`,
+`buildSquadsExecuteTx` en `logCurrentProposalStatus` lazen allemaal blind
+`multisigInfo.transactionIndex` (de hoogste, niet een vastgepind voorstel), en knop 2 had
+had nul drempel tegen het aanmaken van een overbodig duplicaat - bleef ongewijzigd. Precies de
+kritieke-gotcha die al in de STATUS.md-index stond (regel 87-90, sectie 46) bleek dus zelf
+nog niet structureel verholpen.
+
+**De structurele fix in `wallet-signer.html`:**
+- Nieuwe `findCanonicalProposal()`: doorzoekt (tot 50 voorstellen terug) alle voorstellen
+  die naar de canary-buffer verwijzen, filtert op niet-afgesloten status (`Active`/
+  `Approved`), en kiest daaruit de verst-gevorderde (`Approved` > `Active`; bij gelijke
+  status de laagst-genummerde/eerst-aangemaakte). Nooit meer blind de hoogste index.
+- `buildApproveTx`, `buildSquadsExecuteTx` en `logCurrentProposalStatus` gebruiken nu
+  allemaal dit canonieke resultaat i.p.v. de rauwe `transactionIndex`.
+- `logCurrentProposalStatus` waarschuwt nu expliciet als er MEERDERE open voorstellen
+  bestaan (in het huidige geval: 7 stuks), zodat duplicaten niet meer onopgemerkt blijven.
+- Knop "2. Voorstel indienen" weigert nu een nieuw voorstel aan te maken zolang er al een
+  open voorstel voor de buffer bestaat, tenzij een apart bevestigingsvakje ("Ik weet dat er
+  al een open voorstel staat en wil toch bewust een NIEUWE aanmaken") is aangevinkt - een
+  harde blokkade in plaats van een waarschuwing achteraf.
+
+**Geverifieerd, niet aangenomen:** de exacte `findCanonicalProposal()`-logica apart tegen
+devnet gedraaid (los script, dezelfde `@sqds/multisig`-versie) - resultaat: van de 7 open
+kandidaten (`#1-4, #6, #7` allemaal `Active`, `#5` `Approved`) kiest de functie correct
+`#5`. `node --check` op de module-inhoud van de bijgewerkte pagina: geen syntaxfouten.
+Server herstart via de nieuwe systemd-service, `PAGE_BUILD`-marker in de live-geserveerde
+pagina bevestigd bijgewerkt.
+
+**Openstaand:** de daadwerkelijke uitvoering van voorstel #5 vereist een handtekening van
+een geregistreerd multisig-lid via diens eigen wallet-extensie - dat kan alleen de
+gebruiker zelf doen (de sleutel verlaat nooit de extensie, per ontwerp sinds sectie 41).
+Eerstvolgende stap: knop "4. Uitvoeren" klikken op `https://192.168.178.205:8766/wallet-
+signer.html`, bij voorkeur eerst vanaf de hoofd-pc (tot nu toe het meest betrouwbare
+apparaat), daarna on-chain bevestigen via `solana program show` + `solana program dump`
+(zelfde bewijspatroon als de repetitie in sectie 41). De zes dode duplicaten (#1-4, #6, #7)
+vereisen geen actie - ze wijzen naar dezelfde eenmalige buffer en worden vanzelf
+onuitvoerbaar zodra #5 is uitgevoerd (zelfde patroon als sectie 43).

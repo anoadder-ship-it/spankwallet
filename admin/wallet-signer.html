@@ -80,7 +80,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-08-16T18:15:00Z-buffer-herconfigureerd-voor-spend-limits-deploy-sectie-53";
+      var PAGE_BUILD = "2026-08-16T20:45:00Z-codeql-fix-deeplink-state-verval-termijn";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -259,10 +259,29 @@
       // sessiesleutels voor het encryptiekanaal, geen langlevende geheimen.
       const DEEPLINK_STORAGE_KEY = "spankwallet_solflare_deeplink_state";
 
+      // Verval-termijn ruim boven de 72u-timelock (259.200.000ms) - lang
+      // genoeg om een legitieme connect->approve->execute-cyclus te
+      // overleven, maar niet oneindig: een vergeten/nooit-afgeronde sessie
+      // laat zijn dappSecretKey/sharedSecret niet voor altijd in cleartext
+      // in localStorage staan (CodeQL "Clear text storage of sensitive
+      // information" - zie de toelichting bij connect-solflare-deeplink-btn
+      // voor waarom localStorage zelf, i.p.v. sessionStorage, een bewuste,
+      // noodzakelijke keuze blijft). Fail-closed: state zonder (geldige)
+      // sessionCreatedAt - bijv. van vóór deze fix - wordt behandeld als
+      // verlopen, niet als "onbekende leeftijd dus prima".
+      const DEEPLINK_SESSION_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000; // 8 dagen
+
       function loadDeeplinkState() {
         try {
           const raw = localStorage.getItem(DEEPLINK_STORAGE_KEY);
-          return raw ? JSON.parse(raw) : null;
+          if (!raw) return null;
+          const state = JSON.parse(raw);
+          const age = Date.now() - state.sessionCreatedAt;
+          if (typeof state.sessionCreatedAt !== "number" || !(age >= 0) || age > DEEPLINK_SESSION_MAX_AGE_MS) {
+            localStorage.removeItem(DEEPLINK_STORAGE_KEY);
+            return null;
+          }
+          return state;
         } catch (err) {
           return null;
         }
@@ -628,6 +647,17 @@
             session: null,
             walletPublicKey: null,
             pendingAction: "connect",
+            // CodeQL "Clear text storage of sensitive information": dappSecretKey/
+            // sharedSecret staan bewust in localStorage, niet sessionStorage, om
+            // de verbinding de volle 72u-timelock te laten overleven tussen
+            // goedkeuren en uitvoeren (zie de toelichting bij DEEPLINK_STORAGE_KEY
+            // hierboven - MIUI/HyperOS killt anders de sessionStorage-context bij
+            // app-switch). Een "wis direct na gebruik"-fix zou precies die
+            // benodigde functionaliteit breken. Wel toegevoegd: een expliciete
+            // verval-termijn (zie loadDeeplinkState) zodat een vergeten/nooit-
+            // afgeronde sessie niet voor onbepaalde tijd in cleartext blijft
+            // hangen - ruim boven de 72u-timelock, maar niet oneindig.
+            sessionCreatedAt: Date.now(),
           });
 
           const params = new URLSearchParams({

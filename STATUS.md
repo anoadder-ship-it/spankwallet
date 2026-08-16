@@ -4064,3 +4064,91 @@ duidelijk tonen - sectie 53), dan LAAG (`remove_allowed_program`, `remove_sessio
 
 Sources:
 - [Zero-History Wallet Risk: How to Screen Wallets With No Transaction History](https://www.web3firewall.xyz/zero-history-wallet-risk)
+
+## 64. Beveiligingsonderzoek met voorrang boven UI-fase 1: Dependabot herbevestigd ongewijzigd, twee reële CodeQL-bevindingen in `admin/` gevonden en gefixt (waaronder één niet eens door CodeQL gevonden)
+
+Op verzoek, met voorrang boven de lopende `add_session_key`-kaart (die on-af, ongecommit
+blijft staan): de 4 open Dependabot-alerts opnieuw tegen de huidige staat getoetst, en
+twee nieuwe CodeQL High-bevindingen in `admin/` (de upgrade-authority-tooling zelf, niet
+een dependency) grondig onderzocht.
+
+**Dependabot: exact dezelfde situatie als sectie 45, opnieuw bevestigd, niet aangenomen.**
+`gh api .../dependabot/alerts` rechtstreeks bevraagd: nog steeds precies 4 open alerts
+(vite `server.fs.deny`-omzeiling High, vite path-traversal in optimized deps Moderate,
+`launch-editor` NTLMv2-hashlek Moderate, esbuild dev-server-verzoek Moderate). Geverifieerd
+tegen de HUIDIGE staat, niet uit het geheugen: `npm ls` toont nog steeds `vite@5.4.21`/
+`esbuild@0.21.5`; `npm view vite versions` bevestigt `5.4.21` daadwerkelijk de laatste
+5.x-release is (geen 5.x-backport van de fix bestaat - de patches landden pas in
+6.4.2/6.4.3); `npm view vite@5.4.21 dependencies.esbuild` bevestigt dat vite zelf
+`esbuild@^0.21.3` vastzet, dus 0.21.5 is al de nieuwst-toegestane versie binnen dat bereik.
+`npm audit` geeft nog steeds exact hetzelfde advies als sectie 45: alleen op te lossen via
+`vite@8.2.1` (major-upgrade, breaking change). `vite.config.ts`'s `host: false`-mitigatie
+staat nog onveranderd (bevestigd door het bestand te lezen), en deze ontwikkelmachine is
+nog steeds Linux (`uname -a`), dus de twee Windows-specifieke CVE's blijven structureel
+niet van toepassing. **Conclusie: geen wijziging nodig - dezelfde, nog steeds juiste
+beslissing als sectie 45.**
+
+**CodeQL-bevinding a - `admin/https-server.js:35`, "Uncontrolled data used in path
+expression" (High): reëel en empirisch bevestigd exploiteerbaar, niet theoretisch.**
+`fs.readFile(filePath, ...)` met `filePath = path.join(ROOT, pathname)` waarbij `pathname`
+rechtstreeks van `req.url` komt, zonder sanitatie. `path.join()` normaliseert `"../"` niet
+weg tot buiten het resultaat - met genoeg `"../"`-segmenten eindigt het pad buiten `ROOT`.
+Eerst leek een naieve `curl`-test dit te weerleggen (`Not found`) - bleek curl's EIGEN
+padnormalisatie te zijn die de `"../"` al vóór verzending wegwerkte, niet een correcte
+serverweigering. Met `curl --path-as-is` (voorkomt client-side normalisatie) rechtstreeks
+bevestigd: `GET /../../../../../../etc/hostname` gaf `HTTP 200` met de daadwerkelijke
+inhoud van `/etc/hostname` terug. Omdat deze server bewust op `0.0.0.0` bindt (LAN-signers
+moeten erbij kunnen, README.md), was dit door **iedereen op hetzelfde LAN** te misbruiken
+om elk bestand te lezen dat de proces-gebruiker kan lezen.
+
+**Onafhankelijk, apart ontdekt tijdens het onderzoeken van (a), NIET door CodeQL
+gevonden:** zonder enige `"../"` was `key.pem` (de TLS-PRIVESLEUTEL van dit
+zelfondertekende certificaat, bestandsrechten 0600) al gewoon rechtstreeks op te vragen
+als `https://host:8766/key.pem` - het stond immers gewoon in `ROOT` naast
+`wallet-signer.html`, en de oude code had geen enkele beperking op welke bestandsnamen ze
+diende. Empirisch bevestigd: `curl -sk https://127.0.0.1:8766/key.pem` gaf de volledige
+PEM-inhoud terug, `HTTP 200`.
+
+**Fix: een allowlist, niet een blacklist of een resolved-path-check alleen.** Eerst een
+resolved-path-prefixcheck gebouwd (lost (a) op), maar die laat (b) onopgelost staan
+(`key.pem` staat gewoon bínnen `ROOT`, geen traversal nodig). Bevestigd via `grep` dat
+`wallet-signer.html` geen enkele lokale `src=`/`href=`-verwijzing heeft (bewust een enkel,
+zelfstandig HTML-bestand) - er is dus geen enkele legitieme reden om iets anders dan
+precies dat ene bestand te serveren. Herschreven naar een expliciete allowlist
+(`ALLOWED_FILES`) die zowel (a) als (b) in één keer structureel afsluit, ongeacht wat er
+ooit nog aan bestanden in `admin/` bijkomt. Geverifieerd na de fix: `/` en
+`/wallet-signer.html` (ook met querystring, voor de Solflare-deep-link-terugkeer) blijven
+`200`; de traversal-poging, `/key.pem`, `/cert.pem`, `/README.md`, `/https-server.js`, en
+een prefix-bypass-poging (`/../admin-evil/secret`, tegen de klassieke
+`startsWith("/admin")`-valkuil) geven nu allemaal `404`.
+
+**CodeQL-bevinding b - `admin/wallet-signer.html:265` (in `loadDeeplinkState`), "Clear
+text storage of sensitive information": reëel als generiek signaal, laag praktisch risico
+in deze specifieke context, en de voor de hand liggende "fix" zou functionaliteit breken -
+in plaats daarvan een gerichte, proportionele verbetering.** `dappSecretKey`/`sharedSecret`
+(het x25519-encryptiekanaal met de Solflare-app) staan inderdaad in cleartext in
+`localStorage`. Exploiteerbaarheid onderzocht, niet aangenomen: `grep` bevestigt **geen
+enkele `.innerHTML`-toewijzing** in dit bestand - er is dus geen aantoonbaar XSS-
+injectiepad om deze opslag via deze pagina zelf te misbruiken. De blootgestelde geheimen
+geven bovendien geen zeggenschap over de wallet (die blijft altijd in de wallet-extensie
+zelf). `localStorage` i.p.v. `sessionStorage` is een BEWUSTE, al in de code gedocumenteerde
+keuze (sectie 43) om de verbinding de volle 72u-timelock te laten overleven tussen
+goedkeuren en uitvoeren - MIUI/HyperOS killt `sessionStorage`-context bij app-switch. Een
+"wis direct na gebruik"-fix zou precies die noodzakelijke functionaliteit breken (de
+gebruiker zou tussen goedkeuren en uitvoeren opnieuw moeten verbinden). In plaats daarvan:
+een expliciete verval-termijn (`sessionCreatedAt` + `DEEPLINK_SESSION_MAX_AGE_MS` = 8
+dagen, ruim boven de 72u-timelock maar niet oneindig) - een vergeten/nooit-afgeronde sessie
+blijft niet voor onbepaalde tijd in cleartext hangen. Fail-closed: state zonder (geldige)
+`sessionCreatedAt` (bijv. van vóór deze fix) wordt behandeld als verlopen, niet als
+"onbekende leeftijd dus prima". Geverifieerd met een geïsoleerde Node-simulatie (exact
+dezelfde functiecode, geen browser nodig gezien het zelfondertekende certificaat
+automatiseringstools blokkeert): verse sessie en een sessie binnen de 72u-timelock laden
+correct; een 9-dagen-oude sessie geeft `null` EN wordt actief uit `localStorage` gewist;
+een oude state-vorm zonder `sessionCreatedAt` en een gecorrumpeerde/toekomstige
+tijdstempel worden beide fail-closed als verlopen behandeld.
+
+`node --check` op de bijgewerkte `wallet-signer.html`-module: geen syntaxfouten. Server
+herstart via de bestaande systemd-service, `PAGE_BUILD`-marker bevestigd bijgewerkt.
+
+**Terug naar UI-fase 1** (`add_session_key`, on-af blijven staan tijdens deze
+onderbreking) zodra dit bevestigd is.

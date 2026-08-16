@@ -15,11 +15,48 @@ const options = {
   cert: fs.readFileSync(path.join(__dirname, "cert.pem")),
 };
 
-const MIME = {
-  ".html": "text/html",
-  ".js": "application/javascript",
-  ".json": "application/json",
+// Allowlist i.p.v. "elk bestand in ROOT, tenzij een blacklist het
+// tegenhoudt" - deze server serveert bewust maar EEN bestand
+// (wallet-signer.html is doelbewust een enkel, zelfstandig HTML-bestand
+// zonder losse <script src=.../<link href=..>-verwijzingen, geverifieerd
+// via grep - geen enkele legitieme reden om iets anders te serveren).
+// Dit dicht in een keer twee reele, empirisch bevestigde problemen:
+//
+// 1. CodeQL "Uncontrolled data used in path expression" (high) - de
+//    oorspronkelijke code deed fs.readFile(path.join(ROOT, req.url)) zonder
+//    enige sanitatie. path.join() normaliseert "../" niet weg tot buiten
+//    het samengevoegde pad - met genoeg "../"-segmenten kwam het resultaat
+//    buiten ROOT terecht. Empirisch bevestigd exploiteerbaar (niet
+//    aangenomen): `curl --path-as-is "https://host:8766/../../../../etc/
+//    hostname"` gaf de inhoud van /etc/hostname terug, HTTP 200. Deze
+//    server bindt bewust op 0.0.0.0 (LAN-signers moeten erbij kunnen), dus
+//    dit was door IEDEREEN op hetzelfde LAN te misbruiken om elk bestand
+//    te lezen dat de proces-gebruiker kan lezen.
+// 2. Onafhankelijk, apart ontdekt tijdens het onderzoeken van (1), NIET in
+//    de CodeQL-scan: zonder ENIGE traversal was `key.pem` (de TLS-
+//    PRIVESLEUTEL van dit zelfondertekende certificaat, 0600) al gewoon
+//    rechtstreeks op te vragen als `https://host:8766/key.pem` - het stond
+//    immers gewoon in ROOT naast wallet-signer.html, en de oude code had
+//    geen enkele beperking op WELKE bestandsnamen ze diende. Empirisch
+//    bevestigd: `curl -sk https://127.0.0.1:8766/key.pem` gaf de volledige
+//    PEM-inhoud terug, HTTP 200.
+//
+// Een blacklist (bv. "geen .pem-bestanden") had probleem 2 opgelost maar
+// blijft kwetsbaar voor toekomstige nieuwe bestanden in deze map; een
+// resolved-path-prefixcheck had probleem 1 opgelost maar NIET probleem 2
+// (key.pem staat binnen ROOT, geen traversal nodig). Een allowlist van
+// precies de benodigde bestandsnamen sluit beide structureel af, ongeacht
+// wat er ooit nog aan bestanden in deze map bijkomt.
+const ALLOWED_FILES = {
+  "wallet-signer.html": { file: "wallet-signer.html", contentType: "text/html" },
 };
+
+function resolveAllowedFile(pathname) {
+  const requestedName = pathname === "/" ? "wallet-signer.html" : pathname.replace(/^\//, "");
+  const entry = ALLOWED_FILES[requestedName];
+  if (!entry) return null;
+  return entry;
+}
 
 const server = https.createServer(options, (req, res) => {
   // req.url kan een query-string bevatten (bijv. Solflare's deep-link-
@@ -29,8 +66,13 @@ const server = https.createServer(options, (req, res) => {
   // map, geen bestand) - EISDIR, dus 404. Eerst het pathname isoleren, dan
   // pas vergelijken.
   const pathname = req.url.split("?")[0];
-  let filePath = path.join(ROOT, pathname === "/" ? "/wallet-signer.html" : pathname);
-  const ext = path.extname(filePath);
+  const entry = resolveAllowedFile(pathname);
+  if (!entry) {
+    res.writeHead(404);
+    res.end("Not found");
+    return;
+  }
+  const filePath = path.join(ROOT, entry.file);
 
   fs.readFile(filePath, (err, data) => {
     if (err) {
@@ -46,7 +88,7 @@ const server = https.createServer(options, (req, res) => {
     // mogelijk gefixte bug opnieuw zouden kunnen vertonen zonder dat dat
     // duidelijk is.
     res.writeHead(200, {
-      "Content-Type": MIME[ext] || "application/octet-stream",
+      "Content-Type": entry.contentType,
       "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
       "Pragma": "no-cache",
       "Expires": "0",

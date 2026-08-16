@@ -4,14 +4,15 @@
 een nieuwe chatsessie. Legt vast waar we staan en waarom, zodat niets herhaald hoeft te
 worden.
 
-Laatst bijgewerkt: 2026-08-15 - twee dode duplicaat-voorstellen (#6, #7) empirisch
-verklaard en de onderliggende structurele bug (blinde "hoogste transactionIndex")
-definitief gefixt in `wallet-signer.html` (sectie 54); voorstel #5 (2-van-2, timelock
-verstreken sinds 2026-08-15T15:46:49Z) staat klaar om uitgevoerd te worden.
+Laatst bijgewerkt: 2026-08-16 - **de echte canary-upgrade is uitgevoerd en definitief
+bevestigd** (sectie 57): SpankWallet's productieprogramma is voor het eerst succesvol
+geupgraded via de nieuwe 2-of-3 Squads-multisig, met on-chain bewijs tot op de byte
+geverifieerd (reproduceerbare build, geen aannames). De hele migratie-en-canary-saga
+(secties 41-57) is hiermee afgesloten.
 
 ---
 
-## Huidige staat (bijgewerkt: 2026-08-13)
+## Huidige staat (bijgewerkt: 2026-08-16)
 
 Deze sectie is de actuele samenvatting. De genummerde secties hieronder (inmiddels 50+)
 blijven het volledige, chronologische logboek - toegevoegd, nooit ingekort of
@@ -26,6 +27,10 @@ van het logboek. Deze sectie hier is de vervanger die je als eerste moet lezen.
   1-40).
 - Upgrade-authority gemigreerd van een enkele sleutel naar een 2-of-3 Squads V4-multisig
   met 72u-timelock (secties 41-46) - de #1-prioriteit uit de externe security-review.
+- **De nieuwe multisig-flow bewezen op het ECHTE productieprogramma, niet alleen op een
+  wegwerprepetitie:** de canary-upgrade (een puur cosmetische comment-wijziging) is
+  voorgesteld, 2-van-2 goedgekeurd, na de volle 72u-timelock uitgevoerd, en de resulterende
+  bytecode is via een reproduceerbare build byte-voor-byte bevestigd (secties 42-57).
 - Drie onafhankelijke, industriestandaard geautomatiseerde audittechnieken (statische
   analyse via Sec3 X-Ray, fuzzing-scaffolding via Trident, formele verificatie via Kani)
   daadwerkelijk tegen de code gedraaid - geen nieuwe kwetsbaarheden gevonden binnen hun
@@ -42,10 +47,13 @@ van het logboek. Deze sectie hier is de vervanger die je als eerste moet lezen.
   testsuite 54/54 groen (was 49/49). Deploy is een apart, later multisig-voorstel.
 
 **Openstaand:**
-- Canary-upgrade-uitvoering wacht op de 72u-timelock: uitvoerbaar vanaf
-  **2026-08-15T15:46:49Z** (sectie 46).
 - Spend-limits-wijziging (sectie 53) deployen naar devnet - apart multisig-voorstel, nog
   niet ingediend.
+- De 6 dode duplicaat-proposals (#1-4, #6, #7) staan nog on-chain (rent niet
+  gereclaimed) - permanent onuitvoerbaar sinds de canary-buffer is geconsumeerd, dus
+  onschadelijk. Opschonen (`proposalReject`/`proposalCancel` + `vaultTransaction
+  AccountsClose`) vereist zelf weer multisig-lid-handtekeningen; bewust niet gedaan
+  zonder expliciete aanleiding (sectie 57).
 - UI-ontwerp fase 1-3 (risicoklassen, resterende 18 instructies, eventuele
   browserextensie) - ontwerp in sectie 49's artifact, fase 0 gebouwd in sectie 50.
 - Certora/CVLR-formele-verificatie van de secp256r1-signature-logica: geblokkeerd op twee
@@ -56,14 +64,10 @@ van het logboek. Deze sectie hier is de vervanger die je als eerste moet lezen.
 - esbuild/vite Dependabot-alerts blijven bewust ongepatcht (vereist een major-upgrade,
   sectie 45).
 
-**Eerstvolgende stap:** timelock is al verstreken (2026-08-15T15:46:49Z) en
-`wallet-signer.html` is inmiddels gefixt (sectie 54) zodat knop 4 gegarandeerd voorstel #5
-target, ook al bestaan er 6 andere open duplicaten (#1-4, #6, #7). Via `wallet-signer.html`
-op de hoofd-pc (meest betrouwbare apparaat) knop 4 klikken, daarna on-chain bevestigen
-(zelfde bewijspatroon als de repetitie in sectie 41). Daarna, zoals afgesproken pas ná die
-bevestiging: sectie 50's fase 1 van de UI-preview oppakken (risicoklassen + resterende
-instructies). De spend-limits-deploy (sectie 53) is een onafhankelijke, aparte beslissing
-die niet op de canary-timing wacht.
+**Eerstvolgende stap:** de canary-upgrade is afgerond en bevestigd (sectie 57) - de
+multisig-migratie is hiermee volledig bewezen. Zoals afgesproken nu pas oppakken: sectie
+50's fase 1 van de UI-preview (risicoklassen + resterende instructies). De
+spend-limits-deploy (sectie 53) is een onafhankelijke, aparte beslissing.
 
 ## Kritieke gotchas - snelle referentie
 
@@ -98,6 +102,12 @@ vervanging van de detail.
   canonieke-voorstel-lookup (verst-gevorderde status wint, nooit blind de hoogste index),
   plus een harde blokkade + expliciete aparte bevestiging vóór een nieuw voorstel
   aangemaakt mag worden.
+- **`parseInt(bnObject, 16)` op een BN.js-object is een radix-val.** BN's DEFAULT
+  `toString()` (aangeroepen door impliciete coercie) geeft decimaal, maar zijn `.toJSON()`
+  (aangeroepen door `JSON.stringify()`, zoals in bijna alle debug-logging) geeft hex zonder
+  "0x"-prefix - twee serialisaties van hetzelfde object door elkaar halen liet een
+  2026-timelock-datum naar jaar 5171 springen. Altijd expliciet `.toString(10)` +
+  `Number()`, nooit op de default coercie vertrouwen. Sectie 56.
 - **Niet elke tool publiceert linux-aarch64-builds.** Bevestigd voor Certora's
   Solana-platform-tools (uitsluitend linux-x86_64 en macOS) - controleer dit VOOR je een
   toolinstallatie plant op ARM64-Linux. Sectie 48.
@@ -3603,3 +3613,72 @@ bijgewerkt.
 **Openstaand, ongewijzigd:** knop "4. Uitvoeren" op voorstel #5 zou nu, met deze fix,
 zonder de valse blokkade moeten werken. Nog niet opnieuw geklikt/bevestigd door de
 gebruiker sinds deze fix.
+
+## 57. De canary-upgrade is uitgevoerd en definitief bevestigd - de multisig-migratie is hiermee volledig bewezen op het echte programma
+
+Na sectie 56's fix klikte de gebruiker opnieuw op "4. Uitvoeren". Geslaagd. Signature:
+`48pzxn7cUqcmuNqMhmDEkZNY6banXxSb3dR6L2p7KiJSaJsWLktqz5Y2eA1nn7LRpxacG9gGG1mn3PfssqJKdw1C`.
+Vier onafhankelijke, empirische verificaties uitgevoerd - geen enkele op basis van een
+aanname of alleen een "geen foutmelding"-redenering:
+
+**1. De transactie zelf, on-chain.** `solana confirm -v`: `Status: Ok`, `Finalized`, slot
+484482929. De programma-log toont letterlijk `"Upgraded program
+9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9"`. De buffer-account
+(`7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh`) ging van 3.10024152 SOL naar 0 - rent
+teruggestort naar de vault (het "spill"-account), exact het verwachte gedrag van een
+geslaagde `Upgrade`-instructie.
+
+**2. `solana program show`.** `Last Deployed In Slot: 484482929` - exact gelijk aan de
+uitvoeringsslot hierboven, geen toeval. `Authority` nog steeds de multisig-vault
+(`89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`), ongewijzigd zoals verwacht (de upgrade
+verandert de code, niet de autoriteit).
+
+**3. De bytecode zelf, met een reproduceerbare build - de sluitende, onweerlegbare
+check.** De canary-wijziging (sectie 42) is een pure Rust-COMMENT bij `declare_id!` -
+comments compileren nooit mee naar bytecode, dus (in tegenstelling tot de repetitie in
+sectie 41, waar een runtime-stringliteral veranderde) een simpele `strings`/grep-zoektocht
+in de gedumpte bytecode kan dit niet aantonen. In plaats daarvan: de exacte
+canary-commit (`60b5aac`) in een apart, geïsoleerd git-worktree opnieuw gecompileerd
+(`cargo-build-sbf --arch v3`, zelfde proces/toolchain als de oorspronkelijke buffer-build
+in sectie 42) - resultaat: 445.272 bytes, exact dezelfde grootte als destijds
+byte-offset-geverifieerd. Vervolgens `solana program dump` van de LIVE on-chain bytecode
+(754.848 bytes - de volle ProgramData-allocatie, inclusief padding). `cmp` op de eerste
+445.272 bytes: **byte-voor-byte identiek** aan de verse build. De resterende 309.576 bytes
+gecontroleerd op non-zero bytes: **nul** - pure zero-padding, geen verborgen/afwijkende
+data. Dit sluit de volledige bewijsketen: de buffer bevatte (sectie 42) een
+byte-offset-geverifieerde build van commit `60b5aac` → de `Upgrade`-instructie verving de
+programmabytecode met de buffer-inhoud (log + slotmatch hierboven) → de nu-live bytecode
+is onafhankelijk gereproduceerd en komt byte-voor-byte overeen. Geen schakel in deze keten
+steunt op een aanname.
+
+**4. De 6 dode duplicaat-voorstellen (#1-4, #6, #7).** Bevestigd dat ze permanent
+onuitvoerbaar zijn: `solana account` op de canary-buffer geeft nu `AccountNotFound` - de
+buffer is volledig geconsumeerd/gesloten door de geslaagde executie van #5, dus elke
+poging om een van de duplicaten alsnog uit te voeren zou onherroepelijk falen (dezelfde
+conclusie, nu bevestigd i.p.v. aangenomen, als de vier oudere duplicaten uit sectie 43).
+**Niet opgeruimd:** `proposalReject`/`proposalCancel` + `vaultTransactionAccountsClose`
+zijn de enige beschikbare instructies in de Squads V4-SDK hiervoor, en vereisen zelf weer
+threshold-handtekeningen van multisig-leden via hun wallet-extensies - exact hetzelfde
+soort actie als propose/approve/execute, dus niet iets dat autonoom (zonder een nieuwe
+apparaat-signeerronde) te doen was. Gedocumenteerd als bekende, bewezen-onschadelijke rommel
+in plaats van als "opgelost" gepresenteerd - rent-verspilling, geen veiligheidsrisico.
+
+**Wat dit definitief bewijst:** de 2-of-3 Squads V4-multisig-upgrade-authority met
+72u-timelock (secties 41-46) werkt niet alleen in een gecontroleerde repetitie op een
+wegwerpprogramma (sectie 41), maar ook end-to-end op het ECHTE SpankWallet-productieprogramma:
+voorstel indienen, twee onafhankelijke leden op twee fysiek gescheiden apparaten laten
+goedkeuren, een echt verstreken timelock respecteren, uitvoeren, en de resulterende
+bytecode-wijziging tot op de byte verifiëren. Onderweg (secties 43-56) negen reële,
+niet-vooraf-voorziene problemen empirisch gevonden en opgelost - een SDK-bug met verkeerde
+walletfoutvertaling, een mobiele-deep-link-transportprobleem dat achteraf geen
+transportprobleem bleek te zijn, een reboot die een losgekoppelde server doodde, een
+structureel "blinde hoogste index"-ontwerpprobleem dat twee keer duplicaten produceerde
+voor het echt structureel gefixt was, en een BN.js-radixverwarring die een geldige
+timelock naar jaar 5171 liet springen. Geen van deze problemen was vooraf voorzien; geen
+werd aangenomen opgelost te zijn zonder directe on-chain/reproduceerbare verificatie. Het
+single-key-upgrade-authority-SPOF - gap 1 van de externe security-review (sectie 41) - is
+hiermee niet alleen theoretisch gesloten, maar praktisch bewezen te werken.
+
+**Hiermee is de migratie-en-canary-saga (secties 41-57) afgesloten.** Openstaand voor een
+volgende sessie: sectie 50's fase 1 van de UI-preview (risicoklassen + resterende
+instructies), en de onafhankelijke spend-limits-deploy (sectie 53).

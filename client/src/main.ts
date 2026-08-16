@@ -29,6 +29,7 @@ import {
 import { buildExecuteAdvancedTransaction, RemainingAccountSpec } from "./executeAdvanced";
 import { showExecuteAdvancedPreview } from "./executeAdvancedPreview";
 import { showRemovePasskeyPreview } from "./removePasskeyPreview";
+import { showAddAllowedProgramPreview } from "./addAllowedProgramPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -736,13 +737,31 @@ async function runStep8(): Promise<void> {
   log("(geen echte waarde in het spel) - zie stap 9 voor de daadwerkelijke CPI ernaartoe.");
   log("");
 
+  log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59/61) -");
+  log("hold-to-confirm, geen passkey-prompt totdat de knop volledig ingedrukt");
+  log("gehouden is.");
+  const allowChoice = await showAddAllowedProgramPreview(connection, lastPdas.walletPda, SystemProgram.programId);
+  if (allowChoice.kind === "denied") {
+    log("Geweigerd in de bevestigingskaart - add_allowed_program NIET aangeroepen,");
+    log("geen passkey-prompt.");
+    return;
+  }
+  if (allowChoice.kind === "would-fail") {
+    log("FOUT: onverwacht 'would-fail' (" + allowChoice.reason + ") voor System Program -");
+    log("dit is de allereerste toevoeging in deze testrun, zou moeten kunnen.");
+    return;
+  }
+  const programToAllow = allowChoice.programId;
+  log("Bevestigd: " + programToAllow.toBase58() + " wordt toegevoegd.");
+  log("");
+
   try {
     log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
     const { transaction, policyPda } = await buildAddAllowedProgramTransaction(
       connection,
       lastWallet.publicKey,
       lastPdas.walletPda,
-      SystemProgram.programId,
+      programToAllow,
       lastPasskeyPublicKey,
       lastCredentialId,
       window.location.hostname
@@ -776,8 +795,8 @@ async function runStep8(): Promise<void> {
     log("Bevestigd.");
     log("");
 
-    log("Policy-account teruglezen (ruwe account-bytes) om te bevestigen dat System");
-    log("Program daadwerkelijk op de allowlist staat...");
+    log("Policy-account teruglezen (ruwe account-bytes) om te bevestigen dat het");
+    log("bevestigde programma daadwerkelijk op de allowlist staat...");
     const policy = await readPolicyAccount(connection, policyPda);
     if (!policy) {
       log("FOUT: policy-account bestaat niet na bevestigde add_allowed_program (onverwacht).");
@@ -785,8 +804,8 @@ async function runStep8(): Promise<void> {
     }
     log("count: " + policy.count);
     log("allowed_programs: " + policy.allowedPrograms.map((p) => p.toBase58()).join(", "));
-    if (!policy.allowedPrograms.some((p) => p.equals(SystemProgram.programId))) {
-      log("FOUT: System Program staat niet in de teruggelezen allowlist (onverwacht).");
+    if (!policy.allowedPrograms.some((p) => p.equals(programToAllow))) {
+      log("FOUT: " + programToAllow.toBase58() + " staat niet in de teruggelezen allowlist (onverwacht).");
       return;
     }
     log("");

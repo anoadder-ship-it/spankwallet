@@ -3952,3 +3952,51 @@ hardware doorlopen worden. De classificatielogica zelf is wel volledig, apart be
 
 **Openstaand:** `add_allowed_program` (laatste HOOG-klasse-kaart), dan MIDDEN
 (`transfer_token`, `add_session_key`), dan LAAG, in de afgesproken volgorde.
+
+## 62. `add_allowed_program`-bevestigingskaart: laatste HOOG-risicoklasse-kaart - het gevolg (breidt execute_advanced's bereik uit) expliciet, geen understatement
+
+Vijfde en laatste HOOG-klasse-kaart van UI-fase 1. `instructions.rs::add_allowed_program`
+on-chain nagelezen (niet aangenomen): drie gegarandeerde afwijzingen, alle drie vooraf
+zonder simulatie te bepalen - het programma is SpankWallet zelf (`SelfCpiNotAllowed`),
+staat al op de allowlist (`ProgramAlreadyAllowed`), of de allowlist zit al vol op
+`MAX_ALLOWED_PROGRAMS` (32, `AllowlistFull`).
+
+**`addAllowedProgramPreview.ts` (nieuw):** `confirmed`/`denied`/`would-fail` (met
+`reason: "self-cpi" | "already-allowed" | "allowlist-full"`) - zelfde patroon als de
+vorige twee kaarten. Self-cpi-check eerst (pure vergelijking, geen RPC nodig), dan
+`readPolicyAccount()` (hergebruikt) voor de andere twee. Bij een geldig, nog-niet-
+toegestaan adres: kaart met `tone:"danger"`/`friction:"hold"`, headline met de
+LETTERLIJK afgesproken consequentiezin ("Na deze actie kan execute_advanced namens jou
+met dit programma communiceren") - geen understatement, plus een bekend/onbekend-
+programma-label uit een kleine, puur lokale tabel (`SystemProgram.programId`,
+`TOKEN_PROGRAM_ID`, `ASSOCIATED_TOKEN_PROGRAM_ID` - alle drie al-bestaande dependencies
+van dit project, geen externe bron, geen gokwerk; alles daarbuiten expliciet "onbekend
+programma"). Eén bewerkbaar adresveld, herbevestigd tegen de al-opgehaalde allowlist.
+Geen wijziging aan `confirmationCard.ts` nodig.
+
+**`main.ts` stap 8**: kaart ervoor, gebruikt de bevestigde `programId`.
+
+**Geverifieerd, dit keer voor het eerst VOLLEDIG tegen echte devnet-RPC (geen
+synthetische data nodig, in tegenstelling tot de vorige twee kaarten):** een vers,
+ongeregistreerd `walletPda` heeft per definitie nog geen `PolicyAccount`, dus het
+"toegestaan"-pad is voor een fris adres altijd echt bereikbaar zonder hardware-passkey-
+state. Bevestigd: self-cpi-kortsluiting (geen RPC nodig, geen kaart); de ECHTE kaart
+tegen echte devnet-RPC getoond voor System Program, met het correcte bekende label en de
+letterlijke consequentiezin; live-bewerken naar een onbekend adres, naar
+`TOKEN_PROGRAM_ID` (toont het juiste label), en naar SpankWallet zelf (headline toont de
+zelf-cpi-weigering, hold-to-confirm faalt terecht met de juiste foutmelding);
+terugzetten + volledige hold bevestigt correct (exacte waarde terug, kaart sluit).
+Screenshot genomen. `tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten.
+
+**Eerlijk genoteerd:** `already-allowed` en `allowlist-full` zijn niet apart met een
+synthetische testharnas herverifieerd (in tegenstelling tot de vorige twee kaarten) - de
+onderliggende logica (`.some(equals)`-lidmaatschapscheck, numerieke vergelijking) is
+identiek aan het patroon dat al twee keer eerder bewezen is (`isAllowed` in
+`executeAdvancedPreview.ts`, `isRegistered` in `removePasskeyPreview.ts`). Bewuste
+afweging om geen derde, structureel identieke testharnas te bouwen - niet stilzwijgend
+"volledig getest" gepresenteerd.
+
+**Hiermee is de HOOG-risicoklasse compleet** (`add_passkey`, `execute_advanced`,
+`remove_passkey`, `add_allowed_program`). **Openstaand:** MIDDEN (`transfer_token`,
+`add_session_key`), dan LAAG (`remove_allowed_program`, `remove_session_key`,
+`cancel_recovery`, `hunt`), in de afgesproken volgorde.

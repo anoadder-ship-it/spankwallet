@@ -31,6 +31,7 @@ import { showExecuteAdvancedPreview } from "./executeAdvancedPreview";
 import { showRemovePasskeyPreview } from "./removePasskeyPreview";
 import { showAddAllowedProgramPreview } from "./addAllowedProgramPreview";
 import { showTransferTokenPreview } from "./transferTokenPreview";
+import { showAddSessionKeyPreview } from "./addSessionKeyPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -1580,21 +1581,49 @@ async function runStep16(): Promise<void> {
     log("Sessiesleutel (publiek): " + sessionKeypair.publicKey.toBase58());
 
     const currentSlot = BigInt(await connection.getSlot());
-    const expirySlot = currentSlot + 300n;
+    log("Huidige slot: " + currentSlot);
+    log("");
+
+    log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59/64) -");
+    log("MIDDEN-risicoklasse, gewone klik (geen hold-to-confirm). De caps zijn hier");
+    log("de headline - het risico van een sessie is begrensd door precies deze");
+    log("waarden.");
+    // Spend-limits (ontwerpdocument): defaults max_lamports_per_tx=50_000,
+    // max_lamports_total=100_000 - ruim genoeg voor de 1000-lamport-
+    // aanroepen in stap 17/19 hieronder, maar wel expliciete, echte caps
+    // (geen "0 = onbeperkt"-val) i.p.v. een toevallig groot getal. Geen
+    // token-scope voor deze sessie (canTransferToken=false).
+    const sessionChoice = await showAddSessionKeyPreview({
+      connection,
+      currentSlot,
+      defaultDurationSlots: 300n,
+      canExecute: true,
+      canTransferToken: false,
+      canExecuteAdvanced: false,
+      sessionAllowedPrograms: [],
+      tokenMint: PublicKey.default,
+      defaultMaxLamportsPerTx: 50_000n,
+      defaultMaxLamportsTotal: 100_000n,
+      defaultMaxTokenAmountPerTx: 0n,
+      defaultMaxTokenAmountTotal: 0n,
+    });
+    if (sessionChoice === null) {
+      log("Geweigerd in de bevestigingskaart - add_session_key NIET aangeroepen, geen");
+      log("passkey-prompt.");
+      return;
+    }
+    const expirySlot = sessionChoice.expirySlot;
     lastSessionExpirySlot = expirySlot;
-    log("Huidige slot: " + currentSlot + ", expiry_slot: " + expirySlot);
+    log(
+      "Bevestigd: expiry_slot=" + expirySlot + ", max_lamports_per_tx=" +
+        sessionChoice.maxLamportsPerTx + ", max_lamports_total=" + sessionChoice.maxLamportsTotal + "."
+    );
     log("");
 
     log("[PASSKEY] navigator.credentials.get() wordt aangeroepen - add_session_key");
     log("vereist ALTIJD een echte passkey-handtekening (het wijzigt WIE toegang");
     log("heeft), zelfs al is de sessiesleutel zelf geen passkey.");
 
-    // Spend-limits (ontwerpdocument): max_lamports_per_tx=50_000,
-    // max_lamports_total=100_000 - ruim genoeg voor de 1000-lamport-
-    // aanroepen in stap 17/19 hieronder, maar wel expliciete, echte caps
-    // (geen "0 = onbeperkt"-val) i.p.v. een toevallig groot getal. Geen
-    // token-limiet nodig (canTransferToken=false), dus token_mint blijft
-    // PublicKey.default() en de token-caps blijven 0n.
     const { transaction, sessionPda } = await buildAddSessionKeyTransaction(
       connection,
       lastWallet.publicKey,
@@ -1605,8 +1634,8 @@ async function runStep16(): Promise<void> {
       false,
       false,
       [],
-      50_000n,
-      100_000n,
+      sessionChoice.maxLamportsPerTx,
+      sessionChoice.maxLamportsTotal,
       PublicKey.default,
       0n,
       0n,

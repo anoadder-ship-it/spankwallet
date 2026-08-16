@@ -4152,3 +4152,57 @@ herstart via de bestaande systemd-service, `PAGE_BUILD`-marker bevestigd bijgewe
 
 **Terug naar UI-fase 1** (`add_session_key`, on-af blijven staan tijdens deze
 onderbreking) zodra dit bevestigd is.
+
+## 65. `add_session_key`-bevestigingskaart: laatste MIDDEN-kaart - caps als headline, begrensd risico
+
+Zevende kaart van UI-fase 1, laatste van de MIDDEN-risicoklasse - hervat na de
+sectie-64-beveiligingsonderbreking. Technisch plan vooraf goedgekeurd; bevestigd (nagelezen
+in `main.ts` stap 16 vóór het bouwen) dat scope inderdaad een vaste, door de aanroepende
+code voorafingestelde parameter is, geen gebruikersinvoer.
+
+**`tokenAmount.ts` (nieuw):** `formatTokenAmount`/`parseTokenAmount`/
+`defaultTokenAmountFieldValue` ontleed uit `transferTokenPreview.ts` - de tweede plek die
+dezelfde bedrag-<->leesbare-eenheden-logica nodig had (zelfde behandeling als
+`escapeHtml`/`hex.ts`). `transferTokenPreview.ts` bijgewerkt om dit te hergebruiken
+(mechanisch, geen gedragswijziging). Elegante bijvangst: lamports-naar-SOL is wiskundig
+identiek aan een token met 9 decimalen (`10^9` in beide gevallen), dus
+`addSessionKeyPreview.ts` hergebruikt dezelfde functies met `LAMPORT_DECIMALS = 9` i.p.v.
+een aparte SOL-specifieke implementatie te schrijven.
+
+**`addSessionKeyPreview.ts` (nieuw):** velden dynamisch opgebouwd naar gelang de
+(vaste) scope - altijd de geldigheidsduur (in slots, met een expliciet als schatting
+gelabelde minuten/uren-omrekening, `~400ms/slot`, geen overclaim van precisie); bij
+`canExecute` de lamport-caps; bij `canTransferToken` de token-caps (in leesbare eenheden
+via `getMint()`, zelfde eerlijke fallback als `transfer_token`) plus het mint-adres
+(informatief, niet bewerkbaar - een scope-beslissing, geen cap). De caps zijn de headline,
+niet een detail - groot en prominent, zoals afgesproken. Scope-blok altijd zichtbaar,
+INCLUSIEF wat NIET is toegestaan (`Execute: JA/NEE`, `Token versturen: JA/NEE`,
+`execute_advanced: JA/NEE` + sub-allowlist indien van toepassing) - geen understatement.
+`friction: "click"`, geen `tone:"danger"` - MIDDEN, consistent met `transfer_token`. `0`
+als cap is expliciet GELDIG (spend-limits-ontwerpdocument, sectie 53: "0 betekent altijd
+letterlijk nul, nooit onbeperkt") - apart geverifieerd, niet aangenomen.
+
+**`main.ts` stap 16**: kaart ervoor; `expirySlot` wordt herberekend uit de al-opgehaalde
+`currentSlot` + de bevestigde duur (geen tweede slot-fetch nodig); de bevestigde caps
+gaan naar `buildAddSessionKeyTransaction` i.p.v. de hardcoded `50_000n`/`100_000n`.
+
+**Geverifieerd, beide scope-takken:**
+- **Lamports-only (exact zoals stap 16 het echt aanroept):** velden/labels kloppen,
+  token-velden afwezig (geen onnodige RPC-call), headline toont caps prominent + scope
+  correct; `0` als cap geaccepteerd en correct getoond; duur=0 correct geweigerd; een
+  geldige bewerking (duur 900, totaal 1.5 SOL) rekent correct terug
+  (`expirySlot=currentSlot+900`, `1500000000` lamports); token-caps blijven `0n` zoals
+  verwacht. Screenshot genomen.
+- **Token-scope (niet door `main.ts` uitgeoefend, apart bewezen tegen echte devnet-USDC,
+  zelfde aanpak als eerder afgesproken):** lamport-velden afwezig, token-caps in
+  leesbare eenheden (`0.5`, `1`) met de echte 6 decimalen van de mint, headline toont
+  mint-adres + correcte scope (`Token versturen: JA`, `Execute: NEE`); te veel
+  decimalen correct geweigerd; geldige bevestiging rekent correct terug naar
+  `500000` ruwe eenheden, lamport-caps blijven `0n`.
+
+`tsc --noEmit`: bij hervatten en na afronden beide keren exact de 4 bekende,
+pre-bestaande fouten, geen nieuwe.
+
+**Hiermee is de MIDDEN-risicoklasse compleet** (`transfer_token`, `add_session_key`).
+**Openstaand:** LAAG (`remove_allowed_program`, `remove_session_key`, `cancel_recovery`,
+`hunt`), in de afgesproken volgorde - de laatste risicoklasse van UI-fase 1.

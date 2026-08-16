@@ -4000,3 +4000,67 @@ afweging om geen derde, structureel identieke testharnas te bouwen - niet stilzw
 `remove_passkey`, `add_allowed_program`). **Openstaand:** MIDDEN (`transfer_token`,
 `add_session_key`), dan LAAG (`remove_allowed_program`, `remove_session_key`,
 `cancel_recovery`, `hunt`), in de afgesproken volgorde.
+
+## 63. `transfer_token`-bevestigingskaart: eerste MIDDEN-kaart - "bedrag t.o.v. geschiedenis" bewust NIET gebouwd, met externe onderbouwing
+
+Zesde kaart van UI-fase 1, eerste van de MIDDEN-risicoklasse. Vóór het bouwen eerst
+onderzocht of het sectie-49-ontwerp's "bedrag t.o.v. geschiedenis"-escalatiemechanisme
+praktisch haalbaar is zonder externe databron.
+
+**Bevinding: structureel niet zinvol bouwbaar in dit project, geen implementatie-
+tekortkoming.** `main.ts`'s testflow maakt bij elke volledige doorloop een gloednieuwe
+wallet aan (nieuwe passkey uit stap 1 -> nieuwe `seed_key` -> nieuwe `WalletAccount`-PDA)
+- er is nergens in dit project een doelbewust hergebruikte testwallet. Een
+geschiedenis-mechanisme (bijv. via `getSignaturesForAddress` op de vault-token-account)
+zou dus bij elke test structureel NUL geschiedenis aantreffen - niet omdat het
+mechanisme kapot zou zijn, maar omdat de situatie waarin het iets zou kunnen meten zich
+in dit project nooit natuurlijk voordoet. Een geforceerd half-werkend mechanisme zou
+permanent onbewezen code zijn geweest.
+
+**Extern gevalideerd (op verzoek, zelf nagetrokken via websearch, niet zonder controle
+overgenomen):** dit is een erkend concept in de sector, "zero-history wallet risk" -
+bevestigd via Web3Firewall's artikel "Zero-History Wallet Risk: How to Screen Wallets
+With No Transaction History" (web3firewall.xyz) en bredere fraud-detection-literatuur
+over het "cold start"-probleem. Professionele risicobeoordeling schakelt bij een lege
+geschiedenis expliciet over op transactie-INHOUD-analyse (bedrag, ontvanger, type)
+i.p.v. geschiedenis - precies de aanpak die hieronder gekozen is. Bijkomend argument uit
+dezelfde bronnen: geschiedenis-gebaseerde scoring is sowieso zwak tegen de gevaarlijkste
+scenario's, omdat aanvallers doelbewust verse wallets gebruiken om zulke scoring te
+omzeilen.
+
+**Besluit:** `transfer_token` blijft flat MIDDEN (`friction: "click"`, geen hold, geen
+`tone:"danger"`) - een bewuste, beargumenteerde afwijking van het oorspronkelijke
+sectie-49-ontwerp, niet stilzwijgend weggelaten functionaliteit.
+
+**`transferTokenPreview.ts` (nieuw):** geen discriminated union zoals de HOOG-kaarten -
+`transfer_token` heeft geen on-chain-gegarandeerde, vooraf-detecteerbare weigering zoals
+een allowlist of lockout (een saldotekort wordt pas bij de daadwerkelijke CPI duidelijk).
+Bedrag in leesbare eenheden via `getMint()` (al-bestaande `@solana/spl-token`-
+dependency, een ECHT on-chain veld van het mint-account zelf - geen externe bron, geen
+gok): lukt de fetch niet, dan eerlijk `"<raw amount> ruwe eenheden (decimals onbekend)"`,
+nooit een verzonnen decimalenaantal. Validatie weigert invoer met meer precisie dan de
+mint toestaat (bij bekende decimals) resp. niet-gehele invoer (bij onbekende decimals -
+zonder decimals is er geen betrouwbare manier om een breuk terug te schalen). Ontvanger
+blijft een gewoon adresveld (geen asynchrone eigenaar-resolutie geprobeerd - zou een
+async lookup per toetsaanslag vereisen, buiten scope van wat gevraagd is).
+
+**`main.ts` stap 7**: kaart ervoor, gebruikt de bevestigde bedrag/ontvanger-waarden voor
+zowel de transactie als de afsluitende log (niet meer hardcoded "0.5 USDC" - zou
+misleidend zijn geworden bij een bewerkt bedrag).
+
+**Geverifieerd, tegen echte devnet-USDC (6 decimals):** `500_000n` ruwe eenheden toont
+correct als `0.5`; te veel decimalen (7 tekens na de punt) geeft de exacte, juiste
+foutmelding; een geldige bewerking (2.5 USDC) rekent correct terug naar `2500000` ruwe
+eenheden; gewone klik (geen hold) bevestigt direct. Onbekend-mint-pad apart getest (een
+niet-bestaand mint-adres): default-veld toont het rauwe geheel getal (geen
+onterechte schaling), label en headline zijn expliciet "decimals onbekend", een
+decimale invoer wordt terecht geweigerd, een geldig geheel getal geaccepteerd.
+Screenshot genomen ter visuele bevestiging (geen rode HOOG-styling, gewone knop, geen
+hold-vulling). `tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten.
+
+**Openstaand:** `add_session_key` (laatste MIDDEN-kaart, moet de nieuwe spend-limit-caps
+duidelijk tonen - sectie 53), dan LAAG (`remove_allowed_program`, `remove_session_key`,
+`cancel_recovery`, `hunt`), in de afgesproken volgorde.
+
+Sources:
+- [Zero-History Wallet Risk: How to Screen Wallets With No Transaction History](https://www.web3firewall.xyz/zero-history-wallet-risk)

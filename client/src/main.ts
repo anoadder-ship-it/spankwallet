@@ -30,6 +30,7 @@ import { buildExecuteAdvancedTransaction, RemainingAccountSpec } from "./execute
 import { showExecuteAdvancedPreview } from "./executeAdvancedPreview";
 import { showRemovePasskeyPreview } from "./removePasskeyPreview";
 import { showAddAllowedProgramPreview } from "./addAllowedProgramPreview";
+import { showTransferTokenPreview } from "./transferTokenPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -679,15 +680,30 @@ async function runStep7(): Promise<void> {
 
     log("7b. transfer_token aanroepen: 0.5 USDC (500000 units) van de vault");
     log("terug naar de payer zelf...");
+    log("");
+    log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59/63) -");
+    log("MIDDEN-risicoklasse, gewone klik (geen hold-to-confirm). Bedrag in");
+    log("leesbare eenheden op basis van de echte mint-decimals.");
+    const transferChoice = await showTransferTokenPreview(connection, usdcMint, payerAta, 500_000n);
+    if (transferChoice === null) {
+      log("Geweigerd in de bevestigingskaart - transfer_token NIET aangeroepen, geen");
+      log("passkey-prompt.");
+      return;
+    }
+    log(
+      "Bevestigd: " + transferChoice.amount.toString() + " ruwe eenheden naar " +
+        transferChoice.recipientTokenAccount.toBase58() + "."
+    );
+    log("");
     log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
     const { transaction } = await buildTransferTokenTransaction(
       connection,
       lastWallet.publicKey,
       lastPdas.walletPda,
       vaultAta,
-      payerAta,
+      transferChoice.recipientTokenAccount,
       usdcMint,
-      500_000n,
+      transferChoice.amount,
       lastPasskeyPublicKey,
       lastCredentialId,
       window.location.hostname
@@ -715,10 +731,11 @@ async function runStep7(): Promise<void> {
     await connection.confirmTransaction(signature, "confirmed");
     log("Bevestigd.");
     log("");
-    log("SUCCES - transfer_token heeft 0.5 USDC daadwerkelijk verplaatst van de");
-    log("vault terug naar de payer, met een ECHTE passkey-handtekening. Bewijst");
-    log("dat de tweede getypeerde actie (na transfer_sol) end-to-end werkt op");
-    log("devnet, inclusief de vault-PDA-ondertekende SPL-Token-CPI.");
+    log("SUCCES - transfer_token heeft " + transferChoice.amount.toString() + " ruwe eenheden");
+    log("daadwerkelijk verplaatst van de vault naar " + transferChoice.recipientTokenAccount.toBase58() + ",");
+    log("met een ECHTE passkey-handtekening. Bewijst dat de tweede getypeerde actie");
+    log("(na transfer_sol) end-to-end werkt op devnet, inclusief de");
+    log("vault-PDA-ondertekende SPL-Token-CPI.");
   } catch (err) {
     log("");
     log("FOUT:");

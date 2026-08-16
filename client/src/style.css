@@ -129,6 +129,26 @@ button:disabled { background: #333; cursor: not-allowed; color: #777; }
 }
 .preview-error:empty { margin-bottom: 0; }
 
+/* Ruwe, niet-vertaalbare CPI-data (execute_advanced, STATUS.md sectie 58/59) -
+   bewust GEEN mooie samenvatting, gewoon leesbaar gemaakt: monospace,
+   kleiner lettertype, horizontaal/verticaal scrollbaar zodat een lange
+   instructiedata-hexdump de rest van de kaart niet openrekt. */
+.preview-raw-dump {
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #4b544f;
+  background: #f1f2ee;
+  border: 1px solid #c9cec4;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 12px 0 18px;
+  max-height: 160px;
+  overflow: auto;
+  word-break: break-all;
+}
+.preview-raw-dump strong { color: #a1392c; }
+
 .preview-actions {
   display: flex;
   gap: 10px;

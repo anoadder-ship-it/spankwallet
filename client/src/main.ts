@@ -27,6 +27,7 @@ import {
   buildRemoveAllowedProgramTransaction,
 } from "./policy";
 import { buildExecuteAdvancedTransaction, RemainingAccountSpec } from "./executeAdvanced";
+import { showExecuteAdvancedPreview } from "./executeAdvancedPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -851,7 +852,27 @@ async function runStep9(): Promise<void> {
       return;
     }
     log("SUCCES - execute_advanced weigert correct een niet-toegestaan programma");
-    log("(TOKEN_PROGRAM_ID stond nooit op de allowlist).");
+    log("(TOKEN_PROGRAM_ID stond nooit op de allowlist) - dit is het on-chain-bewijs,");
+    log("los van elke UI-laag.");
+    log("");
+
+    log("9a-2. Dezelfde weigering, maar nu via de nieuwe bevestigingskaart (STATUS.md");
+    log("sectie 58/59) - de allowlist-check gebeurt hier VOORDAT er enige kaart of");
+    log("hold-to-confirm-frictie getoond wordt. Verwacht: kind='not-allowed', GEEN");
+    log("kaart zichtbaar, GEEN navigator.credentials.get()-aanroep.");
+    const preflightResult = await showExecuteAdvancedPreview(
+      connection,
+      lastPdas.walletPda,
+      TOKEN_PROGRAM_ID,
+      [],
+      new Uint8Array(0)
+    );
+    if (preflightResult.kind !== "not-allowed") {
+      log("FOUT: verwachtte kind='not-allowed' voor TOKEN_PROGRAM_ID, kreeg '" + preflightResult.kind + "'.");
+      return;
+    }
+    log("SUCCES - de kaart kortsluit correct vóór elke frictie: geen kaart getoond,");
+    log("geen passkey-prompt, voor een programma dat toch geweigerd zou worden.");
     log("");
 
     log("9b. POSITIEF: execute_advanced tegen System Program (toegevoegd in stap 8) -");
@@ -890,6 +911,32 @@ async function runStep9(): Promise<void> {
       { pubkey: target.publicKey, isWritable: true, isSigner: true },
     ];
 
+    log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59) - deze");
+    log("toont de RUWE accounts/instructiedata met een expliciete waarschuwing dat");
+    log("dit niet naar mensentaal te vertalen is, plus of het doelprogramma op de");
+    log("allowlist staat. Hold-to-confirm, geen passkey-prompt totdat de knop");
+    log("volledig ingedrukt gehouden is.");
+    const cardResult = await showExecuteAdvancedPreview(
+      connection,
+      lastPdas.walletPda,
+      SystemProgram.programId,
+      remainingAccounts,
+      assignIx.data
+    );
+    if (cardResult.kind === "denied") {
+      log("Geweigerd in de bevestigingskaart - execute_advanced NIET aangeroepen, geen");
+      log("passkey-prompt.");
+      return;
+    }
+    if (cardResult.kind === "not-allowed") {
+      log("FOUT: System Program bleek onverwacht niet op de allowlist te staan (stap 8");
+      log("niet uitgevoerd?).");
+      return;
+    }
+    const confirmedCpiProgramId = cardResult.cpiProgramId;
+    log("Bevestigd: aanroep naar " + confirmedCpiProgramId.toBase58() + ".");
+    log("");
+
     log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
     const { transaction: positiveTx } = await buildExecuteAdvancedTransaction(
       connection,
@@ -897,7 +944,7 @@ async function runStep9(): Promise<void> {
       lastPdas.walletPda,
       lastPdas.vaultPda,
       policyPda,
-      SystemProgram.programId,
+      confirmedCpiProgramId,
       remainingAccounts,
       assignIx.data,
       lastPasskeyPublicKey,

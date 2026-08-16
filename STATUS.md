@@ -3835,3 +3835,62 @@ onbekende tussenliggende vertraging.
 uitdaging van ondoorzichtige CPI-data - zie het testplan voor de eis om dat expliciet als
 bewuste grens te documenteren, niet te verbergen), daarna de resterende HOOG/MIDDEN/LAAG-
 instructies in de afgesproken volgorde.
+
+## 60. `execute_advanced`-bevestigingskaart: de moeilijkste van de reeks, geen verzonnen vertaling van ondoorzichtige CPI-data
+
+Derde kaart van UI-fase 1 (sectie 58/59), eerst een technisch plan voorgelegd en
+goedgekeurd. Kernprincipe, letterlijk uit de afspraak: geen samenvatting verzinnen van
+wat een CPI "waarschijnlijk" doet - de instructiedata is en blijft ondoorzichtig. De
+enige twee harde, betrouwbare feiten zijn het doelprogramma-ID en of dat programma
+daadwerkelijk op de wallet-eigen allowlist (`PolicyAccount`) staat - dat wordt de
+headline, geen gok.
+
+**`executeAdvancedPreview.ts` (nieuw)** retourneert een discriminated union
+(`confirmed`/`denied`/`not-allowed`) i.p.v. `Choice | null` - er zijn hier drie
+betekenisvol verschillende uitkomsten, niet twee. De allowlist-check
+(`readPolicyAccount`, al bestaand, hergebruikt) gebeurt VOORDAT er enige kaart of
+hold-to-confirm-frictie getoond wordt: een niet-toegestaan programma zou toch on-chain
+geweigerd worden, dus heeft het geen zin de gebruiker door de frictie te laten gaan voor
+een gegarandeerde afwijzing (het vierde punt uit het plan, letterlijk). Bij toegestaan:
+kaart met `tone: "danger"`/`friction: "hold"` (zelfde primitief als `add_passkey`, geen
+wijziging aan `confirmationCard.ts` nodig - alles past binnen de bestaande
+`headline`/`fields`-vorm), één bewerkbaar veld (doelprogramma-adres, zelfde "wat je ziet
+is wat je ondertekent"-principe als de vorige kaarten - een bewerking wordt opnieuw tegen
+de allowlist getoetst), en een nieuw `.preview-raw-dump`-blok (scrollbare monospace-box)
+met de ruwe accounts (`pubkey (writable=.., signer=..)` per regel) en instructiedata
+(hex), plus een expliciete, eerlijke regel dat dit niet verder te interpreteren is.
+
+**`main.ts` stap 9 uitgebreid, niet vervangen:** het bestaande on-chain-simulatiebewijs
+dat een niet-toegestaan programma (`TOKEN_PROGRAM_ID`) echt geweigerd wordt (9a) blijft
+ongewijzigd staan - dat is de programma-kant, los van elke UI-laag. Nieuw ertussen
+(9a-2): dezelfde weigering nu via de kaart-functie zelf, met een expliciete assertie dat
+`kind === "not-allowed"` teruggegeven wordt. Stap 9b (de echte, toegestane CPI naar
+System Program) gaat nu via de kaart vóór de passkey-ceremonie start.
+
+**Geverifieerd, niet aangenomen - twee aparte lagen, expliciet zo gescheiden:**
+- **Echte devnet-integratie voor het not-allowed-pad:** een vers, nergens geregistreerd
+  `walletPda` (dus gegarandeerd geen `PolicyAccount`) gebruikt - `readPolicyAccount()`
+  geeft daadwerkelijk `null` terug via een echte RPC-aanroep, geen simulatie. Bevestigd:
+  `kind: "not-allowed"`, `cardWasShown: false`.
+- **Kaart-mechaniek voor het allowed-pad, apart getest:** een echte, via hardware-passkey
+  aangemaakte `PolicyAccount` met System Program erop is niet beschikbaar in dit
+  geautomatiseerde testscript (vereist stappen 1/2/8, die een fysieke authenticator
+  nodig hebben). De onderliggende leesfunctie (`readPolicyAccount`) is al elders in dit
+  project bewezen; hier is uitsluitend de NIEUWE kaartlaag zelf getest, met dezelfde
+  opties-opbouw als de echte functie. Bevestigd: headline toont "JA" + het programma-ID,
+  de dump toont de waarschuwing/accounts/instructiedata-koppen correct, live-bewerken
+  naar een niet-toegestaan adres update de headline direct naar "NEE - zou on-chain
+  geweigerd worden" EN laat hold-to-confirm terecht falen met de juiste foutmelding,
+  terugzetten naar het toegestane adres + volledige hold bevestigt correct (exacte
+  waarde terug, kaart sluit). Screenshot genomen ter visuele bevestiging van de
+  rode HOOG-risico-styling en de scrollbare datadump.
+- `tsc --noEmit`: bij elke stap exact de 4 bekende, pre-bestaande fouten, geen nieuwe.
+
+**Eerlijk genoteerd:** de "allowed"-tak van `executeAdvancedPreview.ts` zelf (de
+integratie van `readPolicyAccount()` MET de kaart, in plaats van de kaartlaag apart) is
+dus nog niet end-to-end op een echte devnet-wallet bevestigd - dat gebeurt vanzelf zodra
+stap 9 voor het eerst met een echte hardware-passkey doorlopen wordt. Niet stilzwijgend
+als "volledig getest" gepresenteerd.
+
+**Openstaand:** de resterende HOOG-klasse (`remove_passkey`, `add_allowed_program`),
+dan MIDDEN (`transfer_token`, `add_session_key`), dan LAAG, in de afgesproken volgorde.

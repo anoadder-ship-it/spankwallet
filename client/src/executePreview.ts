@@ -1,4 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
+import { showConfirmationCard } from "./confirmationCard";
 
 export interface ExecutePreviewChoice {
   recipient: PublicKey;
@@ -16,97 +17,62 @@ const LAMPORTS_PER_SOL = 1_000_000_000n;
  * navigator.credentials.get()-aanroep gebeurt hier, dat blijft aan
  * buildExecuteTransaction() in execute.ts.
  *
+ * Sinds fase 1 (sectie 58+): DOM-/gedragslogica ontleend naar het gedeelde
+ * `confirmationCard.ts`-primitief - dit bestand bevat nu alleen nog de
+ * execute-specifieke velden/validatie/headline. Gedrag bewust ONGEWIJZIGD
+ * t.o.v. fase 0 (mechanische refactor).
+ *
  * Bewust NIET meegenomen (zie het ontwerpvoorstel): risicoklassen,
- * geschiedenis-check, identiconbeeld - dat is fase 1. Dit is uitsluitend
- * bedrag + ontvanger in mensentaal, de kleinste testbare stap.
+ * geschiedenis-check, identiconbeeld - dat is fase 1 voor de OVERIGE
+ * instructies (execute zelf blijft MIDDEN-frictie, gelijk aan fase 0).
  */
-export function showExecutePreview(
+export async function showExecutePreview(
   defaultRecipient: PublicKey,
   defaultAmountLamports: bigint
 ): Promise<ExecutePreviewChoice | null> {
-  return new Promise((resolve) => {
-    const previewRoot = document.getElementById("preview-root");
-    if (!previewRoot) {
-      // Geen ankerpunt in de HTML gevonden - val terug op de oude,
-      // ongewijzigde aanname i.p.v. de hele teststap te breken.
-      resolve({ recipient: defaultRecipient, amountLamports: defaultAmountLamports });
-      return;
-    }
-    // Als const opnieuw gebonden zodat TypeScript de null-check ook binnen
-    // de onderstaande, later-uitgevoerde event-listener-closures onthoudt -
-    // die kunnen in theorie ná een eventuele hertoewijzing van `previewRoot`
-    // draaien, dus TS vernauwt het type daar niet automatisch.
-    const root: HTMLElement = previewRoot;
+  const defaultSol = (Number(defaultAmountLamports) / Number(LAMPORTS_PER_SOL)).toString();
 
-    const defaultSol = (Number(defaultAmountLamports) / Number(LAMPORTS_PER_SOL)).toString();
-
-    root.innerHTML = "";
-    const card = document.createElement("div");
-    card.className = "preview-card";
-    card.innerHTML = `
-      <div class="preview-eyebrow">Voorstel om te ondertekenen</div>
-      <div class="preview-headline">
-        Stuur <span class="preview-amount-echo">${defaultSol}</span> SOL<br />
-        naar <span class="preview-recipient-echo">${defaultRecipient.toBase58()}</span>
-      </div>
-      <div class="preview-field">
-        <label class="preview-label" for="preview-amount-input">Bedrag (SOL)</label>
-        <input id="preview-amount-input" class="preview-input" type="text" inputmode="decimal" value="${defaultSol}" autocomplete="off" spellcheck="false" />
-      </div>
-      <div class="preview-field">
-        <label class="preview-label" for="preview-recipient-input">Ontvanger (adres)</label>
-        <input id="preview-recipient-input" class="preview-input" type="text" value="${defaultRecipient.toBase58()}" autocomplete="off" spellcheck="false" />
-      </div>
-      <div class="preview-error" id="preview-error"></div>
-      <div class="preview-actions">
-        <button type="button" class="preview-btn preview-deny" id="preview-deny-btn">Weiger</button>
-        <button type="button" class="preview-btn preview-confirm" id="preview-confirm-btn">Bevestig en teken</button>
-      </div>
-    `;
-    root.appendChild(card);
-
-    const amountInput = card.querySelector<HTMLInputElement>("#preview-amount-input")!;
-    const recipientInput = card.querySelector<HTMLInputElement>("#preview-recipient-input")!;
-    const amountEcho = card.querySelector<HTMLElement>(".preview-amount-echo")!;
-    const recipientEcho = card.querySelector<HTMLElement>(".preview-recipient-echo")!;
-    const errorEl = card.querySelector<HTMLElement>("#preview-error")!;
-
-    function updateEcho() {
-      amountEcho.textContent = amountInput.value.trim() || "0";
-      recipientEcho.textContent = recipientInput.value.trim() || "(geen adres ingevuld)";
-    }
-    amountInput.addEventListener("input", updateEcho);
-    recipientInput.addEventListener("input", updateEcho);
-
-    function cleanup() {
-      root.innerHTML = "";
-    }
-
-    card.querySelector("#preview-deny-btn")!.addEventListener("click", () => {
-      cleanup();
-      resolve(null);
-    });
-
-    card.querySelector("#preview-confirm-btn")!.addEventListener("click", () => {
-      errorEl.textContent = "";
-
+  const result = await showConfirmationCard({
+    eyebrow: "Voorstel om te ondertekenen",
+    headline: (v) => `
+      Stuur <span class="preview-amount-echo">${escapeHtml(v.amount.trim() || "0")}</span> SOL<br />
+      naar <span class="preview-recipient-echo">${escapeHtml(v.recipient.trim() || "(geen adres ingevuld)")}</span>
+    `,
+    fields: [
+      { id: "amount", label: "Bedrag (SOL)", defaultValue: defaultSol },
+      { id: "recipient", label: "Ontvanger (adres)", defaultValue: defaultRecipient.toBase58() },
+    ],
+    validate: (raw) => {
       let recipient: PublicKey;
       try {
-        recipient = new PublicKey(recipientInput.value.trim());
+        recipient = new PublicKey(raw.recipient.trim());
       } catch {
-        errorEl.textContent = "Ongeldig Solana-adres.";
-        return;
+        return { error: "Ongeldig Solana-adres." };
       }
-
-      const solValue = Number(amountInput.value.trim().replace(",", "."));
+      const solValue = Number(raw.amount.trim().replace(",", "."));
       if (!Number.isFinite(solValue) || solValue <= 0) {
-        errorEl.textContent = "Ongeldig bedrag - moet een getal groter dan 0 zijn.";
-        return;
+        return { error: "Ongeldig bedrag - moet een getal groter dan 0 zijn." };
       }
-
-      const amountLamports = BigInt(Math.round(solValue * Number(LAMPORTS_PER_SOL)));
-      cleanup();
-      resolve({ recipient, amountLamports });
-    });
+      return { values: { recipient: recipient.toBase58(), amount: raw.amount } };
+    },
   });
+
+  if (!result) return null;
+
+  const solValue = Number(result.amount.trim().replace(",", "."));
+  return {
+    recipient: new PublicKey(result.recipient),
+    amountLamports: BigInt(Math.round(solValue * Number(LAMPORTS_PER_SOL))),
+  };
+}
+
+// Headline-HTML wordt via innerHTML ingevoegd (voor de live-echo-spans) -
+// gebruikersinvoer (het adresveld) moet dus zelf ge-escaped worden om te
+// voorkomen dat getypte HTML/scripttekens als opmaak geinterpreteerd
+// worden. Bedrag bevat door de validatie alleen cijfers/",."/"-", maar
+// wordt voor de zekerheid hetzelfde behandeld.
+function escapeHtml(value: string): string {
+  const div = document.createElement("div");
+  div.textContent = value;
+  return div.innerHTML;
 }

@@ -1,5 +1,5 @@
 import { PublicKey } from "@solana/web3.js";
-import { showConfirmationCard } from "./confirmationCard";
+import { showConfirmationCard, escapeHtml } from "./confirmationCard";
 
 export interface ExecutePreviewChoice {
   recipient: PublicKey;
@@ -64,15 +64,4 @@ export async function showExecutePreview(
     recipient: new PublicKey(result.recipient),
     amountLamports: BigInt(Math.round(solValue * Number(LAMPORTS_PER_SOL))),
   };
-}
-
-// Headline-HTML wordt via innerHTML ingevoegd (voor de live-echo-spans) -
-// gebruikersinvoer (het adresveld) moet dus zelf ge-escaped worden om te
-// voorkomen dat getypte HTML/scripttekens als opmaak geinterpreteerd
-// worden. Bedrag bevat door de validatie alleen cijfers/",."/"-", maar
-// wordt voor de zekerheid hetzelfde behandeld.
-function escapeHtml(value: string): string {
-  const div = document.createElement("div");
-  div.textContent = value;
-  return div.innerHTML;
 }

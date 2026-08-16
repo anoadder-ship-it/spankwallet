@@ -3773,3 +3773,65 @@ bug.
 
 **Niets meer te doen tot 2026-08-19T16:42:18Z**, dan "4. Uitvoeren" op voorstel #8.
 
+## 59. UI-fase 1 gestart: gedeeld bevestigingskaart-primitief + hold-to-confirm + eerste HOOG-risicoklasse-kaart (add_passkey)
+
+Vervolg op sectie 49/50 (fase 0, alleen `execute`). Eerst een concreet testplan
+voorgelegd en goedgekeurd: de resterende 18 instructies ingedeeld in risicoklassen op
+basis van daadwerkelijke `Accounts`-structs (niet aangenomen) - met twee correcties op
+het oorspronkelijke voorstel: `initiate_recovery` wordt NIET door de eigenaar's passkey
+ondertekend (maar door `backup_authority`) en hoort dus niet in dit kaartensysteem;
+`cancel_recovery` is een VETO/noodrem (beschermend), geen eigenaarswijziging, en hoort
+dus in de LAAG- niet de HOOG-klasse. Volgorde: `add_passkey` eerst (simpelste
+HOOG-instructie, één pubkey-parameter, geen opake CPI-data) om het nieuwe
+hold-to-confirm-mechanisme in isolatie te bewijzen, `execute_advanced` als logische
+vervolgstap.
+
+**Drie stappen, elk apart getoond en goedgekeurd vóór commit (zelfde werkwijze als fase
+0):**
+
+1. **`confirmationCard.ts`**: DOM-/gedragslogica van `executePreview.ts` ontleed naar een
+   gedeeld, instructie-onafhankelijk primitief. Mechanische refactor, met één bewuste,
+   gedocumenteerde afwijking: het ontbrekend-ankerpunt-fallbackpad loste voorheen
+   stilzwijgend op met de defaultwaarden (alsof bevestigd zonder kaart) - nu een
+   expliciete weigering. De refactor introduceerde een `innerHTML`-headline-pad waar de
+   oude code `textContent` gebruikte, dus `escapeHtml()` toegevoegd en interactief
+   geverifieerd (letterlijke HTML-tags in een veld komen er als tekst uit, geen
+   element-injectie) - `client/`'s CSP (`script-src 'self'`, geen `'unsafe-inline'`) was
+   al een tweede laag, maar escaping bij de bron staat er nu los van.
+2. **Hold-to-confirm** toegevoegd aan `confirmationCard.ts` (`friction: "click" | "hold"`)
+   voor de HOOG-risicoklasse: ~1.8s ingedrukt houden (Pointer Events + Enter/Spatie),
+   loslaten/wegslepen/blur annuleert altijd volledig, geen tussenstand telt. Plus een
+   losstaande `tone: "danger"`-optie (rode accentrand/eyebrow) voor risico-onderscheid
+   los van de frictie zelf.
+3. **`addPasskeyPreview.ts`**: eerste concrete HOOG-risicoklasse-kaart. Toont de nieuwe
+   sleutel als bewerkbaar hex-veld (zelfde "wat je ziet is wat je ondertekent"-principe
+   als het bedragveld bij `execute`) met een expliciete "VOLLEDIGE, gelijkwaardige
+   toegang"-waarschuwing. `main.ts` stap 12 aangepast: de kaart gebruikt nu de
+   BEVESTIGDE bytes (niet blind de in stap 11 aangemaakte sleutel) voor zowel de
+   transactie als de eindverificatie - als iemand het veld bewust bewerkt, faalt stap 13+
+   daarna terecht (de browser heeft geen private key voor verzonnen bytes), met een
+   expliciete log-regel die dat verklaart i.p.v. een verwarrende stille mismatch.
+
+**Geverifieerd, niet aangenomen (interactief in Chrome, per stap):** `tsc --noEmit`
+bleef bij elke stap exact de 4 bekende, pre-bestaande fouten (sectie 45), geen nieuwe.
+Hold-to-confirm: vroegtijdig loslaten/wegslepen annuleert (geen resolve, kaart blijft
+open), volledig vasthouden (muis EN toetsenbord) bevestigt. `addPasskeyPreview.ts`:
+ongeldige hex, verkeerde bytelengte, weigeren, en een volledige geslaagde bevestiging
+(exacte bytes terug) stuk voor stuk bevestigd.
+
+**Testmethodologie-les, expliciet genoteerd voor een volgende sessie:** tijdens het
+testen leek de kaart een paar keer onverklaarbaar zichzelf te sluiten. Geen bug -
+achterhaald tot twee aparte, onschuldige oorzaken: (1) Vite's dev-server herlaadt de hele
+pagina zodra een gewatchd bestand wijzigt (bevestigd via exacte tijdstempels in de
+vite-serverlog die samenvielen met eigen schrijfacties naar een tijdelijk testbestand) -
+dus nooit een testbestand herschrijven terwijl er nog een browsertest loopt; (2) een
+langere pauze tussen losse `javascript_exec`-aanroepen liet de tab kennelijk in een
+achtergrond-/inactieve staat belanden die de paginastatus resette. Beide keren opgelost
+door de volledige test (start, interactie, wachten, controleren) binnen ÉÉN
+ononderbroken aanroep te doen i.p.v. verspreid over meerdere losse aanroepen met
+onbekende tussenliggende vertraging.
+
+**Openstaand:** `execute_advanced` (volgende HOOG-risicoklasse-kaart, met de extra
+uitdaging van ondoorzichtige CPI-data - zie het testplan voor de eis om dat expliciet als
+bewuste grens te documenteren, niet te verbergen), daarna de resterende HOOG/MIDDEN/LAAG-
+instructies in de afgesproken volgorde.

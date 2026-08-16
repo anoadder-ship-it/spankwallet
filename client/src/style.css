@@ -52,6 +52,18 @@ button:disabled { background: #333; cursor: not-allowed; color: #777; }
   padding: 22px 24px 24px;
   margin: 24px 0;
   max-width: 420px;
+  border-left: 4px solid transparent;
+}
+
+/* HOOG-risicoklasse (STATUS.md sectie 58/fase 1) - puur visueel, los van
+   de hold-to-confirm-frictie zelf: een kaart die iets aan de toegang tot
+   de wallet verandert, moet er ook zonder te lezen al anders uitzien dan
+   een gewone geld-versturen-kaart. */
+.preview-card-danger {
+  border-left-color: #a1392c;
+}
+.preview-card-danger .preview-eyebrow {
+  color: #a1392c;
 }
 
 .preview-eyebrow {

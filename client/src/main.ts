@@ -12,6 +12,7 @@ import { connectWallet, ConnectedWallet } from "./wallet";
 import { buildInitWalletTransaction, InitWalletPdas } from "./initWallet";
 import { buildExecuteTransaction } from "./execute";
 import { showExecutePreview } from "./executePreview";
+import { showAddPasskeyPreview } from "./addPasskeyPreview";
 import { buildTransferTokenTransaction } from "./transferToken";
 import {
   readWalletAccount,
@@ -1125,6 +1126,18 @@ async function runStep12(): Promise<void> {
   log("geldige sleutel mag een nieuwe sleutel toevoegen.");
   log("");
 
+  log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58, fase 1 -");
+  log("eerste HOOG-risicoklasse-kaart: hold-to-confirm, geen enkele losse klik).");
+  log("Geen passkey-prompt totdat de knop volledig ingedrukt gehouden is.");
+  const choice = await showAddPasskeyPreview(lastPasskeyPublicKey2);
+  if (choice === null) {
+    log("Geweigerd in de bevestigingskaart - add_passkey NIET aangeroepen, geen passkey-prompt.");
+    return;
+  }
+  const newPasskeyBytes = choice.newPasskeyBytes;
+  log("Bevestigd: " + bytesToHex(newPasskeyBytes) + " wordt toegevoegd.");
+  log("");
+
   try {
     log("[PASSKEY 1, OORSPRONKELIJK] navigator.credentials.get() wordt");
     log("aangeroepen - keur de biometrie-/PIN-prompt goed voor de EERSTE,");
@@ -1133,7 +1146,7 @@ async function runStep12(): Promise<void> {
       connection,
       lastWallet.publicKey,
       lastPdas.walletPda,
-      lastPasskeyPublicKey2,
+      newPasskeyBytes,
       lastPasskeyPublicKey,
       lastCredentialId,
       window.location.hostname
@@ -1179,10 +1192,20 @@ async function runStep12(): Promise<void> {
     log("additional_passkeys[0]: " + bytesToHex(passkeys.additionalPasskeys[0]));
     if (
       passkeys.count !== 1 ||
-      bytesToHex(passkeys.additionalPasskeys[0]) !== bytesToHex(lastPasskeyPublicKey2)
+      bytesToHex(passkeys.additionalPasskeys[0]) !== bytesToHex(newPasskeyBytes)
     ) {
-      log("FOUT: PASSKEY 2 staat niet correct in het teruggelezen passkeys-account.");
+      log("FOUT: de op-chain geregistreerde sleutel komt niet overeen met wat in de");
+      log("bevestigingskaart is bevestigd (onverwacht).");
       return;
+    }
+    if (bytesToHex(newPasskeyBytes) !== bytesToHex(lastPasskeyPublicKey2)) {
+      log("");
+      log("LET OP: de bevestigde sleutel is in de kaart BEWERKT t.o.v. de");
+      log("daadwerkelijk in stap 11 aangemaakte PASSKEY 2 - stap 13+ verwacht nog");
+      log("steeds de ORIGINELE PASSKEY 2 en zal falen, want de browser heeft geen");
+      log("private key voor de zojuist bewerkte, verzonnen bytes. Dit is een");
+      log("bewuste testfunctie van de kaart ('wat je ziet is wat je ondertekent'),");
+      log("niet een bug - herstart bij stap 11 om een schone run te doen.");
     }
     log("");
     log("SUCCES - add_passkey heeft het passkeys-account daadwerkelijk aangemaakt");

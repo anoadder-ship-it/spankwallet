@@ -11,6 +11,18 @@
  * passkey-ceremonie starten. Bij "Weiger" of een ongeldige invoer gebeurt
  * er niets on-chain.
  */
+// Headline-HTML wordt via innerHTML ingevoegd (voor live-echo-spans) -
+// aanroepers die gebruikersinvoer in de headline echoën MOETEN die eerst
+// hierdoorheen halen, anders is getypte HTML/scripttekens een
+// opmaak-injectiegat (zie STATUS.md sectie 58 - eerder gevonden en
+// gefixt in executePreview.ts, hier gedeeld zodat elke volgende kaart
+// hem niet zelf hoeft te herimplementeren of te vergeten).
+export function escapeHtml(value: string): string {
+  const div = document.createElement("div");
+  div.textContent = value;
+  return div.innerHTML;
+}
+
 export interface ConfirmationCardField {
   id: string;
   label: string;
@@ -43,6 +55,11 @@ export interface ShowConfirmationCardOptions {
    * zonder enig effect, geen halve/gedeeltelijke bevestiging mogelijk. */
   friction?: "click" | "hold";
   holdDurationMs?: number;
+  /** "default" of "danger" - puur visueel (STATUS.md sectie 58/fase 1's
+   * risicoklassen): "danger" geeft de kaart een rode accentrand zodat een
+   * HOOG-risico-actie er ook op het eerste gezicht anders uitziet dan een
+   * gewone MIDDEN/LAAG-kaart, los van de hold-vs-click-frictie zelf. */
+  tone?: "default" | "danger";
 }
 
 const DEFAULT_HOLD_DURATION_MS = 1800;
@@ -64,7 +81,7 @@ export function showConfirmationCard(
 
     root.innerHTML = "";
     const card = document.createElement("div");
-    card.className = "preview-card";
+    card.className = options.tone === "danger" ? "preview-card preview-card-danger" : "preview-card";
 
     const fieldsHtml = options.fields
       .map(

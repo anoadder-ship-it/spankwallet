@@ -35,7 +35,17 @@ export interface ShowConfirmationCardOptions {
   validate: (rawValues: Record<string, string>) => ConfirmationCardValidateResult;
   denyLabel?: string;
   confirmLabel?: string;
+  /** "click" (default, fase 0-gedrag) of "hold" - voor HOOG-risicoklasse-
+   * acties (STATUS.md sectie 58/fase 1: sleutelbeheer, allowlist-uitbreiding,
+   * execute_advanced) waar een enkele per-ongeluk-klik niet de bedoelde
+   * drempel is. Bij "hold" moet de knop ~holdDurationMs ingedrukt gehouden
+   * worden (muis, touch, of Enter/Spatie) - loslaten vóór die tijd annuleert
+   * zonder enig effect, geen halve/gedeeltelijke bevestiging mogelijk. */
+  friction?: "click" | "hold";
+  holdDurationMs?: number;
 }
+
+const DEFAULT_HOLD_DURATION_MS = 1800;
 
 export function showConfirmationCard(
   options: ShowConfirmationCardOptions
@@ -66,6 +76,14 @@ export function showConfirmationCard(
       )
       .join("");
 
+    const friction = options.friction ?? "click";
+    const holdDurationMs = options.holdDurationMs ?? DEFAULT_HOLD_DURATION_MS;
+    const confirmBtnClass = friction === "hold" ? "preview-btn preview-confirm preview-confirm-hold" : "preview-btn preview-confirm";
+    const confirmBtnInner =
+      friction === "hold"
+        ? `<span class="preview-hold-fill" id="preview-hold-fill"></span><span class="preview-hold-label">${options.confirmLabel ?? "Ingedrukt houden om te bevestigen"}</span>`
+        : (options.confirmLabel ?? "Bevestig en teken");
+
     card.innerHTML = `
       <div class="preview-eyebrow">${options.eyebrow}</div>
       <div class="preview-headline" id="preview-headline"></div>
@@ -73,7 +91,7 @@ export function showConfirmationCard(
       <div class="preview-error" id="preview-error"></div>
       <div class="preview-actions">
         <button type="button" class="preview-btn preview-deny" id="preview-deny-btn">${options.denyLabel ?? "Weiger"}</button>
-        <button type="button" class="preview-btn preview-confirm" id="preview-confirm-btn">${options.confirmLabel ?? "Bevestig en teken"}</button>
+        <button type="button" class="${confirmBtnClass}" id="preview-confirm-btn">${confirmBtnInner}</button>
       </div>
     `;
     root.appendChild(card);
@@ -107,7 +125,7 @@ export function showConfirmationCard(
       resolve(null);
     });
 
-    card.querySelector("#preview-confirm-btn")!.addEventListener("click", () => {
+    function attemptConfirm() {
       errorEl.textContent = "";
       const result = options.validate(currentRawValues());
       if ("error" in result) {
@@ -116,6 +134,62 @@ export function showConfirmationCard(
       }
       cleanup();
       resolve(result.values);
-    });
+    }
+
+    const confirmBtn = card.querySelector<HTMLButtonElement>("#preview-confirm-btn")!;
+
+    if (friction === "click") {
+      confirmBtn.addEventListener("click", attemptConfirm);
+    } else {
+      // Hold-to-confirm: geen enkele losse klik/toets mag ooit bevestigen -
+      // alleen het VOLLEDIG uitzitten van holdDurationMs telt. Loslaten,
+      // de cursor wegslepen, of de knop verliezen (blur) annuleert altijd
+      // zonder gedeeltelijk effect - er is geen tussenstap die per ongeluk
+      // als bevestiging geinterpreteerd kan worden.
+      const fillEl = card.querySelector<HTMLElement>("#preview-hold-fill")!;
+      let holdTimer: number | null = null;
+      let holdStartedAt = 0;
+
+      function startHold() {
+        if (holdTimer !== null) return; // al bezig - geen dubbele timer bij herhaalde keydown-repeats
+        holdStartedAt = Date.now();
+        fillEl.style.transitionDuration = holdDurationMs + "ms";
+        // Force reflow zodat de browser de 0%-startstaat echt toepast
+        // voordat de transitie naar 100% begint (anders wordt de eerste
+        // aanroep soms stilzwijgend samengevoegd en springt de vulling
+        // meteen naar 100% i.p.v. te animeren).
+        void fillEl.offsetWidth;
+        fillEl.style.width = "100%";
+        holdTimer = window.setTimeout(() => {
+          holdTimer = null;
+          attemptConfirm();
+        }, holdDurationMs);
+      }
+
+      function cancelHold() {
+        if (holdTimer === null && Date.now() - holdStartedAt > holdDurationMs) return;
+        if (holdTimer !== null) {
+          window.clearTimeout(holdTimer);
+          holdTimer = null;
+        }
+        fillEl.style.transitionDuration = "150ms";
+        fillEl.style.width = "0%";
+      }
+
+      confirmBtn.addEventListener("pointerdown", startHold);
+      confirmBtn.addEventListener("pointerup", cancelHold);
+      confirmBtn.addEventListener("pointerleave", cancelHold);
+      confirmBtn.addEventListener("pointercancel", cancelHold);
+      confirmBtn.addEventListener("blur", cancelHold);
+      confirmBtn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault(); // voorkomt dat Spatie ALSNOG een click-event triggert na keyup
+          startHold();
+        }
+      });
+      confirmBtn.addEventListener("keyup", (e) => {
+        if (e.key === "Enter" || e.key === " ") cancelHold();
+      });
+    }
   });
 }

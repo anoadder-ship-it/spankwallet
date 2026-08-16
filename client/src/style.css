@@ -146,3 +146,28 @@ button:disabled { background: #333; cursor: not-allowed; color: #777; }
   color: #fbfaf7;
 }
 .preview-confirm:hover { background: #33403a; }
+
+/* Hold-to-confirm (HOOG-risicoklasse, STATUS.md sectie 58/fase 1) - een
+   vulling die van 0% naar 100% breedte animeert zolang de knop ingedrukt
+   wordt gehouden, achter de labeltekst. Loslaten voor 100% annuleert
+   (confirmationCard.ts zet de breedte dan met een korte transitie terug
+   naar 0%) - er bestaat geen tussenstand die als bevestiging telt. */
+.preview-confirm-hold {
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.preview-hold-fill {
+  position: absolute;
+  inset: 0;
+  width: 0%;
+  background: #93602a;
+  transition-property: width;
+  transition-timing-function: linear;
+  z-index: 0;
+}
+.preview-hold-label {
+  position: relative;
+  z-index: 1;
+}

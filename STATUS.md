@@ -3682,3 +3682,94 @@ hiermee niet alleen theoretisch gesloten, maar praktisch bewezen te werken.
 **Hiermee is de migratie-en-canary-saga (secties 41-57) afgesloten.** Openstaand voor een
 volgende sessie: sectie 50's fase 1 van de UI-preview (risicoklassen + resterende
 instructies), en de onafhankelijke spend-limits-deploy (sectie 53).
+
+## 58. Spend-limits-deploy, fase 0: buffer geschreven, authority overgedragen, voorstel klaar om ingediend te worden
+
+Vervolgstap op sectie 53 - de spend-limits-code end-to-end bewijzen op devnet vereist eerst
+een deploy, en sinds de multisig-migratie gaat elke deploy nu via dezelfde
+propose/approve/timelock/execute-flow als de canary-upgrade (secties 42-57), niet meer via
+een directe `solana program deploy`.
+
+**Empirisch bevestigd vóór de start (reproduceerbare-build-methode, zelfde als sectie 57):**
+een verse build van `HEAD` (`819465a`, met spend-limits) is 453.240 bytes en kwam NIET
+overeen met de live on-chain bytecode - spend-limits stond dus nog niet op devnet.
+453.240 bytes past ruim binnen de bestaande ProgramData-allocatie (754.848 bytes, sectie
+42) - geen `solana program extend` nodig. Programma-ID-byte-offset vooraf gecontroleerd
+(zelfde sanity-check als secties 39/41): exact 1 treffer, offset 6256.
+
+**`wallet-signer.html` bijgewerkt (diff apart getoond en goedgekeurd vóór verdere actie,
+gegeven dit een security-kritiek bestand is):** de `BUFFER`-constante wijst nu naar het
+nieuwe adres, `vaultTxIsCanaryUpgrade()` hernoemd naar `vaultTxMatchesConfiguredBuffer()`
+(functioneel ongewijzigd - de canary-specifieke naam was misleidend geworden nu de pagina
+voor een tweede, andere upgrade hergebruikt wordt), alle "canary-buffer"-tekst in
+UI/logs/foutmeldingen/memo generiek gemaakt. `node --check`: geen syntaxfouten.
+
+**Buffer geschreven en authority overgedragen, on-chain geverifieerd:**
+- Buffer: `BDnDJLueS9Xfo6n2VJBarzvdqUtPBRe2SyzoWYJ4LuE2`, geschreven met
+  `solana program write-buffer` (lokale `~/.config/solana/id.json`-sleutel, dezelfde als
+  bij de canary-buffer in sectie 42/54).
+  `solana program dump` van de geschreven buffer teruggehaald en `sha256sum`/`cmp`
+  vergeleken met de lokale build: **identiek**
+  (`2111a26f1408c6afe69606dc6ddaf4fe5132c20271fbc05f647a7a66ad515b2c`).
+- `solana program set-buffer-authority` naar de vault-PDA
+  (`89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`) - bevestigd via een onafhankelijke
+  `solana program show --buffers --buffer-authority`-query: exact deze ene buffer, juiste
+  authority.
+- Terzijde opgemerkt: `solana program show --buffers` zonder expliciete
+  `--buffer-authority`-filter gebruikt stilzwijgend de DEFAULT CLI-config-sleutel
+  (`heartbeat.json`, een ongerelateerd project) - leverde in eerste instantie 7 volledig
+  ongerelateerde buffers op. Geen bug, wel een makkelijk te missen valkuil: altijd expliciet
+  `--buffer-authority`/`--keypair` meegeven, nooit op de config-default vertrouwen (zelfde
+  les als de al-bekende gotcha over CLI-config-signers, STATUS.md "Kritieke gotchas").
+- Server herstart, `PAGE_BUILD`-marker en het nieuwe buffer-adres in de live-geserveerde
+  pagina bevestigd.
+
+**Openstaand, expliciet NIET door mij te doen:** het daadwerkelijk indienen van het
+voorstel (knop "2. Voorstel indienen") vereist een echte handtekening van een
+multisig-lid via diens eigen wallet-extensie - dezelfde grens als de hele canary-saga
+(geen geëxporteerde sleutels, sectie 41/43). Eerstvolgende stap voor de gebruiker: via
+`https://192.168.178.205:8766/wallet-signer.html` verbinden en het voorstel indienen,
+daarna de gebruikelijke 2-van-3-goedkeuring en 72u-timelock.
+
+**Voorstel ingediend, met een client-side confirmatie-timeout die eerst uitgezocht is
+(niet aangenomen dat "timeout" gelijkstaat aan "mislukt"):** de eerste indienpoging gaf
+`TransactionExpiredTimeoutError` in de browser. `solana confirm -v` op de gerapporteerde
+signature bevestigde direct: `Status: Ok`, `Finalized`, log toont
+`"Instruction: VaultTransactionCreate"` -> `"transaction index: 8"` ->
+`"Instruction: ProposalCreate"`, beide geslaagd - puur een client-side RPC-confirmatie-
+timeout (zelfde patroon als sectie 43), geen on-chain-afwijzing.
+
+Voorstel #8: `Active`, 1/2 goedgekeurd (auto-approval van de aanmaker, hoofd-pc). Er bleek
+ook een voorstel #9 te bestaan (`Active`, 0/2, aangemaakt 7 minuten na #8, zelfde
+aanmaker) - eerst onderzocht of dit een nieuwe RPC-verversingsrace in
+`findCanonicalProposal()`'s eigen check was (de blokkade uit sectie 55 had dit moeten
+tegenhouden). Navraag bij de gebruiker bevestigde: geen bug - de blokkade werkte precies
+zoals bedoeld (toonde de waarschuwing over het al-bestaande #8), en de gebruiker heeft
+bewust het bevestigingsvakje aangevinkt om #9 alsnog aan te maken. #9 is dus een bekende,
+onschadelijke duplicaat (zelfde categorie als #1-4/#6/#7 uit sectie 43/54) - wordt vanzelf
+onuitvoerbaar zodra #8 uitgevoerd wordt. `findCanonicalProposal()` bevestigd correct
+gericht op #8 (laagste index bij gelijke status, en toevallig ook de verder-gevorderde:
+1/2 i.p.v. 0/2).
+
+**Eerstvolgende stap:** de tweede (van de vereiste 2-van-3) goedkeuring op voorstel #8,
+via een ANDER multisig-lid dan de hoofd-pc (telefoon of Windows-pc), daarna de 72u-
+timelock.
+
+**Tweede goedkeuring binnen - 2-van-2 bereikt, on-chain geverifieerd (niet uit de
+pagina-log aangenomen).** Goedgekeurd vanaf de telefoon (Solflare-deep-link werkte dit
+keer wel - het eerdere Play Store-probleem trad niet op). Rechtstreeks bevraagd:
+```
+#8 status: "Approved"
+#8 approved by: [3zZcLwTX (hoofd-pc), CP2fg9zg (telefoon)]
+```
+De deeplink-resume gaf client-side opnieuw een `TransactionExpiredTimeoutError` - zelfde,
+inmiddels bekende patroon (server-side/on-chain wel geslaagd, signature
+`26o1VxDfjfJd6qT9x2B67StvmkfFeXkajqdTjjFparu9UmP67bkcZD27JXmk5CNNCyZrZDCP3Xa3hNP975AfFHCQ`,
+16:42:18Z). Timelock onafhankelijk herberekend uit de ruwe on-chain-timestamp met de
+sectie-56-fix: `approved-at 2026-08-16T16:42:18Z` -> `executable-at 2026-08-19T16:42:18Z`
+- exact gelijk aan wat de pagina op de telefoon toonde, en een normale datum (geen
+jaar-5171-terugval). De weigering van knop 4 vóór die datum was dus correct gedrag, geen
+bug.
+
+**Niets meer te doen tot 2026-08-19T16:42:18Z**, dan "4. Uitvoeren" op voorstel #8.
+

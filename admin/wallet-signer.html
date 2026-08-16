@@ -42,7 +42,8 @@
     <p>
       Programma: <code>9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9</code><br />
       Multisig: <code>A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp</code><br />
-      Buffer (canary-wijziging): <code>7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh</code>
+      Huidige voorgestelde upgrade: <strong>spend-limits voor session keys (STATUS.md sectie 53)</strong><br />
+      Buffer: <code>BDnDJLueS9Xfo6n2VJBarzvdqUtPBRe2SyzoWYJ4LuE2</code>
     </p>
     <button id="connect-btn">1. Wallet verbinden (desktop-extensie, of Mobile Wallet Adapter op Android)</button>
     <button id="connect-solflare-deeplink-btn">1b. Verbinden via Solflare (mobiel, echte deep-link naar de app)</button>
@@ -50,7 +51,7 @@
     <label style="display: block; margin: 0.3rem 0; font-size: 0.9rem;">
       <input type="checkbox" id="force-new-proposal-checkbox" />
       Ik weet dat er hierboven/in de log al een open (Active/Approved) voorstel voor deze
-      canary-buffer staat, en wil BEWUST toch een extra, apart voorstel aanmaken.
+      buffer staat, en wil BEWUST toch een extra, apart voorstel aanmaken.
     </label>
     <button id="approve-btn" disabled>3. Voorstel goedkeuren</button>
     <button id="squads-execute-btn" disabled>4. Uitvoeren (pas mogelijk na de 72u-timelock)</button>
@@ -79,7 +80,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-08-16T15:15:00Z-fix-BN-timestamp-radix-bug-jaar-5171";
+      var PAGE_BUILD = "2026-08-16T18:15:00Z-buffer-herconfigureerd-voor-spend-limits-deploy-sectie-53";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -198,7 +199,13 @@
       const SPANKWALLET_PROGRAM_DATA = new PublicKey("5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq");
       const MULTISIG_PDA = new PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
       const VAULT_PDA = new PublicKey("89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw");
-      const BUFFER = new PublicKey("7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh");
+      // Wijzigt bij elke nieuwe voorgestelde upgrade (STATUS.md, admin/README.md
+      // stap 1) - momenteel: spend-limits voor session keys (sectie 53). De vorige
+      // waarde (canary-buffer, sectie 42/54, inmiddels uitgevoerd EN geconsumeerd/
+      // gesloten - zie sectie 57) is bewust NIET hergebruikt of als fallback
+      // behouden: een oude, niet meer bestaande buffer laten matchen zou een
+      // voorstel voor DEZE upgrade nooit als canoniek herkennen.
+      const BUFFER = new PublicKey("BDnDJLueS9Xfo6n2VJBarzvdqUtPBRe2SyzoWYJ4LuE2");
       const BPF_LOADER_UPGRADEABLE = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
 
       const connection = new Connection(DEVNET_URL, "confirmed");
@@ -450,21 +457,25 @@
       //
       // Nieuwe, harde regel: nooit meer blind de hoogste index gebruiken.
       // findCanonicalProposal() doorzoekt de bestaande voorstellen voor
-      // DEZE canary-buffer op een niet-afgesloten status (Active/Approved)
+      // DE HUIDIGE BUFFER (zie de BUFFER-constante hierboven - wijzigt per
+      // voorgestelde upgrade) op een niet-afgesloten status (Active/Approved)
       // en kiest daaruit het verst-gevorderde (Approved > Active; bij
       // gelijke status de laagst-genummerde, dus het eerst aangemaakte).
       // Alle knoppen (2/3/4) gebruiken voortaan dit resultaat i.p.v. de
       // rauwe multisig.transactionIndex.
       const MAX_PROPOSAL_SCAN = 50;
 
-      // Herkent een vaultTransaction als "de canary-upgrade" alleen als hij
-      // daadwerkelijk een BPF_LOADER_UPGRADEABLE Upgrade-instructie (opcode
-      // u32-LE 3) bevat die BUFFER als account gebruikt - niet zomaar "BUFFER
-      // komt ergens in accountKeys voor" (te los: een toekomstig, ongerelateerd
-      // voorstel dat toevallig hetzelfde account aanraakt zou anders ook
-      // meetellen). Structuur (programIdIndex/accountIndexes/data) geverifieerd
-      // tegen de daadwerkelijke on-chain data van voorstel #5, niet aangenomen.
-      function vaultTxIsCanaryUpgrade(vtx) {
+      // Herkent een vaultTransaction als "de huidige voorgestelde upgrade"
+      // alleen als hij daadwerkelijk een BPF_LOADER_UPGRADEABLE
+      // Upgrade-instructie (opcode u32-LE 3) bevat die BUFFER als account
+      // gebruikt - niet zomaar "BUFFER komt ergens in accountKeys voor" (te
+      // los: een ongerelateerd voorstel dat toevallig hetzelfde account
+      // aanraakt zou anders ook meetellen). Structuur (programIdIndex/
+      // accountIndexes/data) oorspronkelijk geverifieerd tegen de
+      // daadwerkelijke on-chain data van voorstel #5 (sectie 55/56), niet
+      // aangenomen - dezelfde BPF-loader-instructievorm geldt voor elke
+      // upgrade, ongeacht welke buffer.
+      function vaultTxMatchesConfiguredBuffer(vtx) {
         return vtx.message.instructions.some((ix) => {
           const programId = vtx.message.accountKeys[ix.programIdIndex];
           if (!programId || !programId.equals(BPF_LOADER_UPGRADEABLE)) return false;
@@ -511,7 +522,7 @@
           const [vaultTxPda] = multisig.getTransactionPda({ multisigPda: MULTISIG_PDA, index: transactionIndex });
           try {
             const vtx = await multisig.accounts.VaultTransaction.fromAccountAddress(connection, vaultTxPda);
-            if (!vaultTxIsCanaryUpgrade(vtx)) continue; // ander voorstel, niet deze canary-upgrade
+            if (!vaultTxMatchesConfiguredBuffer(vtx)) continue; // ander voorstel, niet deze upgrade
           } catch (e) {
             if (!isAccountNotFoundError(e)) fetchErrors++;
             continue;
@@ -555,14 +566,14 @@
           if (candidates.length > 1) {
             log(
               "[waarschuwing] " + candidates.length + " open (niet-afgesloten) voorstellen gevonden voor deze " +
-                "canary-buffer: #" + candidates.map((c) => c.transactionIndex + " (" + c.kind + ")").join(", #") +
+                "buffer: #" + candidates.map((c) => c.transactionIndex + " (" + c.kind + ")").join(", #") +
                 ". Dit zijn vermoedelijk per ongeluk aangemaakte duplicaten (zie STATUS.md).",
               "log-error"
             );
           }
 
           if (!canonical) {
-            log("[info] Geen open voorstel gevonden voor deze canary-buffer. Knop 2 zou een NIEUW voorstel aanmaken.");
+            log("[info] Geen open voorstel gevonden voor deze buffer. Knop 2 zou een NIEUW voorstel aanmaken.");
             return;
           }
 
@@ -678,7 +689,7 @@
           vaultIndex: 0,
           ephemeralSigners: 0,
           transactionMessage: innerMessage,
-          memo: "SpankWallet canary-upgrade (STATUS.md sectie 42)",
+          memo: "SpankWallet spend-limits-deploy (STATUS.md sectie 53)",
         });
 
         const proposalIx = multisig.instructions.proposalCreate({
@@ -773,7 +784,7 @@
         const { canonical } = await findCanonicalProposal(multisigInfo);
         if (!canonical) {
           throw new Error(
-            "Geen open voorstel gevonden voor deze canary-buffer om goed te keuren. " +
+            "Geen open voorstel gevonden voor deze buffer om goed te keuren. " +
               "Klik eerst op '2. Voorstel indienen' om er een aan te maken."
           );
         }
@@ -813,7 +824,7 @@
         const { canonical } = await findCanonicalProposal(multisigInfo);
         if (!canonical) {
           throw new Error(
-            "Geen open voorstel gevonden voor deze canary-buffer om uit te voeren. " +
+            "Geen open voorstel gevonden voor deze buffer om uit te voeren. " +
               "Klik eerst op '2. Voorstel indienen' om er een aan te maken."
           );
         }
@@ -993,7 +1004,7 @@
           }
           if (canonical && !checkboxWasChecked) {
             throw new Error(
-              "Er bestaat al een open voorstel #" + canonical.transactionIndex + " voor deze canary-buffer " +
+              "Er bestaat al een open voorstel #" + canonical.transactionIndex + " voor deze buffer " +
                 "(status: " + JSON.stringify(canonical.proposal.status) + ", goedgekeurd door: [" +
                 canonical.proposal.approved.map((k) => k.toBase58()).join(", ") + "]" +
                 (candidates.length > 1 ? "; totaal " + candidates.length + " open duplicaten gevonden" : "") +

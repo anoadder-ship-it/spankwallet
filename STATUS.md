@@ -3894,3 +3894,61 @@ als "volledig getest" gepresenteerd.
 
 **Openstaand:** de resterende HOOG-klasse (`remove_passkey`, `add_allowed_program`),
 dan MIDDEN (`transfer_token`, `add_session_key`), dan LAAG, in de afgesproken volgorde.
+
+## 61. `remove_passkey`-bevestigingskaart: gemengd risicoprofiel (veilige richting, maar de verkeerde intrekken is moeilijk terug te draaien) - en een echte, natuurlijk ontstane last-passkey-toestand als bewijs
+
+Vierde kaart van UI-fase 1 (sectie 58/59/60), technisch plan eerst voorgelegd en
+goedgekeurd. `instructions.rs::remove_passkey` on-chain nagelezen (niet aangenomen):
+`total_before = (!owner_passkey_revoked) + count`, weigert bij `total_before <= 1`
+(`CannotRemoveLastPasskey`) of als de target niet exact `owner_passkey` (actief) of een
+van de `additional_passkeys` is (`PasskeyNotRegistered`) - beide vooraf, zonder
+simulatie, te bepalen.
+
+**`client/src/hex.ts` (nieuw):** `bytesToHex`/`hexToBytes` ontleed uit `addPasskeyPreview.ts`
+- de derde plek die dezelfde logica nodig had, zelfde behandeling als `escapeHtml`
+eerder. `addPasskeyPreview.ts` bijgewerkt om dit te hergebruiken (mechanisch, geen
+gedragswijziging).
+
+**`removePasskeyPreview.ts` (nieuw)**: retourneert `confirmed`/`denied`/`would-fail`
+(met `reason: "last-passkey" | "target-not-registered"`) - zelfde discriminated-union-
+patroon als `executeAdvancedPreview.ts`. De check gebeurt VOORDAT er enige kaart/
+hold-to-confirm-frictie getoond wordt (`readPasskeysAccount()`, al bestaand, hergebruikt,
+plus de door de aanroeper meegegeven huidige `owner_passkey`-bytes - er is geen losse
+on-chain-leesfunctie voor `owner_passkey` zelf, dat staat in `WalletAccount`, niet
+`PasskeysAccount`). Bij een geldige, niet-laatste sleutel: kaart met `tone:"danger"`/
+`friction:"hold"` (geen wijziging aan `confirmationCard.ts` nodig), headline toont de
+rauwe hex (geen labelbron in dit project) + **"Blijft over na deze actie: N van de M
+huidige geldige sleutel(s)"**, één bewerkbaar hex-veld (zelfde "wat je ziet is wat je
+ondertekent"-principe, herbevestigd tegen de al-opgehaalde sleutel-set bij bevestigen).
+
+**`main.ts` stap 14/15 uitgebreid, niet vervangen:** stap 14 (PASSKEY 1 intrekken,
+PASSKEY 2 blijft over) krijgt de kaart ervoor. Stap 15 gesplitst in 15a (bestaand
+on-chain-simulatiebewijs, ongewijzigd) en een nieuw 15b: dezelfde weigering via de
+kaart-functie, tegen de ECHTE, natuurlijk ontstane laatste-sleutel-toestand van diezelfde
+testrun (na stap 14 is PASSKEY 2 daadwerkelijk de enige geldige sleutel) - een sterker
+bewijs dan bij `execute_advanced`, waar geen echte devnet-wallet voor het "allowed"-pad
+beschikbaar was; hier wél voor het "would-fail"-pad.
+
+**Geverifieerd, niet aangenomen, in twee lagen:**
+- Echte devnet-RPC: een vers, ongeregistreerd `walletPda` (dus gegarandeerd geen
+  `PasskeysAccount`) -> `kind:"would-fail"`/`reason:"target-not-registered"`, geen kaart.
+- Pure classificatielogica (exact dezelfde code als de echte functie, gevoed met
+  synthetische `PasskeysAccount`-vormige data - een echte `total_before=1`-toestand
+  vereist de hardware-passkey-flow stap 1/2/11/12/14, niet beschikbaar in een
+  geautomatiseerd testscript): beide last-passkey-varianten (eigenaar als laatste,
+  extra sleutel als laatste), not-registered, en het toegestane pad stuk voor stuk
+  bevestigd correct.
+- Kaartmechaniek (allowed-pad): headline toont "JA ... blijft over: 1 van de 2" correct,
+  live-bewerken naar een niet-geregistreerde sleutel update de headline naar "NEE" EN
+  laat hold-to-confirm terecht falen met de juiste foutmelding, terugzetten + volledige
+  hold bevestigt correct (exacte waarde terug, kaart sluit). Screenshot genomen ter
+  visuele bevestiging van de rode HOOG-risico-styling.
+- `tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten, geen nieuwe.
+
+**Eerlijk genoteerd:** zelfde beperking als sectie 60 - de volledige integratie
+(`readPasskeysAccount()` MET de kaart, tegen een echte hardware-passkey-wallet) is nog
+niet end-to-end bevestigd; dat gebeurt vanzelf zodra stap 14/15 voor het eerst met echte
+hardware doorlopen worden. De classificatielogica zelf is wel volledig, apart bewezen.
+
+**Openstaand:** `add_allowed_program` (laatste HOOG-klasse-kaart), dan MIDDEN
+(`transfer_token`, `add_session_key`), dan LAAG, in de afgesproken volgorde.

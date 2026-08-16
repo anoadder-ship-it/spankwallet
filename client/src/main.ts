@@ -28,6 +28,7 @@ import {
 } from "./policy";
 import { buildExecuteAdvancedTransaction, RemainingAccountSpec } from "./executeAdvanced";
 import { showExecuteAdvancedPreview } from "./executeAdvancedPreview";
+import { showRemovePasskeyPreview } from "./removePasskeyPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -1358,6 +1359,29 @@ async function runStep14(): Promise<void> {
   log("bereikbaar blijft (via PASSKEY 2).");
   log("");
 
+  log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59) -");
+  log("hold-to-confirm, geen passkey-prompt totdat de knop volledig ingedrukt");
+  log("gehouden is.");
+  const removeChoice = await showRemovePasskeyPreview(
+    connection,
+    lastPdas.walletPda,
+    lastPasskeyPublicKey,
+    lastPasskeyPublicKey
+  );
+  if (removeChoice.kind === "denied") {
+    log("Geweigerd in de bevestigingskaart - remove_passkey NIET aangeroepen, geen");
+    log("passkey-prompt.");
+    return;
+  }
+  if (removeChoice.kind === "would-fail") {
+    log("FOUT: onverwacht 'would-fail' (" + removeChoice.reason + ") voor PASSKEY 1 -");
+    log("die zou op dit punt nog gewoon intrekbaar moeten zijn.");
+    return;
+  }
+  const targetToRemove = removeChoice.targetPasskeyBytes;
+  log("Bevestigd: " + bytesToHex(targetToRemove) + " wordt ingetrokken.");
+  log("");
+
   try {
     log("[PASSKEY 2] navigator.credentials.get() wordt aangeroepen - keur de");
     log("biometrie-/PIN-prompt goed voor de TWEEDE passkey.");
@@ -1365,7 +1389,7 @@ async function runStep14(): Promise<void> {
       connection,
       lastWallet.publicKey,
       lastPdas.walletPda,
-      lastPasskeyPublicKey,
+      targetToRemove,
       lastPasskeyPublicKey2,
       lastCredentialId2,
       window.location.hostname
@@ -1421,15 +1445,18 @@ async function runStep14(): Promise<void> {
 }
 
 async function runStep15(): Promise<void> {
-  if (!lastPdas || !lastWallet || !lastPasskeyPublicKey2 || !lastCredentialId2) {
+  if (!lastPdas || !lastWallet || !lastPasskeyPublicKey || !lastPasskeyPublicKey2 || !lastCredentialId2) {
     log("Voer eerst stap 1, 2 en 11-14 uit.");
     return;
   }
   log("Stap 15: LOCKOUT-BESCHERMING - proberen PASSKEY 2 te verwijderen terwijl");
   log("het de ENIGE nog geldige sleutel is. Dit MOET geweigerd worden");
   log("(CannotRemoveLastPasskey) - anders zou de wallet permanent onbereikbaar");
-  log("worden. Alleen simuleren (niet versturen) - we willen de weigering");
-  log("aantonen, geen fee betalen voor een transactie die toch niets gaat doen.");
+  log("worden.");
+  log("");
+  log("15a. Alleen simuleren (niet versturen) - we willen de weigering aantonen,");
+  log("geen fee betalen voor een transactie die toch niets gaat doen. Dit is het");
+  log("on-chain-bewijs, los van elke UI-laag.");
   log("");
 
   try {
@@ -1463,6 +1490,25 @@ async function runStep15(): Promise<void> {
 
     log("SUCCES - de lockout-bescherming werkt: PASSKEY 2 (de laatste geldige");
     log("sleutel) kon NIET verwijderd worden.");
+    log("");
+
+    log("15b. Dezelfde weigering, maar nu via de nieuwe bevestigingskaart");
+    log("(STATUS.md sectie 58/59) - tegen deze ECHTE, natuurlijk ontstane");
+    log("laatste-sleutel-toestand van deze testrun (na stap 14 is PASSKEY 2");
+    log("daadwerkelijk de enige geldige sleutel). Verwacht: kind='would-fail'");
+    log("met reason='last-passkey', GEEN kaart, GEEN passkey-prompt.");
+    const lockoutPreflight = await showRemovePasskeyPreview(
+      connection,
+      lastPdas.walletPda,
+      lastPasskeyPublicKey,
+      lastPasskeyPublicKey2
+    );
+    if (lockoutPreflight.kind !== "would-fail" || lockoutPreflight.reason !== "last-passkey") {
+      log("FOUT: verwachtte kind='would-fail'/reason='last-passkey', kreeg " + JSON.stringify(lockoutPreflight) + ".");
+      return;
+    }
+    log("SUCCES - de kaart kortsluit correct vóór elke frictie: geen kaart getoond,");
+    log("geen passkey-prompt, voor een verwijdering die toch geweigerd zou worden.");
     log("");
     log("Het volledige multi-passkey-model is nu end-to-end bewezen op devnet:");
     log("een tweede sleutel toevoegen (stap 11-12), zelfstandige zeggenschap van");

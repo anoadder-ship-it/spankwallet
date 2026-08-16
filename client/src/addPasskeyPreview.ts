@@ -1,27 +1,10 @@
 import { showConfirmationCard, escapeHtml } from "./confirmationCard";
+import { bytesToHex, hexToBytes } from "./hex";
 
 const PASSKEY_LEN = 33;
 
 export interface AddPasskeyPreviewChoice {
   newPasskeyBytes: Uint8Array;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function hexToBytes(hex: string): Uint8Array | null {
-  const clean = hex.trim().toLowerCase().replace(/^0x/, "");
-  if (clean.length === 0 || clean.length % 2 !== 0 || !/^[0-9a-f]+$/.test(clean)) {
-    return null;
-  }
-  const bytes = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
 }
 
 /**

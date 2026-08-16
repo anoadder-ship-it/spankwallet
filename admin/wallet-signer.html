@@ -79,7 +79,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-08-16T00:00:00Z-ultrareview-fixes-strict-buffer-match-checkbox-reset-finishApprove-index";
+      var PAGE_BUILD = "2026-08-16T15:15:00Z-fix-BN-timestamp-radix-bug-jaar-5171";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -743,7 +743,18 @@
                 proposal.approved.map((k) => k.toBase58()).join(", ") + "). Nog niet uit te voeren."
             );
           }
-          const approvedAt = parseInt(proposal.status.timestamp, 16);
+          // proposal.status.timestamp is een BN-object. Zijn DEFAULT
+          // toString() (dus ook String()/impliciete coercie) geeft DECIMAAL,
+          // maar zijn .toJSON() (aangeroepen door JSON.stringify(), zoals
+          // elders in deze pagina voor logging gebeurt) geeft HEX zonder
+          // "0x"-prefix - twee verschillende serialisaties van hetzelfde
+          // object. `parseInt(proposal.status.timestamp, 16)` dwong hier per
+          // ongeluk de DECIMALE toString-vorm af en interpreteerde die
+          // vervolgens als hex, wat een 2026-tijdstip naar jaar 5171 liet
+          // springen (empirisch bevestigd, on-chain data zelf was altijd
+          // correct - zie STATUS.md). Expliciet .toString(10) + Number()
+          // om dit ondubbelzinnig te maken, geen impliciete coercie.
+          const approvedAt = Number(proposal.status.timestamp.toString(10));
           const executableAt = new Date((approvedAt + multisigInfo.timeLock) * 1000);
           if (Date.now() < executableAt.getTime()) {
             const remainingHours = ((executableAt.getTime() - Date.now()) / 3600000).toFixed(2);

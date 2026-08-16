@@ -3558,3 +3558,48 @@ rustige opschoningsronde.
 
 `node --check` op de bijgewerkte module-inhoud: geen syntaxfouten. Server herstart,
 `PAGE_BUILD`-marker in de live-geserveerde pagina bevestigd bijgewerkt.
+
+## 56. "Uitvoerbaar vanaf jaar 5171" - BN.js-radixverwarring in de timelock-check, empirisch herleid en gefixt
+
+Bij de eerste echte klik op "4. Uitvoeren" (na sectie 54/55's fixes) meldde de pagina
+"Uitvoerbaar vanaf: 5171-10-10T13:56:25.000Z" - overduidelijk corrupt. Top-prioriteit
+onderzocht vóór verder testen, zoals gevraagd.
+
+**On-chain data rechtstreeks opgevraagd (los script, niet via de pagina's eigen
+berekening):** `proposal.status.timestamp` voor voorstel #5 is een `BN`-object met
+decimale waarde `1786549609` = `2026-08-12T15:46:49.000Z` - exact de al bekende,
+gedocumenteerde goedkeuringstijd (sectie 46). `multisigInfo.timeLock` = `259200` (72u).
+De ECHTE 72u-timelock was en is dus gewoon correct, al verstreken sinds
+`2026-08-15T15:46:49Z`, on-chain niets beschadigd of veranderd.
+
+**Root cause (`wallet-signer.html`, `checkProposalReadyForAction`, regel 746, vóór de
+fix): een radix-verwarring, geen eenheden-fout.** `parseInt(proposal.status.timestamp, 16)`
+dwingt het BN-object eerst tot string via de IMPLICIETE coercie - en BN's default
+`toString()` geeft DECIMAAL (`"1786549609"`). Die decimale string werd vervolgens door
+`parseInt(..., 16)` als HEXADECIMAAL geinterpreteerd, wat `101037938185` opleverde i.p.v.
+`1786549609` - vandaar jaar 5171. Vermoedelijke oorsprong van de verwarring: BN's
+`.toJSON()` (aangeroepen door `JSON.stringify()`, gebruikt in bijna alle debug-logging
+elders in deze pagina en in de diagnosescripts van dit onderzoek gebruikt) geeft WEL hex terug
+zonder "0x"-prefix (bijv. `"6a7c9569"`) - twee verschillende serialisaties van hetzelfde
+object-type, door elkaar gehaald bij het schrijven van deze specifieke regel.
+
+**Geverifieerd, niet aangenomen:** `typeof`/`.constructor.name` bevestigden `BN`;
+`String(timestamp)` en `.toString(10)` gaven beide de correcte decimale waarde;
+`.toString(16)` gaf de hex-vorm die in de logs zichtbaar was. De exacte gebruikte/gefixte
+berekening apart tegen devnet gedraaid: vóór de fix `parseInt(...,16)` → jaar 5171 (exact
+reproduceerbaar); na de fix (`Number(proposal.status.timestamp.toString(10))`) →
+`2026-08-15T15:46:49.000Z`, en `Date.now() < executableAt.getTime()` correct `false`.
+
+**Geen risico geweest op premature uitvoering.** De bug faalde CLOSED, niet open: een
+datum in jaar 5171 ligt altijd in de toekomst t.o.v. "nu", dus de pagina blokkeerde
+uitvoeren met een (verkeerde) foutmelding i.p.v. per ongeluk te vroeg uit te voeren.
+
+**Fix:** `const approvedAt = Number(proposal.status.timestamp.toString(10));` - expliciete
+decimale conversie, geen impliciete coercie meer. Gecontroleerd of ditzelfde
+`parseInt(..., 16)`-patroon elders in het bestand voorkomt (`grep`) - dit was de enige
+plek. `node --check`: geen syntaxfouten. Server herstart, `PAGE_BUILD` bevestigd
+bijgewerkt.
+
+**Openstaand, ongewijzigd:** knop "4. Uitvoeren" op voorstel #5 zou nu, met deze fix,
+zonder de valse blokkade moeten werken. Nog niet opnieuw geklikt/bevestigd door de
+gebruiker sinds deze fix.

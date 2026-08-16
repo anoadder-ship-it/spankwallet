@@ -79,7 +79,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-08-15T17:35:00Z-canonical-proposal-lookup-no-blind-highest-index";
+      var PAGE_BUILD = "2026-08-16T00:00:00Z-ultrareview-fixes-strict-buffer-match-checkbox-reset-finishApprove-index";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -457,10 +457,43 @@
       // rauwe multisig.transactionIndex.
       const MAX_PROPOSAL_SCAN = 50;
 
+      // Herkent een vaultTransaction als "de canary-upgrade" alleen als hij
+      // daadwerkelijk een BPF_LOADER_UPGRADEABLE Upgrade-instructie (opcode
+      // u32-LE 3) bevat die BUFFER als account gebruikt - niet zomaar "BUFFER
+      // komt ergens in accountKeys voor" (te los: een toekomstig, ongerelateerd
+      // voorstel dat toevallig hetzelfde account aanraakt zou anders ook
+      // meetellen). Structuur (programIdIndex/accountIndexes/data) geverifieerd
+      // tegen de daadwerkelijke on-chain data van voorstel #5, niet aangenomen.
+      function vaultTxIsCanaryUpgrade(vtx) {
+        return vtx.message.instructions.some((ix) => {
+          const programId = vtx.message.accountKeys[ix.programIdIndex];
+          if (!programId || !programId.equals(BPF_LOADER_UPGRADEABLE)) return false;
+          if (ix.data.length !== 4) return false;
+          const opcode = new DataView(ix.data.buffer, ix.data.byteOffset, ix.data.byteLength).getUint32(0, true);
+          if (opcode !== 3) return false;
+          return Array.from(ix.accountIndexes).some((idx) => {
+            const key = vtx.message.accountKeys[idx];
+            return key && key.equals(BUFFER);
+          });
+        });
+      }
+
+      // Onderscheidt "account bestaat niet" (verwacht - de meeste indices in
+      // het scanbereik hebben geen proposal/vaultTransaction) van een echte,
+      // tijdelijke RPC-fout. Zonder dit onderscheid zou een netwerkhikje een
+      // daadwerkelijk bestaand canoniek voorstel stilzwijgend kunnen laten
+      // verdwijnen uit de kandidatenlijst - precies het soort "fail open"
+      // dat deze functie juist moet voorkomen.
+      function isAccountNotFoundError(e) {
+        return /unable to find|could not find account/i.test((e && e.message) || "");
+      }
+
       async function findCanonicalProposal(multisigInfo) {
         const currentIndex = Number(multisigInfo.transactionIndex);
         const lowerBound = Math.max(1, currentIndex - MAX_PROPOSAL_SCAN + 1);
+        const scanIncomplete = lowerBound > 1;
         const candidates = [];
+        let fetchErrors = 0;
 
         for (let i = currentIndex; i >= lowerBound; i--) {
           const transactionIndex = BigInt(i);
@@ -469,7 +502,8 @@
           try {
             proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
           } catch (e) {
-            continue; // geen proposal-account (meer) op deze index - overslaan
+            if (!isAccountNotFoundError(e)) fetchErrors++;
+            continue;
           }
           const kind = proposal.status.__kind;
           if (kind !== "Active" && kind !== "Approved") continue; // afgesloten (Executed/Cancelled/Rejected) - niet relevant
@@ -477,16 +511,14 @@
           const [vaultTxPda] = multisig.getTransactionPda({ multisigPda: MULTISIG_PDA, index: transactionIndex });
           try {
             const vtx = await multisig.accounts.VaultTransaction.fromAccountAddress(connection, vaultTxPda);
-            const matchesBuffer = vtx.message.accountKeys.some((k) => k.equals(BUFFER));
-            if (!matchesBuffer) continue; // ander voorstel, niet deze canary-upgrade
+            if (!vaultTxIsCanaryUpgrade(vtx)) continue; // ander voorstel, niet deze canary-upgrade
           } catch (e) {
+            if (!isAccountNotFoundError(e)) fetchErrors++;
             continue;
           }
 
           candidates.push({ transactionIndex, proposal, kind });
         }
-
-        if (candidates.length === 0) return { canonical: null, candidates };
 
         candidates.sort((a, b) => {
           const rank = (k) => (k === "Approved" ? 0 : 1);
@@ -494,7 +526,13 @@
           return Number(a.transactionIndex - b.transactionIndex);
         });
 
-        return { canonical: candidates[0], candidates };
+        // "Onzeker" (scan onvolledig EN niets gevonden binnen het bereik, OF
+        // minstens een echte RPC-fout onderweg) telt NIET als "geen open
+        // voorstel" - de aanroeper moet dit expliciet als blokkade behandelen
+        // i.p.v. stilzwijgend "veilig om te proposen" aan te nemen.
+        const uncertain = fetchErrors > 0 || (candidates.length === 0 && scanIncomplete);
+
+        return { canonical: candidates[0] || null, candidates, scanIncomplete, fetchErrors, uncertain };
       }
 
       // Toont meteen bij verbinden welk voorstel knop 3/4 daadwerkelijk
@@ -503,7 +541,16 @@
       async function logCurrentProposalStatus() {
         try {
           const multisigInfo = await fetchMultisig();
-          const { canonical, candidates } = await findCanonicalProposal(multisigInfo);
+          const { canonical, candidates, uncertain, fetchErrors, scanIncomplete } = await findCanonicalProposal(multisigInfo);
+
+          if (uncertain) {
+            log(
+              "[waarschuwing] Kon niet met zekerheid vaststellen of er al een open voorstel bestaat " +
+                "(" + fetchErrors + " RPC-fout(en)" + (scanIncomplete ? ", scanvenster (" + MAX_PROPOSAL_SCAN + ") bereikt zonder resultaat" : "") +
+                "). Herlaad de pagina voor je op knop 2 klikt.",
+              "log-error"
+            );
+          }
 
           if (candidates.length > 1) {
             log(
@@ -724,25 +771,30 @@
         await checkProposalReadyForAction("approve", transactionIndex, multisigInfo);
 
         const { blockhash } = await connection.getLatestBlockhash();
-        return multisig.transactions.proposalApprove({
+        const tx = multisig.transactions.proposalApprove({
           blockhash,
           feePayer: connectedWallet.publicKey,
           multisigPda: MULTISIG_PDA,
           transactionIndex,
           member: connectedWallet.publicKey,
         });
+        return { tx, transactionIndex };
       }
 
-      async function finishApprove(signature) {
+      // Neemt transactionIndex EXPLICIET als parameter (het voorstel dat
+      // buildApproveTx() daadwerkelijk goedkeurde) i.p.v. na afloop opnieuw
+      // multisigInfo.transactionIndex te lezen. Met meerdere open duplicaten
+      // (zoals #6/#7 hierboven) is de hoogste index typically NIET het
+      // zojuist goedgekeurde voorstel - dat zou hier een verkeerd,
+      // misleidend statusbericht tonen vlak na een security-kritieke actie.
+      async function finishApprove(signature, transactionIndex) {
         log("Verstuurd. Signature: " + signature);
         await connection.confirmTransaction(signature, "confirmed");
         log("Bevestigd.");
 
-        const multisigInfo = await fetchMultisig();
-        const transactionIndex = BigInt(Number(multisigInfo.transactionIndex));
         const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
-        log("SUCCES - status: " + JSON.stringify(proposal.status) + ", goedgekeurd door: " + proposal.approved.map((k) => k.toBase58()).join(", "));
+        log("SUCCES - voorstel #" + transactionIndex + " status: " + JSON.stringify(proposal.status) + ", goedgekeurd door: " + proposal.approved.map((k) => k.toBase58()).join(", "));
       }
 
       async function buildSquadsExecuteTx() {
@@ -781,7 +833,7 @@
       // opnieuw laadt (zie resumeDeeplinkIfNeeded hieronder). Vereist een
       // actieve, met "connect" tot stand gekomen sessie (sharedSecret +
       // session in localStorage).
-      function startDeeplinkSignAndSend(actionName, versionedTx) {
+      function startDeeplinkSignAndSend(actionName, versionedTx, transactionIndex) {
         const state = loadDeeplinkState();
         if (!state || !state.sharedSecret || !state.session) {
           throw new Error("Geen actieve Solflare-deep-link-sessie gevonden - verbind opnieuw via knop 1b.");
@@ -813,6 +865,12 @@
         const startedAt = new Date().toISOString();
         state.pendingAction = actionName;
         state.pendingActionStartedAt = startedAt;
+        // Overleeft de volledige paginanavigatie (in tegenstelling tot een
+        // gewone JS-variabele) - nodig zodat finishApprove() na terugkomst
+        // weet welk SPECIFIEKE voorstel zojuist goedgekeurd werd, i.p.v.
+        // achteraf te moeten raden via de dan mogelijk alweer verschoven
+        // "hoogste" transactionIndex.
+        state.pendingActionTransactionIndex = transactionIndex !== undefined ? transactionIndex.toString() : null;
         saveDeeplinkState(state);
 
         const params = new URLSearchParams({
@@ -876,6 +934,21 @@
         }
       }
 
+      // Bekende, geaccepteerde beperking (ultrareview, 2026-08-16): de check
+      // hieronder (fetchMultisig + findCanonicalProposal) en de daadwerkelijke
+      // proposalCreate-transactie zijn twee losse round-trips - in theorie kan
+      // een ANDER apparaat tussen die twee momenten in een voorstel aanmaken
+      // (TOCTOU). Dit is een lokaal-per-klant, stateloze pagina zonder eigen
+      // server-side coordinatie (bewust: de sleutel verlaat nooit de
+      // wallet-extensie, geen backend die iets zou kunnen afdwingen) - een
+      // race volledig sluiten zou een centrale lock/broker vereisen, wat dat
+      // ontwerp doorbreekt. In de praktijk vereist het BEIDE een geldig lid
+      // EN een klik binnen hetzelfde kleine tijdvenster op een ANDER
+      // apparaat - een asymmetrisch dure aanval t.o.v. een goedkope fix hier,
+      // en dus bewust niet verder dichtgetimmerd. Erger geval (twee devices
+      // die vlak na elkaar zelf per ongeluk voorstellen) blijft hierdoor niet
+      // helemaal uitgesloten, maar is exact wat de checkbox-vereiste hierboven
+      // al sterk onwaarschijnlijker maakt.
       document.getElementById("propose-btn").addEventListener("click", async (e) => {
         logButtonClick(e);
         if (!connectedWallet) return;
@@ -890,9 +963,24 @@
           // open (Active/Approved) voorstel voor deze buffer bestaat. Alleen
           // doorgaan met een expliciete, aparte bevestiging (checkbox).
           const multisigInfoForCheck = await fetchMultisig();
-          const { canonical, candidates } = await findCanonicalProposal(multisigInfoForCheck);
+          const { canonical, candidates, uncertain, fetchErrors, scanIncomplete } = await findCanonicalProposal(multisigInfoForCheck);
           const forceCheckbox = document.getElementById("force-new-proposal-checkbox");
-          if (canonical && !forceCheckbox.checked) {
+          const checkboxWasChecked = forceCheckbox.checked;
+          // Vakje ONMIDDELLIJK resetten, ongeacht wat hierna gebeurt - het is
+          // een bewuste, aparte bevestiging PER klik, geen "onthoud mijn
+          // keuze". Zonder deze reset zou een latere, per ongeluk dubbele
+          // klik op deze knop stilzwijgend nog een duplicaat aanmaken zonder
+          // enige nieuwe bevestiging.
+          forceCheckbox.checked = false;
+
+          if (uncertain) {
+            throw new Error(
+              "Kon niet met zekerheid vaststellen of er al een open voorstel bestaat (" + fetchErrors +
+                " RPC-fout(en)" + (scanIncomplete ? ", scanvenster (" + MAX_PROPOSAL_SCAN + ") bereikt zonder resultaat" : "") +
+                "). Geen nieuw voorstel aangemaakt uit voorzorg - herlaad de pagina en probeer opnieuw."
+            );
+          }
+          if (canonical && !checkboxWasChecked) {
             throw new Error(
               "Er bestaat al een open voorstel #" + canonical.transactionIndex + " voor deze canary-buffer " +
                 "(status: " + JSON.stringify(canonical.proposal.status) + ", goedgekeurd door: [" +
@@ -902,7 +990,7 @@
                 "bewust toch een NIEUW, apart voorstel wilt aanmaken."
             );
           }
-          if (canonical && forceCheckbox.checked) {
+          if (canonical && checkboxWasChecked) {
             log(
               "[waarschuwing] Bewust een NIEUW voorstel aangemaakt terwijl #" + canonical.transactionIndex +
                 " al open staat (bevestigingsvakje was aangevinkt).",
@@ -931,13 +1019,13 @@
             log("FOUT: verbonden account is geen lid van de multisig - zie de melding bij 'Wallet verbinden'.");
             return;
           }
-          const tx = await buildApproveTx();
+          const { tx, transactionIndex } = await buildApproveTx();
           if (connectedWallet.mode === "deeplink") {
-            startDeeplinkSignAndSend("approve", tx);
+            startDeeplinkSignAndSend("approve", tx, transactionIndex);
           } else {
             log("Keur de goedkeuring goed in je wallet-extensie...");
             const { signature } = await connectedWallet.signAndSendTransaction(tx);
-            await finishApprove(signature);
+            await finishApprove(signature, transactionIndex);
           }
         } catch (err) {
           logFullError("approve-btn-handler", err);
@@ -1069,7 +1157,17 @@
             if (!connectedWallet) await restoreDeeplinkSessionIfPresent();
 
             if (action === "propose") await finishPropose(responseData.signature);
-            else if (action === "approve") await finishApprove(responseData.signature);
+            else if (action === "approve") {
+              if (!state.pendingActionTransactionIndex) {
+                throw new Error(
+                  "Kan de goedkeuring niet afronden: onbekend welk voorstel het betrof " +
+                    "(pendingActionTransactionIndex ontbreekt in de bewaarde deep-link-status - " +
+                    "vermoedelijk een oudere, vóór deze fix gestarte actie). Controleer handmatig on-chain " +
+                    "welk voorstel zojuist goedgekeurd is."
+                );
+              }
+              await finishApprove(responseData.signature, BigInt(state.pendingActionTransactionIndex));
+            }
             else if (action === "execute") await finishSquadsExecute(responseData.signature);
             else log("[debug] onbekende pendingAction bij terugkeer: " + action, "log-debug");
           }

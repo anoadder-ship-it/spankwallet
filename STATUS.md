@@ -3494,3 +3494,67 @@ apparaat), daarna on-chain bevestigen via `solana program show` + `solana progra
 (zelfde bewijspatroon als de repetitie in sectie 41). De zes dode duplicaten (#1-4, #6, #7)
 vereisen geen actie - ze wijzen naar dezelfde eenmalige buffer en worden vanzelf
 onuitvoerbaar zodra #5 is uitgevoerd (zelfde patroon als sectie 43).
+
+## 55. `/ultrareview` op sectie 54's diff: 9 bevindingen, 6 daadwerkelijk gefixt, 1 bewust geaccepteerd, 2 uitgesteld
+
+Op verzoek `/ultrareview` gedraaid op de sectie-54-commit vóórdat die gepusht werd. Elke
+bevinding eerst zelf tegen de daadwerkelijke code/on-chain-data geverifieerd voor er iets
+aangepast werd - niet blind overgenomen.
+
+**Gefixt (6):**
+- **`finishApprove()` gebruikte na een goedkeuring nog steeds de rauwe hoogste
+  `transactionIndex` i.p.v. het zojuist goedgekeurde canonieke voorstel** - met de 6 open
+  duplicaten uit deze sectie zou dat na een toekomstige goedkeuring van #5 het verkeerde
+  voorstel (#7) hebben gerapporteerd. Bevestigd door de code te lezen (geen aanname).
+  Gefixt: `buildApproveTx()` geeft nu `{ tx, transactionIndex }` terug, doorgegeven aan
+  `finishApprove()` - ook door het Solflare-deep-link-redirect-pad heen, via een nieuw
+  `state.pendingActionTransactionIndex` in `localStorage` (de JS-context wordt gewist bij
+  die navigatie, dus dit kan niet als gewone variabele overleven).
+- **Het bevestigingsvakje voor "toch een nieuw voorstel aanmaken" werd nooit
+  teruggezet** - een latere, per ongeluk dubbele klik op knop 2 zou stilzwijgend nog een
+  duplicaat hebben aangemaakt zonder nieuwe bevestiging. Gefixt: vakje wordt nu
+  onmiddellijk uitgevinkt zodra de klik-handler de waarde leest, ongeacht de uitkomst.
+- **`MAX_PROPOSAL_SCAN=50` faalde "open"**: als het canonieke voorstel ooit buiten het
+  scanvenster zou vallen, gaf `findCanonicalProposal()` stilzwijgend `canonical: null`
+  terug - precies hetzelfde "geen open voorstel, dus vrij om te proposen"-pad als het
+  echte "er bestaat nog niets"-geval. Gefixt: een nieuwe `uncertain`-vlag (scan onvolledig
+  zonder resultaat, of een echte RPC-fout onderweg) blokkeert nu net zo hard als een
+  gevonden canoniek voorstel.
+- **`catch`-blokken behandelden élke fout als "account bestaat niet"**, inclusief
+  tijdelijke RPC-fouten - een netwerkhikje kon zo een daadwerkelijk bestaand voorstel
+  stilzwijgend laten verdwijnen. Gefixt: `isAccountNotFoundError()` onderscheidt op de
+  exacte foutmelding (`"Unable to find ... account at ..."`, bevestigd door de fout zelf
+  te reproduceren tegen een non-existent voorstel-index), telt andere fouten mee in
+  `fetchErrors` en voedt daarmee de nieuwe `uncertain`-vlag.
+- **De buffer-match was te los**: `accountKeys.some(k => k.equals(BUFFER))` telt elk
+  voorstel mee dat BUFFER ook maar ergens als account gebruikt, niet specifiek een
+  Upgrade-instructie die BUFFER als buffer-account target. Bevestigd via een los
+  inspectiescript tegen de echte instructiedata van voorstel #5
+  (`programIdIndex`→`BPF_LOADER_UPGRADEABLE`, `data`="03000000" = u32-LE opcode 3,
+  BUFFER in `accountIndexes`). Gefixt met `vaultTxIsCanaryUpgrade()`: matcht nu specifiek
+  op programId + opcode + BUFFER-in-accountIndexes van de instructie zelf. Ook bevestigd
+  dat `ix.data`/`ix.accountIndexes` gewone `Uint8Array`s zijn (geen Node-`Buffer`, die
+  niet beschikbaar is in de browsercontext van deze pagina - anders was dit een
+  runtime-crash geworden i.p.v. een fix).
+- Alle fixes herverifieerd met hetzelfde losse testscript-patroon als sectie 54: de
+  bijgewerkte `findCanonicalProposal()`-logica kiest, met de verstrengde buffer-check,
+  nog steeds correct `#5` uit de 7 bestaande kandidaten (`uncertain: false`).
+
+**Bewust niet verder dichtgetimmerd (1):** een TOCTOU-race tussen de duplicate-check en de
+daadwerkelijke `proposalCreate`-transactie (twee losse round-trips) blijft theoretisch
+mogelijk als twee apparaten binnen hetzelfde kleine tijdvenster onafhankelijk knop 2
+klikken. Deze pagina heeft bewust geen eigen backend/server-side state (de sleutel verlaat
+nooit de wallet-extensie) - een volledige fix zou een centrale lock/broker vereisen, wat
+dat ontwerp doorbreekt. Gedocumenteerd als bewuste afweging in de code zelf, niet als
+opgelost gepresenteerd.
+
+**Uitgesteld, niet vergeten (2):** drie kleinere efficiëntiebevindingen (herhaalde
+`fetchMultisig()`-aanroepen binnen één klik, sequentiële in plaats van parallelle RPC-calls
+in de scan-loop, `checkProposalReadyForAction()` die het al-opgehaalde proposal-account
+opnieuw fetcht) zijn reëel maar puur prestatie, geen correctheid/veiligheid - bewust niet
+in dezelfde ronde meegenomen om het risico op nieuwe fouten in dit al stevig gewijzigde,
+security-kritieke bestand niet onnodig te vergroten. Kandidaat voor een aparte,
+rustige opschoningsronde.
+
+`node --check` op de bijgewerkte module-inhoud: geen syntaxfouten. Server herstart,
+`PAGE_BUILD`-marker in de live-geserveerde pagina bevestigd bijgewerkt.

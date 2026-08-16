@@ -1,8 +1,8 @@
-import { Connection, PublicKey, SystemProgram } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { showConfirmationCard, escapeHtml } from "./confirmationCard";
 import { derivePolicyPda, readPolicyAccount } from "./policy";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
+import { knownProgramLabel } from "./knownPrograms";
 
 export type AddAllowedProgramPreviewResult =
   | { kind: "confirmed"; programId: PublicKey }
@@ -10,15 +10,6 @@ export type AddAllowedProgramPreviewResult =
   | { kind: "would-fail"; reason: "self-cpi" | "already-allowed" | "allowlist-full" };
 
 const MAX_ALLOWED_PROGRAMS = 32;
-
-// Puur lokaal, uit de al-bestaande dependencies van dit project - geen
-// externe databron, geen gokwerk. Alles buiten deze drie: eerlijk
-// "onbekend programma", nooit verzonnen.
-const KNOWN_PROGRAMS: Record<string, string> = {
-  [SystemProgram.programId.toBase58()]: "System Program (Solana native)",
-  [TOKEN_PROGRAM_ID.toBase58()]: "SPL Token Program",
-  [ASSOCIATED_TOKEN_PROGRAM_ID.toBase58()]: "SPL Associated Token Account Program",
-};
 
 /**
  * Menselijk-leesbare bevestigingskaart voor add_allowed_program - STATUS.md
@@ -72,7 +63,7 @@ export async function showAddAllowedProgramPreview(
       } catch {
         target = null;
       }
-      const knownLabel = target ? KNOWN_PROGRAMS[target.toBase58()] : undefined;
+      const knownLabel = target ? knownProgramLabel(target) : undefined;
       let statusLine: string;
       if (!target) {
         statusLine = "onbekend (ongeldig adres)";

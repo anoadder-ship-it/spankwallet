@@ -4206,3 +4206,58 @@ pre-bestaande fouten, geen nieuwe.
 **Hiermee is de MIDDEN-risicoklasse compleet** (`transfer_token`, `add_session_key`).
 **Openstaand:** LAAG (`remove_allowed_program`, `remove_session_key`, `cancel_recovery`,
 `hunt`), in de afgesproken volgorde - de laatste risicoklasse van UI-fase 1.
+
+## 66. `remove_allowed_program`-bevestigingskaart: eerste LAAG-kaart - beperkt alleen, veilige richting
+
+Achtste kaart van UI-fase 1, eerste van de LAAG-risicoklasse. Onderzocht in
+`instructions.rs` (niet aangenomen): één on-chain-gegarandeerde afwijzing
+(`ProgramNotAllowed` wanneer het adres niet in `policy.allowed_programs[..count]` staat) -
+geldt ook wanneer er nog nooit een `PolicyAccount` heeft bestaan, want deze instructie heeft
+geen `init_if_needed` op `policy` (zelfde patroon als `remove_passkey`). Vooraf te bepalen
+zonder simulatie - zelfde "vroeg zichtbaar maken"-principe als de HOOG/MIDDEN-kaarten: geen
+kaart/frictie voor een verwijdering die toch al niets zou veranderen.
+
+**`knownPrograms.ts` (nieuw):** de "bekende programma's"-opzoektabel (System Program, SPL
+Token Program, SPL Associated Token Account Program) ontleed uit `addAllowedProgramPreview.ts`
+- de tweede plek die dezelfde tabel nodig had (zelfde behandeling als
+`escapeHtml`/`hex.ts`/`tokenAmount.ts`). `addAllowedProgramPreview.ts` bijgewerkt om dit te
+hergebruiken (mechanisch, geen gedragswijziging).
+
+**`removeAllowedProgramPreview.ts` (nieuw):** pre-flight `readPolicyAccount()` + `isAllowed()`
+-check vóór enige kaart; bij niet-toegestaan direct `{kind:"would-fail", reason:"not-allowed"}`
+terug, geen kaart getoond. Kaart toont het doeladres, het hergebruikte bekend/onbekend-label,
+een JA/NEE "Verwijderen mogelijk"-statusregel, en de vereiste consequentiezin expliciet:
+"execute_advanced kan dit programma na deze actie niet meer aanroepen." `friction: "click"`,
+geen `tone:"danger"` - LAAG, consistent met de classificatie-afspraak. Enige bewerkbare veld:
+`programId`, herbevestigd tegen dezelfde `isAllowed()`-snapshot bij bevestigen ("wat je ziet
+is wat je ondertekent").
+
+**`main.ts` stap 10**: kaart ervoor (denied/would-fail-takken afgehandeld en gelogd); alle
+downstream hardcoded `SystemProgram.programId`/"System Program"-verwijzingen (transactie-
+opbouw, post-send-verificatie, de execute_advanced-herbevestigingsaanroep, de eind-SUCCES-log)
+vervangen door het bevestigde `programToRemove`.
+
+**Geverifieerd:**
+- **Echte devnet-integratie (not-allowed-pad):** een vers/willekeurig `walletPda` heeft
+  gegarandeerd geen `PolicyAccount` - echt tegen devnet bevraagd, resultaat
+  `{kind:"would-fail", reason:"not-allowed"}`, `#preview-root` blijft leeg (geen
+  kaart/frictie voor een actie die toch niets zou veranderen).
+- **Kaartmechaniek (bevestigd-pad, synthetisch zoals eerder afgesproken - een echte
+  `PolicyAccount` met iets erop vereist hardware-passkey-aangemaakte state, hier niet
+  beschikbaar):** met een lokaal gesimuleerde allowlist bevestigd dat de kaart geen
+  `tone:"danger"` heeft (`click`-friction, geen "Ingedrukt houden"-knop), de headline het
+  doeladres + bekend-label ("System Program (Solana native)") + de vereiste
+  consequentiezin correct toont, `validate()` een bewerking naar een niet-(meer)-toegestaan
+  adres (SPL Token Program, niet in de gesimuleerde allowlist) correct weigert met de kaart
+  open en de exacte foutmelding, en een daaropvolgende bevestiging met een wél-toegestaan
+  adres resolvet naar `{programId: ...}` en de kaart sluit. Screenshot genomen.
+- Beide scenario's (not-allowed-pad, kaartmechaniek) getest binnen één ononderbroken
+  `javascript_exec`-aanroep per scenario - een tussentijdse aparte aanroep liet de kaart
+  eenmalig verdwijnen (bekend, omgevingsgerelateerd tab-inactiviteitsverschijnsel uit eerdere
+  kaarten, geen code-bug), consistent gereproduceerd-en-opgelost door dezelfde bekende
+  mitigatie toe te passen.
+
+`tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten, geen nieuwe.
+
+**Openstaand binnen LAAG:** `remove_session_key`, `cancel_recovery`, `hunt` - daarna is
+UI-fase 1 compleet.

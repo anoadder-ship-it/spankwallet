@@ -32,6 +32,7 @@ import { showRemovePasskeyPreview } from "./removePasskeyPreview";
 import { showAddAllowedProgramPreview } from "./addAllowedProgramPreview";
 import { showTransferTokenPreview } from "./transferTokenPreview";
 import { showAddSessionKeyPreview } from "./addSessionKeyPreview";
+import { showRemoveAllowedProgramPreview } from "./removeAllowedProgramPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -1059,12 +1060,29 @@ async function runStep10(): Promise<void> {
   try {
     const policyPda = derivePolicyPda(lastPdas.walletPda);
 
+    log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59/66) -");
+    log("LAAG-risicoklasse, gewone klik. Deze actie beperkt alleen (veilige richting).");
+    const removeChoice = await showRemoveAllowedProgramPreview(connection, lastPdas.walletPda, SystemProgram.programId);
+    if (removeChoice.kind === "denied") {
+      log("Geweigerd in de bevestigingskaart - remove_allowed_program NIET aangeroepen,");
+      log("geen passkey-prompt.");
+      return;
+    }
+    if (removeChoice.kind === "would-fail") {
+      log("FOUT: onverwacht 'would-fail' (" + removeChoice.reason + ") voor System Program -");
+      log("dit is net in stap 8 toegevoegd, zou nog op de allowlist moeten staan.");
+      return;
+    }
+    const programToRemove = removeChoice.programId;
+    log("Bevestigd: " + programToRemove.toBase58() + " wordt verwijderd.");
+    log("");
+
     log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
     const { transaction } = await buildRemoveAllowedProgramTransaction(
       connection,
       lastWallet.publicKey,
       lastPdas.walletPda,
-      SystemProgram.programId,
+      programToRemove,
       lastPasskeyPublicKey,
       lastCredentialId,
       window.location.hostname
@@ -1095,8 +1113,8 @@ async function runStep10(): Promise<void> {
     log("Bevestigd.");
     log("");
 
-    log("Policy-account teruglezen om te bevestigen dat System Program daadwerkelijk");
-    log("verwijderd is...");
+    log("Policy-account teruglezen om te bevestigen dat het bevestigde programma");
+    log("daadwerkelijk verwijderd is...");
     const policy = await readPolicyAccount(connection, policyPda);
     if (!policy) {
       log("FOUT: policy-account bestaat niet meer (onverwacht).");
@@ -1104,13 +1122,13 @@ async function runStep10(): Promise<void> {
     }
     log("count: " + policy.count);
     log("allowed_programs: " + policy.allowedPrograms.map((p) => p.toBase58()).join(", "));
-    if (policy.allowedPrograms.some((p) => p.equals(SystemProgram.programId))) {
-      log("FOUT: System Program staat nog steeds in de allowlist (onverwacht).");
+    if (policy.allowedPrograms.some((p) => p.equals(programToRemove))) {
+      log("FOUT: " + programToRemove.toBase58() + " staat nog steeds in de allowlist (onverwacht).");
       return;
     }
     log("");
 
-    log("Herbevestigen: execute_advanced tegen System Program moet nu weer geweigerd");
+    log("Herbevestigen: execute_advanced tegen dit programma moet nu weer geweigerd");
     log("worden (alleen simuleren, we weten al dat dit hoort te falen)...");
     log("navigator.credentials.get() wordt aangeroepen - keur de prompt goed.");
     const { transaction: retryTx } = await buildExecuteAdvancedTransaction(
@@ -1119,7 +1137,7 @@ async function runStep10(): Promise<void> {
       lastPdas.walletPda,
       lastPdas.vaultPda,
       policyPda,
-      SystemProgram.programId,
+      programToRemove,
       [],
       new Uint8Array(0),
       lastPasskeyPublicKey,
@@ -1139,7 +1157,7 @@ async function runStep10(): Promise<void> {
       return;
     }
 
-    log("SUCCES - remove_allowed_program heeft System Program daadwerkelijk van de");
+    log("SUCCES - remove_allowed_program heeft " + programToRemove.toBase58() + " daadwerkelijk van de");
     log("allowlist gehaald, met een ECHTE passkey-handtekening, en execute_advanced");
     log("weigert er nu weer een CPI naartoe. De volledige programma-allowlist-cyclus");
     log("(add, gebruiken, remove, geweigerd worden) is nu end-to-end bewezen op devnet.");

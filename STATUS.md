@@ -4745,6 +4745,35 @@ gepland naar aanleiding hiervan - de bevestigingskaarten uit UI-fase 1 blijven d
 volledige mitigatie tegen hun eigen doelbedreiging (kwaadaardige site/dApp als
 tegenstander, vóór de kaart), maar claimen bewust niet meer dan dat.
 
+**Samenvatting: viertraps gecombineerde verdediging, geen silver bullet.** Zoals bij elke
+serieuze wallet bestaat er geen enkele maatregel die alle dreigingscategorieën tegelijk
+dekt. Vier lagen, elk het beste middel tegen zijn eigen specifieke dreiging:
+
+1. **On-chain protocolllaag** - grotendeels af: challenge-binding aan `program_id`/
+   `wallet_pda`/`domain`, de C-1-`action_nonce` (sectie 69) tegen replay, de
+   programma-allowlist (sectie 8-10/62/66) tegen CPI-scope-uitbreiding, recovery-timelock
+   + `cancel_recovery` (sectie 71) tegen een kwaadaardige `backup_authority`, en de
+   2-of-3-Squads-multisig-upgrade-authority (sectie 41-42) tegen een enkele
+   gecompromitteerde deploy-sleutel.
+2. **Client-UI-previewlaag** - UI-fase 1, nu compleet (sectie 73): beschermt tegen blind
+   signing door een kwaadaardige site/dApp, vóór de handtekening-ceremonie.
+3. **Browser-omgevingslaag, NIEUW:** een optionele, vergrendelde OS-gebruikersaccount die
+   alleen de gekozen wallet-extensie toestaat (Chrome/Brave `ExtensionInstallAllowlist`/
+   `ExtensionInstallBlocklist`) - beschermt tegen een kwaadaardige extensie die
+   `navigator.credentials` zelf onderschept, het scenario uit deze sectie waar UI-fase 1
+   niets tegen kan doen. Concrete, geverifieerde handleiding (Linux, met de belangrijke
+   correctie dat dit machine-breed werkt, geen "los profiel"): zie
+   [`docs/browser-lockdown.md`](docs/browser-lockdown.md). Documentatie, geen
+   codewijziging aan SpankWallet.
+4. **Hardware-sleutel-ondersteuning** - al vandaag technisch mogelijk, geen bouwwerk
+   nodig: bevestigd dat `passkey.ts` geen `authenticatorAttachment`-restrictie stelt, dus
+   YubiKey-registratie werkt al (zie punt 2 hierboven voor de nuance rond het ontbreken
+   van een eigen scherm op gangbare consumenten-sleutels).
+
+**Volledige Tauri + on-device-WYSIWYS-hardware-display blijft het enige mechanisme dat
+ALLE bovenstaande dreigingscategorieën tegelijk zou dekken (inclusief een gecompromitteerde
+browser/extensie zelf) - bewust een apart, toekomstig project, niet nu gebouwd.**
+
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 
 Laatste kaart uit sectie 59's oorspronkelijke plan. Anders dan elke andere kaart heeft

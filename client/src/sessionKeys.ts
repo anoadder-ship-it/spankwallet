@@ -426,7 +426,10 @@ export async function buildExecuteViaSessionTransaction(
       { pubkey: walletPda, isSigner: false, isWritable: false },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
       { pubkey: recipient, isSigner: false, isWritable: true },
-      { pubkey: sessionPda, isSigner: false, isWritable: false },
+      // mut: ExecuteViaSession#session in instructions.rs schrijft
+      // spent_lamports atomisch bij (spend-limits-ontwerpdocument §4) - was
+      // hier ten onrechte false, zie STATUS.md sectie 68 (M-2-audit-fix).
+      { pubkey: sessionPda, isSigner: false, isWritable: true },
       { pubkey: sessionKeypair.publicKey, isSigner: true, isWritable: false },
     ],
     data: Buffer.from(data),
@@ -469,7 +472,10 @@ export async function buildTransferTokenViaSessionTransaction(
       { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
       { pubkey: recipientTokenAccount, isSigner: false, isWritable: true },
       { pubkey: tokenMint, isSigner: false, isWritable: false },
-      { pubkey: sessionPda, isSigner: false, isWritable: false },
+      // mut: TransferTokenViaSession#session in instructions.rs schrijft
+      // spent_token_amount atomisch bij (spend-limits-ontwerpdocument §4) -
+      // was hier ten onrechte false, zie STATUS.md sectie 68 (M-2-audit-fix).
+      { pubkey: sessionPda, isSigner: false, isWritable: true },
       { pubkey: sessionKeypair.publicKey, isSigner: true, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
     ],

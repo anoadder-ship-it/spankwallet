@@ -4330,3 +4330,66 @@ NIET meegecommit - zelfde behandeling als de synthetische console-tests uit sect
 wegwerp-testhulpmiddel, geen onderdeel van de blijvende codebase.
 
 **Openstaand binnen LAAG:** `cancel_recovery`, `hunt` - daarna is UI-fase 1 compleet.
+
+## 68. Zesde externe audit: M-2 (session-PDA isWritable:false) geverifieerd en gefixt, spoedprioriteit vóór voorstel #8
+
+Een zesde, methodologisch sterkere externe audit kwam binnen (onafhankelijk tegen agave-broncode
+geverifieerd, STATUS.md doorzocht om bekende van nieuwe punten te scheiden). Vijf punten
+kritisch geverifieerd, in prioriteitsvolgorde: **C-1** (replay - challenge in
+execute/transfer_token/execute_advanced bevat geen nonce/blockhash/slot - **bevestigd, kritiek**,
+empirisch gereproduceerd op een lokale validator: dezelfde ondertekende `execute()`-instructie
+tweemaal verstuurd in twee losse transacties, vault beide keren daadwerkelijk geleegd), **M-1**
+(path traversal in `https-server.js` - **verouderd**, beschrijft exact de pre-fix-staat uit
+sectie 64, live opnieuw getest tegen de draaiende server en bevestigd nog steeds gefixt), **M-2**
+(session-PDA `isWritable:false` - **bevestigd, kritiek**, hieronder gefixt), **M-3**
+(off-curve `new_owner_passkey` bij `initiate_recovery` - **bevestigd als reëel gat**, maar de
+"permanent onherstelbaar"-framing van de audit is onjuist: `initiate_recovery` vereist alleen
+`backup_authority`, niet een passkey, dus een volgende recovery-cyclus herstelt het zolang
+`backup_authority` nog bestaat - alleen een samengesteld faalscenario is permanent), **H-3**
+(`backup_authority`-overnamemacht + ongelimiteerde herhaalde `initiate_recovery` als DoS/griefing-
+vector - **bevestigd als bewust, correct ontwerp**, geen bug, wel een reëel punt voor
+mainnet-documentatie: `backup_authority` moet operationeel als een volwaardige owner-sleutel
+behandeld worden). C-1 vereist een apart ontwerpgesprek (raakt 10 instructies, zie sectie 26-achtige
+aanpak); M-3/H-3 volgen later zonder haast. Deze sectie behandelt alleen M-2, met voorrang omdat
+de onderliggende programmawijziging (spend-limits, sectie 53) al klaarstaat als voorstel #8 met
+een timelock die uitvoerbaar wordt op **2026-08-19T16:42:18Z** (sectie 58) - de kapotte client
+zou vanaf dat moment elke `execute_via_session`/`transfer_token_via_session`-aanroep laten falen.
+
+**Root cause, getraceerd via `git blame`/`git show`:** commit `9bb8c80` (spend-limits) voegde
+`#[account(mut)]` toe aan `session` in `ExecuteViaSession`/`TransferTokenViaSession`
+(`instructions.rs`) omdat `spent_lamports`/`spent_token_amount` daar sindsdien atomisch worden
+bijgewerkt - maar raakte de handgeschreven `AccountMeta`-array in `client/src/sessionKeys.ts`
+niet aan, die nog steeds `isWritable: false` voor de session-PDA zette (bestond al zo sinds de
+allereerste client-integratie, commit `24541dc`, toen dat nog correct was - er was toen nog geen
+`mut` nodig). `tests/sessionKeys.ts` ving dit nooit op omdat het Anchor's eigen
+`.methods().accounts().rpc()`-builder gebruikt (writability automatisch afgeleid uit de IDL),
+nooit de losstaande, handgeschreven instructie-opbouw uit de productieclient.
+`execute_advanced_via_session` heeft dit probleem niet: `session` is daar bewust een
+niet-`mut` `UncheckedAccount` (alleen gelezen via `load_session_account`, nooit beschreven) -
+nagelezen en bevestigd, dus terecht ongewijzigd gelaten.
+
+**Fix:** `client/src/sessionKeys.ts`, `buildExecuteViaSessionTransaction` (was regel 429) en
+`buildTransferTokenViaSessionTransaction` (was regel 472) - de session-PDA-`AccountMeta` van
+`isWritable: false` naar `isWritable: true` gezet, met een verwijzing naar de `mut`-reden in
+`instructions.rs` erbij. Verder niets aangeraakt.
+
+**Geverifieerd, niet aangenomen (twee lagen):**
+- `tests/writability_check.ts` (uit de audit-verificatie zelf): isoleert de writability-variabele
+  via Anchor's eigen typed builder - een instructie met session `isWritable:true` (de fix)
+  slaagt en werkt `spent_lamports` bij; dezelfde instructie met de meta handmatig naar
+  `isWritable:false` gezet (de oude bug) faalt on-chain met `AnchorError: ConstraintMut`. Nog
+  steeds groen na de fix (ongewijzigd, bevestigt het onderliggende mechanisme opnieuw).
+- `tests/m2_fix_verify.ts` (nieuw, sluit de cirkel): roept de ECHTE, gepatchte
+  `buildExecuteViaSessionTransaction`/`buildTransferTokenViaSessionTransaction` rechtstreeks aan
+  vanuit `client/src/sessionKeys.ts` (niet een losstaande reconstructie) tegen een lokale
+  validator - beide slagen nu on-chain, `spent_lamports`/`spent_token_amount` correct
+  bijgewerkt. Vereiste tijdelijk hetzelfde lokale-only-programma-ID-trucje als secties 41/67
+  (nu ook op `client/src/programId.ts` toegepast), volledig teruggedraaid na de testrun
+  (`git checkout -- programs/ Anchor.toml client/src/programId.ts`, geverifieerd: weer
+  `9ma6...` overal).
+- Volledige suite: 57/58 groen - de enige falende test is de reeds bekende, aparte, nog niet
+  gefixte C-1 (bovenstaand), geen regressie. `tsc --noEmit` (client): exact de 4 bekende,
+  pre-bestaande fouten, geen nieuwe.
+
+Geen fix voor C-1/M-3/H-3 in deze sectie - expliciet uitgesteld per afspraak (C-1 krijgt een
+apart ontwerpgesprek, M-3/H-3 zonder haast erna).

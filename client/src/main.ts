@@ -35,6 +35,7 @@ import { showAddSessionKeyPreview } from "./addSessionKeyPreview";
 import { showRemoveAllowedProgramPreview } from "./removeAllowedProgramPreview";
 import { showRemoveSessionKeyPreview } from "./removeSessionKeyPreview";
 import { showCancelRecoveryPreview } from "./cancelRecoveryPreview";
+import { showHuntPreview } from "./huntPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -2308,6 +2309,140 @@ async function runStep22(): Promise<void> {
     log("SUCCES - cancel_recovery-bevestigingskaart end-to-end bewezen op devnet:");
     log("beide gegarandeerde takken (geen recovery ervoor, geen recovery erna) ECHT");
     log("getest, plus de daadwerkelijke annulering met een echte passkey-handtekening.");
+    log("");
+    log("Klaar voor stap 23.");
+
+    (document.getElementById("step23-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep23(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("Stap 23: hunt-bevestigingskaart (STATUS.md sectie 73) - laatste LAAG-kaart,");
+  log("sluit UI-fase 1 af. Gewone klik, geen tone:danger.");
+  log("");
+
+  try {
+    log("23a. Kaart tonen tegen een NIET-BESTAAND token-account - moet DIRECT");
+    log("'would-fail: not-found' teruggeven, GEEN kaart, GEEN prompt.");
+    const nonExistent = Keypair.generate().publicKey;
+    const before = await showHuntPreview(connection, lastPdas.vaultPda, nonExistent);
+    if (before.kind !== "would-fail" || before.reason !== "not-found") {
+      log("FOUT: verwachtte would-fail/not-found, kreeg: " + JSON.stringify(before));
+      return;
+    }
+    log("Bevestigd: " + JSON.stringify(before) + " - geen kaart getoond.");
+    log("");
+
+    log("23b. Spam-SPL-token aanmaken en naar de vault-PDA sturen (simuleert ongewenste");
+    log("airdrop). Dit vraagt om 2 goedkeuringen in je wallet-extensie.");
+    const { mint, tokenAccount } = await setupSpamTokenAccount(
+      connection,
+      lastWallet,
+      lastPdas.vaultPda
+    );
+    log("Spam-mint: " + mint.toBase58());
+    log("Spam-token-account (eigendom van vault): " + tokenAccount.toBase58());
+    log("");
+
+    const incineratorBalanceBefore = await connection.getBalance(INCINERATOR);
+
+    log("23c. Kaart tonen tegen dit ECHTE spam-token-account - moet doelaccount, mint,");
+    log("saldo en de rent-splitsing-consequentie tonen, en op een gewone klik wachten.");
+    const choice = await showHuntPreview(connection, lastPdas.vaultPda, tokenAccount);
+    if (choice.kind === "denied") {
+      log("Geweigerd in de bevestigingskaart - hunt NIET aangeroepen, geen passkey-prompt.");
+      return;
+    }
+    if (choice.kind === "would-fail") {
+      log("FOUT: onverwacht 'would-fail' (" + choice.reason + ") - dit zou een geldig doel");
+      log("moeten zijn.");
+      return;
+    }
+    log(
+      "Bevestigd. Kaart toonde mint=" + choice.tokenMint.toBase58() +
+        " (moet gelijk zijn aan de zojuist aangemaakte spam-mint)."
+    );
+    if (!choice.tokenMint.equals(mint)) {
+      log("FOUT: kaart toonde een andere mint dan de daadwerkelijk aangemaakte spam-mint.");
+      return;
+    }
+    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+    const { transaction } = await buildHuntTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPdas.vaultPda,
+      choice.targetTokenAccount,
+      choice.tokenMint,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    log("Controleren of het spam-token-account daadwerkelijk gesloten is...");
+    const closedAccountInfo = await connection.getAccountInfo(tokenAccount);
+    if (closedAccountInfo !== null) {
+      log("FOUT: target_token_account bestaat nog na bevestigde hunt (onverwacht).");
+      return;
+    }
+    log("Bevestigd: account gesloten.");
+
+    const incineratorBalanceAfter = await connection.getBalance(INCINERATOR);
+    const incineratorDelta = incineratorBalanceAfter - incineratorBalanceBefore;
+    log("Incinerator-toename door deze hunt: " + incineratorDelta + " lamports");
+    if (incineratorDelta <= 0) {
+      log("FOUT: incinerator-saldo is niet toegenomen (onverwacht).");
+      return;
+    }
+    log("");
+
+    log("23d. Kaart een derde keer tonen tegen hetzelfde, nu gesloten account - moet");
+    log("opnieuw DIRECT 'would-fail: not-found' teruggeven.");
+    const after = await showHuntPreview(connection, lastPdas.vaultPda, tokenAccount);
+    if (after.kind !== "would-fail" || after.reason !== "not-found") {
+      log("FOUT: verwachtte would-fail/not-found, kreeg: " + JSON.stringify(after));
+      return;
+    }
+    log("Bevestigd: " + JSON.stringify(after) + " - geen kaart getoond.");
+    log("");
+
+    log("SUCCES - hunt-bevestigingskaart end-to-end bewezen op devnet: beide");
+    log("gegarandeerde weigeringen (not-found ervoor, not-found erna) ECHT getest, plus");
+    log("de daadwerkelijke burn+close+rentsplitsing met een echte passkey-handtekening.");
+    log("");
+    log("UI-fase 1 is hiermee compleet - elke passkey-ondertekende, risicodragende");
+    log("instructie heeft nu een mens-leesbare bevestigingskaart.");
   } catch (err) {
     log("");
     log("FOUT:");
@@ -2386,4 +2521,7 @@ document.getElementById("step21-btn")!.addEventListener("click", () => {
 });
 document.getElementById("step22-btn")!.addEventListener("click", () => {
   runStep22();
+});
+document.getElementById("step23-btn")!.addEventListener("click", () => {
+  runStep23();
 });

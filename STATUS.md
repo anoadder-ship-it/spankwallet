@@ -4631,3 +4631,164 @@ nodig):**
 `tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten, geen nieuwe.
 
 **Openstaand binnen LAAG:** `hunt` - daarna is UI-fase 1 compleet.
+
+## 72. WebAuthn API Hijacking: bewust erkend, buiten-scope residu-risico
+
+Extern onderzoek aangedragen (DEF CON 33/SquareX Labs, "Passkeys Pwned") over een
+aanvalsklasse die nog niet apart behandeld was: een kwaadaardige browserextensie (of, met
+Chrome's eigen `chrome.webAuthenticationProxy`-API, een extensie met die permissie) die
+`navigator.credentials.create()`/`.get()` onderschept, zonder de FIDO2-cryptografie zelf te
+breken. Uitgezocht met bronbewijs, niet aangenomen - zelfde discipline als elke eerdere
+bevinding.
+
+**client/'s CSP (`script-src 'self'`, geen `unsafe-inline`/`eval`) biedt hiertegen GEEN
+bescherming, bevestigd tegen Chrome's eigen documentatie.** Browserextensies draaien
+standaard in een "isolated world" - een aparte JS-heap dan de pagina, maar met GEDEELDE
+toegang tot native globals (`navigator`, `document`, `fetch`, etc.) - en hebben daarbij hun
+EIGEN CSP, niet die van de pagina. Onze CSP beschermt dus uitsluitend tegen
+XSS-achtige injectie in de eigen pagina-scriptcontext, niet tegen een extensie die
+`navigator.credentials` van buitenaf herschrijft. `chrome.webAuthenticationProxy` ligt
+nog een laag dieper (browser-interne IPC, routering vóór de documentlaag) - pagina-CSP
+heeft daar per definitie geen enkele jurisdictie over.
+
+**Client-side detectie van een gemanipuleerde `navigator.credentials` is bewust NIET
+gebouwd - bekende technieken (`.toString()` vergelijken met de `[native code]`-signatuur)
+zijn zelf triviaal te omzeilen** (een `Proxy`-trap of het overschrijven van
+`Function.prototype.toString` faked dezelfde output) - genoeg een bekend
+kat-en-muis-probleem dat TC39 er een eigen voorstel ("function implementation hiding") over
+heeft. Zo'n check zou hier schijnzekerheid geven, geen echte.
+
+**De kern, na het volledige pad natrekken (`verify_passkey_signature_core`,
+`challenge.ts`, `webauthnSign.ts`):**
+- Volledige sleutel-substitutie (een extensie die met een EIGEN keypair ondertekent) is
+  zelf onschadelijk: `verify_passkey_signature_core` (`instructions.rs`) herleidt de
+  daadwerkelijk ondertekenende publieke sleutel uit de secp256r1-precompile en eist een
+  match met `owner_passkey`/`additional_passkeys` - geen echte private key, geen geldige
+  handtekening, structureel afgevangen.
+- Het reële risico is een vijandige extensie die de ECHTE hardware-ceremonie laat
+  doorgaan, maar de challenge-/payload-bytes herschrijft VLAK VOORDAT
+  `navigator.credentials.get()` ze daadwerkelijk ondertekent. Architecturaal exact
+  hetzelfde als het al-bekende blind-signing-risico dat UI-fase 1 addresseert, maar via
+  een ANDER toegangspunt (extensie-niveau, na de bevestigingskaart en na
+  `buildExpectedChallenge()` - dus stroomafwaarts van alles wat pagina-JS nog kan
+  controleren). `signWithPasskey()`'s eigen challenge-vergelijking (`webauthnSign.ts`) is
+  zelfreferentieel en vangt dit niet af: beide kanten van die vergelijking zijn afgeleid
+  van dezelfde, mogelijk al-vervalste waarde.
+- **Niet oplosbaar vanuit pagina-JS alleen tegen een vijandige extensie** - elk
+  detectie-/verificatiemechanisme dat de pagina zelf zou bouwen, loopt over exact
+  dezelfde, door de extensie beheersbare native globals. De enige echte mitigaties zijn
+  niet-technisch (aan onze kant): een hardware-sleutel met een eigen, onafhankelijk
+  scherm dat de daadwerkelijke transactie-inhoud toont vóór ondertekening (het apparaat
+  zelf, niet de browser, is dan de laatste checkpoint), en gebruikers-hygiëne rond welke
+  extensies vertrouwd worden.
+
+**Vervolgvraag: kan de wallet-pagina zelf een acceptlijst voor extensies bouwen, of een
+eigen wachtwoord/PIN als extra laag? Beide vermoedens bevestigd, niet aangenomen.**
+
+- **Een acceptlijst vanuit de pagina zelf is technisch onmogelijk.** Geen enkele
+  standaard-JavaScript-API geeft een gewone webpagina toegang tot de lijst geïnstalleerde
+  extensies. `chrome.management` (de enige API die zoiets zou kunnen) is EXCLUSIEF
+  beschikbaar voor extensies zelf (vereist een manifest-permissie), niet voor pagina's -
+  dat `chrome.management`-object bestaat simpelweg niet in een gewone pagina's
+  `window`. Er bestaan indirecte fingerprinting-technieken (extensies detecteren via
+  CSS-neveneffecten die ze in de pagina injecteren), maar die zijn onvolledig (werken
+  alleen voor extensies die zichtbare sporen achterlaten - een doelbewust stille
+  kwaadaardige extensie laat die sporen juist niet na), on-line al erkend als een
+  privacy-schendende techniek die browsers actief proberen tegen te gaan, en geven sowieso
+  geen BLOKKEER-mogelijkheid, alleen giswerk achteraf. Een acceptlijst zou een
+  browser-niveau-functie moeten zijn (enterprise-policy, o.i.d.), structureel geen
+  pagina-functie.
+- **Een eigen wachtwoord/PIN zou dit risico niet verkleinen.** Andere dreiging, andere
+  laag: een paginawachtwoord verifieert "is dit de juiste mens, hier, nu" - de
+  WebAuthn-hijacking-dreiging zit niet bij ongeautoriseerde toegang, maar bij een extensie
+  die AL in dezelfde browser meedraait terwijl de LEGITIEME, al-geauthenticeerde gebruiker
+  zelf de actie uitvoert. Een extensie die `navigator.credentials.get()` onderschept,
+  omzeilt geen paginawachtwoord - hij zit er architecturaal naast, downstream van elke
+  pagina-eigen controle, en interesseert zich niet voor wat de pagina daarvóór liet zien of
+  vroeg. Een wachtwoord voegt hier dus letterlijk nul verdediging toe.
+
+**De vier eerder genoemde partiële mitigaties, stuk voor stuk beoordeeld:**
+
+1. **Extensie-detectie als zwak signaal (bv. `navigator.credentials.get.toString()`
+   vergelijken met de native-code-signatuur): bewust NIET gebouwd.** Zelfde reden als
+   hierboven al vastgesteld - triviaal te omzeilen (`Proxy`-trap of
+   `Function.prototype.toString`-overschrijving faked dezelfde output). Een control
+   toevoegen die schijnzekerheid geeft is hier erger dan geen control - precies het soort
+   understatement dat dit project bewust vermijdt.
+2. **Hardware-sleutel-ondersteuning: AL AANWEZIG, geen wijziging nodig.** Nagelezen in
+   `passkey.ts`: `authenticatorSelection` zet geen `authenticatorAttachment` - registratie
+   staat dus zowel platform- (Touch ID/Windows Hello) als cross-platform-authenticators
+   (losse hardware-sleutels, YubiKey e.d.) toe, zonder enige codewijziging. Belangrijke
+   nuance, expliciet genoemd omdat verkeerd begrepen "hardware sleutel" hier valse
+   geruststelling zou geven: gangbare consumenten-FIDO2-sleutels (bv. de YubiKey 5-serie)
+   hebben GEEN eigen scherm - alleen een aanraaksensor/LED die "iets wordt ondertekend"
+   bevestigt, niet WAT. Zo'n sleutel tekent een vervalste challenge dus even blind als de
+   browser zelf. Alleen een authenticator met een eigen, onafhankelijk display dat de
+   daadwerkelijke transactie-inhoud toont (zeldzaam binnen standaard-FIDO2-hardware) sluit
+   het gat echt. Kon dit specifieke, YubiKey-scherm-detail niet met een verse bronvermelding
+   herbevestigen (websearch-sessielimiet bereikt tijdens dit onderzoek) - vermeld daarom
+   met dat voorbehoud, niet als hard bevestigd feit zoals de rest van deze sectie.
+3. **Out-of-band bevestiging: is in essentie hetzelfde als punt 2** - een apparaat-eigen
+   scherm IS de out-of-band-bevestiging. Geen aparte SpankWallet-functie te bouwen; puur
+   een hardware-keuze van de gebruiker.
+4. **Extensie-hygiëne-waarschuwing: documentatie, geen code.** Vastgelegd hier en (indien
+   gewenst) in een toekomstige gebruikersgerichte README-sectie: installeer alleen
+   vertrouwde extensies, want een kwaadaardige of te-permissieve extensie ondermijnt
+   WebAuthn-zekerheid ongeacht wat deze pagina doet. Geen statische UI-waarschuwing
+   gebouwd zonder expliciet verzoek (scope-discipline).
+
+**Bewust geaccepteerd, buiten scope - zelfde categorie als een gecompromitteerd
+apparaat/OS (sectie 28's UI-veiligheidsroadmap noemt dit al impliciet: "een kleine
+kwetsbaarheid... kan direct tot verlies van fondsen leiden", zonder toen al specifiek
+over extensie-niveau-onderschepping te gaan).** Geen nieuwe client-side fix gebouwd of
+gepland naar aanleiding hiervan - de bevestigingskaarten uit UI-fase 1 blijven de juiste,
+volledige mitigatie tegen hun eigen doelbedreiging (kwaadaardige site/dApp als
+tegenstander, vóór de kaart), maar claimen bewust niet meer dan dat.
+
+## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
+
+Laatste kaart uit sectie 59's oorspronkelijke plan. Anders dan elke andere kaart heeft
+`hunt` on-chain geen `recovery_state.is_none()`-constraint (nagelezen in
+`instructions.rs::Hunt`, niet aangenomen) - de kaart voegt daarom bewust GEEN kunstmatige
+recovery-in-progress-weigering toe die het echte on-chain gedrag niet zou weerspiegelen.
+`friction: "click"`, geen `tone:"danger"` - zelfde LAAG-classificatie als sectie 66/67/71:
+het gevolg is begrensd tot precies dit ene spam-token-account, geen bevoegdheidsuitbreiding.
+
+**`huntPreview.ts` (nieuw):** pre-flight tegen het doel-token-account zelf (`getAccount`) -
+bestaat het niet, of is de eigenaar niet de vault-PDA, dan `would-fail`/`not-found` resp.
+`would-fail`/`invalid-target`, geen kaart. De mint wordt rechtstreeks UIT het doelaccount
+gelezen (niet als los, mogelijk inconsistent caller-argument aangenomen) en in het
+bevestigde resultaat teruggegeven, zodat de daadwerkelijk verstuurde instructie nooit kan
+afwijken van wat de kaart toonde. Doelaccount is bewust GEEN bewerkbaar veld - zelfde reden
+als `remove_session_key`'s sessiesleutel-keuze: al gekozen vóór de kaart, een tekstveld zou
+een verse RPC-call midden in de bevestiging vergen en het "wat je ziet is wat je
+ondertekent"-snapshot-principe breken. `rent_destination` is on-chain een kale,
+niet-vastgepinde `SystemAccount`, maar de bestaande `buildHuntTransaction` gebruikt daar
+altijd `payer` voor - geen apart keuzeveld toegevoegd dat de onderliggende clientfunctie
+niet eens ondersteunt (zelfde scope-discipline als `transfer_token`, sectie 63). Saldo 0
+krijgt een aparte "wordt alleen gesloten, geen burn-CPI nodig"-regel i.p.v. een misleidende
+"0 wordt verbrand"-formulering.
+
+**`main.ts` stap 23**: 23a toont de kaart tegen een compleet willekeurig, niet-bestaand
+account -> `would-fail`/`not-found`, geen kaart; 23b maakt een ECHT spam-SPL-token aan en
+stuurt het naar de vault-PDA (2 wallet-extensie-goedkeuringen); 23c toont de kaart tegen dit
+echte spam-account (confirmed-pad), verstuurt met een ECHTE passkey-handtekening, en
+verifieert daarna zowel dat het doelaccount daadwerkelijk gesloten is als dat de
+incinerator-balans is toegenomen; 23d toont de kaart een derde keer tegen hetzelfde, nu
+gesloten account -> weer `would-fail`/`not-found`. Vereist echte hardware-passkey-interactie
+(stappen 1/2 als vereisten) - dat deel is aan de gebruiker.
+
+**Wat ik zelf wel kon verifiëren (zelfde tweetrapsaanpak als sectie 66/67/71, geen hardware
+nodig):**
+- Echte devnet-integratie: tegen een volledig willekeurig, nooit bestaand token-account ->
+  `{kind:"would-fail", reason:"not-found"}`, geen kaart, geen prompt.
+- Kaartmechaniek (synthetisch, binnen één ononderbroken `javascript_exec`-aanroep, zelfde
+  tab-inactiviteits-mitigatie als eerdere secties): headline toont doelaccount, mint, correct
+  decimalen-geformatteerd saldo en de incinerator-adres/rentsplitsing-consequentie-zin exact
+  zoals `huntPreview.ts` ze opbouwt; bevestigen resolvet naar een niet-`null`-waarde.
+  Screenshot genomen.
+
+`tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten, geen nieuwe.
+
+**UI-fase 1 is hiermee compleet: elke passkey-ondertekende, risicodragende instructie heeft
+nu een mens-leesbare bevestigingskaart.**

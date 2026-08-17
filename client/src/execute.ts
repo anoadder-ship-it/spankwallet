@@ -7,7 +7,13 @@ import {
 } from "@solana/web3.js";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  readActionNonce,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 
@@ -39,9 +45,10 @@ export async function buildExecuteTransaction(
   credentialId: Uint8Array,
   rpId: string
 ): Promise<ExecuteResult> {
+  const nonce = await readActionNonce(connection, walletPda);
   const amountBytes = new Uint8Array(8);
   new DataView(amountBytes.buffer).setBigUint64(0, amountLamports, true);
-  const payload = concatBytes(recipient.toBytes(), amountBytes);
+  const payload = concatBytes(actionNonceLeBytes(nonce), recipient.toBytes(), amountBytes);
 
   const expectedChallenge = buildExpectedChallenge(walletPda, "execute", payload);
 
@@ -60,13 +67,16 @@ export async function buildExecuteTransaction(
   const executeData = concatBytes(
     EXECUTE_DISCRIMINATOR,
     amountBytes,
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
   const executeIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): Execute#wallet schrijft
+      // action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
       { pubkey: recipient, isSigner: false, isWritable: true },
       { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },

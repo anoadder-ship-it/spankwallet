@@ -17,6 +17,8 @@ import {
   buildSecp256r1Instruction,
   encodeOptionalI64,
   advanceOnChainClockPast,
+  fetchActionNonce,
+  nonceLeBytes,
   TestPasskey,
 } from "./webauthnTestHelper";
 
@@ -99,11 +101,13 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
     passkeysPda: PublicKey,
     newPasskeyBytes: Buffer
   ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), newPasskeyBytes]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "add_passkey",
-      newPasskeyBytes
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       signingPasskey,
@@ -116,7 +120,7 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
     );
 
     return program.methods
-      .addPasskey(Array.from(newPasskeyBytes), clientDataJSON)
+      .addPasskey(Array.from(newPasskeyBytes), new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         passkeys: passkeysPda,
@@ -134,11 +138,13 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
     passkeysPda: PublicKey,
     targetPasskeyBytes: Buffer
   ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), targetPasskeyBytes]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "remove_passkey",
-      targetPasskeyBytes
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       signingPasskey,
@@ -151,7 +157,7 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
     );
 
     return program.methods
-      .removePasskey(Array.from(targetPasskeyBytes), clientDataJSON)
+      .removePasskey(Array.from(targetPasskeyBytes), new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         passkeys: passkeysPda,
@@ -174,11 +180,13 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
       [Buffer.from("policy"), walletPda.toBuffer()],
       program.programId
     );
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), programIdToAllow.toBuffer()]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "add_allowed_program",
-      programIdToAllow.toBuffer()
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       signingPasskey,
@@ -191,7 +199,7 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
     );
 
     return program.methods
-      .addAllowedProgram(programIdToAllow, clientDataJSON)
+      .addAllowedProgram(programIdToAllow, new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         policy: policyPda,

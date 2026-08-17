@@ -4393,3 +4393,114 @@ nagelezen en bevestigd, dus terecht ongewijzigd gelaten.
 
 Geen fix voor C-1/M-3/H-3 in deze sectie - expliciet uitgesteld per afspraak (C-1 krijgt een
 apart ontwerpgesprek, M-3/H-3 zonder haast erna).
+
+## 69. C-1 gefixt: wallet-brede monotone action_nonce sluit de replay-kwetsbaarheid
+
+Vervolg op sectie 68 (C-1: geen nonce/blockhash-binding in de WebAuthn-challenge, empirisch
+bevestigd exploiteerbaar). Zelfde proces als multi-passkey/session-keys: eerst een volledig
+ontwerpplan (nonce-aanpak vs. per-instructie-tellers vs. blockhash-binding, concurrency/UX,
+migratiepad, client-impact, cross-cluster-replay als apart punt, teststrategie), pas gebouwd na
+expliciete goedkeuring.
+
+**Ontwerp:** één `action_nonce: u64` op `WalletAccount`, meegebonden als de EERSTE bytes van
+elke challenge-payload, voor alle 11 passkey-ondertekende instructies behalve `init_wallet`
+zelf (dat al structureel replay-proof is via de `init`-constraint - een tweede aanroep met
+dezelfde `seed_key` faalt sowieso, geen nonce nodig). Verhoogd ná geslaagde
+handtekeningverificatie, in dezelfde instructie - Solana-transacties zijn atomair, dus een
+latere `require!`-fout rolt de verhoging vanzelf mee terug, geen nonce raakt ooit "verbrand"
+door een uiteindelijk falende aanroep. Een klein, apart `client_action_nonce`-argument (naast
+de autoritatieve on-chain waarde die de challenge zelf gebruikt) geeft een duidelijke,
+losstaande `StaleActionNonce`-fout i.p.v. de generieke `WebAuthnChallengeMismatch` - puur
+UX, geen veiligheidsmechanisme (de client kan er niets mee vervalsen, de challenge wordt
+altijd met `wallet.action_nonce` zelf opgebouwd). Blockhash-/slot-binding overwogen en
+verworpen als primair mechanisme: `SysvarRecentBlockhashes` bleek verouderd (niet meer
+betrouwbaar on-chain te lezen), en zelfs `Clock::slot`-binding zou een handtekening alleen
+tijdelijk (~60-90s) begrenzen, niet écht eenmalig maken zoals een nonce.
+
+**Rust (`instructions.rs`/`state.rs`/`errors.rs`/`lib.rs`):** `action_nonce` achteraan
+`WalletAccount` toegevoegd (LEN 231 → 239, zelfde fail-closed-migratieprincipe als
+`SessionKeyAccount`'s spend-limits-velden, sectie 53) - twee gedeelde helpers
+(`check_current_action_nonce`/`consume_action_nonce`) hergebruikt in alle 11 instructies,
+`mut` toegevoegd aan `wallet` in de 10 structs die dat nog misten. Terzijde ontdekt en
+meteen gefixt: `ExecuteAdvanced`'s `policy`-veld (`Account<PolicyAccount>`, 1066 bytes) samen
+met de nu 8 bytes grotere `WalletAccount` overschreed de BPF-stack-limiet (4096 bytes/frame)
+- omgezet naar `UncheckedAccount` + `read_policy_account()`, zelfde patroon en reden als
+`ExecuteAdvancedViaSession#session` al eerder.
+
+**Klein, hard geleerd proces-punt tijdens het bouwen:** een `git checkout -- programs/
+Anchor.toml client/src/programId.ts` bedoeld om alleen het tijdelijke lokale-test-programma-ID
+terug te draaien (zelfde trucje als secties 41/67/68) veegde per ongeluk de HELE `programs/`-map
+schoon, inclusief alle net gebouwde C-1-Rust-wijzigingen - niets was gecommit, dus niets
+permanent verloren, maar wel een volledige herbouw van `state.rs`/`errors.rs`/
+`instructions.rs`/`lib.rs` nodig vanuit de eigen sessie-geschiedenis. Voortaan: nooit meer
+`git checkout` op een hele map als alleen een paar ID-strings teruggedraaid hoeven te worden -
+gerichte edits op de exacte regel, zoals de rest van deze sectie ook doet.
+
+**Client (11 bestanden/functies):** elke bouwer haalt zelf `action_nonce` op via de nieuwe
+`readActionNonce()`-helper in `challenge.ts` (`connection`/`walletPda` had elke functie al,
+dus GEEN nieuwe publieke parameter nodig - transparant voor `main.ts` en elke andere
+aanroeper, bevestigd via `tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten, geen
+nieuwe). `readActionNonce()` was zelf een addertje onder het gras: `action_nonce` staat NA
+twee `Option<T>`-velden (`recovery_state`, `deposit_authority`) - Borsh codeert `None` als
+exact 1 byte, niet als de "maximale" ruimte, dus een naïef vast offset (231, "de oude
+231-byte layout plus 8") gaf stilzwijgend een verkeerde (altijd-0) nonce terug zodra beide
+`None` zijn (het normale geval) - empirisch ontdekt tijdens het testen (Anchors eigen
+`program.account.fetch()` gaf wél de juiste waarde, een handmatige vaste-offset-lezing niet).
+Opgelost door de tag-bytes daadwerkelijk te lezen en het echte offset op te bouwen, zelfde
+aanpak als `recovery.ts` al voor `recovery_state` deed. Terzijde ALSNOG een M-2-achtige
+`isWritable:false`-bug gevonden en gefixt in alle 10 betrokken instructie-bouwers: dezelfde
+klasse fout als sectie 68 (`wallet` moet nu `mut`/writable zijn, stond nog overal op `false`).
+
+**Geverifieerd:**
+- Volledige Rust/Anchor-testsuite: 62/63 groen (dezelfde ene, bekende, omgevingsgerelateerde
+  flake in de sessiesleutel-expiry-test, losstaand van dit werk). `cargo test --lib`: een
+  nieuwe, gerichte unit-test bevestigt het fail-closed-migratiepad direct op Anchor/Borsh's
+  eigen (de)serialisatie (een oude 231-byte `WalletAccount` faalt schoon tegen de nieuwe
+  239-byte layout).
+- `tests/replay_execute.ts` omgebouwd van bewijs-van-het-lek naar permanente
+  regressietest: eerste `execute()`-poging slaagt nog steeds, een TWEEDE poging met dezelfde
+  (nu verouderde) handtekening wordt geweigerd, vaultbalans blijft na de tweede poging
+  ongewijzigd.
+- `tests/actionNonce.ts` (nieuw): nonce hoogt precies met 1 op per geslaagde aanroep;
+  verouderde nonce geeft specifiek `StaleActionNonce` (niet een cryptische generieke fout) op
+  zowel `execute` als `add_passkey` (administratieve categorie) als `execute_advanced` (echte
+  CPI, alleen de actuele nonce voert 'm daadwerkelijk uit); twee geldige, verschillende
+  handtekeningen op dezelfde startnonce - de eerste wint, de tweede wordt netjes geweigerd
+  (optimistic-concurrency-semantiek, geen crash/undefined behavior).
+- Client-kant: elke van de 11 payload-/instructiedata-opbouwen handmatig, byte-voor-byte
+  gecontroleerd tegen de bijbehorende Rust-kant (positie van de nonce, argumentvolgorde) -
+  geen mismatch gevonden. NIET (nog) getest tegen een echte browser/hardware-passkey op
+  devnet - dat vereist een aparte sessie, zoals elke andere client-wijziging in dit project
+  z'n uiteindelijke bevestiging altijd via een echte `stap N`-browsertest krijgt.
+- Empirisch gecontroleerd vóór het bouwen: 12 bestaande `WalletAccount`s op devnet, alle
+  vaults met alleen triviale rent-exempt-minimum devnet-SOL (~0,0155 SOL totaal), één met een
+  actieve `recovery_state`. Nog niet gemigreerd/gedeployed - devnet-only, geen mainnet-
+  deployment (bevestigd: geen enkele `mainnet-beta`-referentie in dit document).
+
+**Nog open, bewust uitgesteld:** de client-side stale-nonce-retry-UX (vriendelijke
+herbevestig-melding + automatische re-sign) is ontworpen maar nog niet in `main.ts` gebouwd -
+volgt als kleine, aparte stap wanneer er weer aan de UI-laag gewerkt wordt. Idem het
+daadwerkelijk uitvoeren van de devnet-deploy (dezelfde Squads-multisig-propose/approve/
+timelock-flow als elke eerdere upgrade) en het vooraf leeghalen van de 12 bestaande
+testwallets.
+
+### Mainnet-vereiste (apart van C-1, uit hetzelfde ontwerpgesprek): eigen program-ID per cluster
+
+De nonce-fix lost cross-cluster-replay NIET op - de challenge-payload bevat geen enkel
+cluster-identificerend gegeven (`program_id`/`wallet_pda`/`domain`/`payload`, nu inclusief de
+nonce, zijn allemaal cluster-agnostisch). Als dit programma ooit op hetzelfde adres op mainnet
+zou draaien, zou een wallet uit dezelfde seed-key daar dezelfde PDA krijgen met
+`action_nonce` die ook weer bij 0 begint - een oude, publiek zichtbare devnet-handtekening
+van vroeg in een wallet's geschiedenis blijft dan letterlijk bruikbaar op mainnet zodra de
+nonces toevallig overeenkomen (zeer aannemelijk vlak na een verse mainnet-`init_wallet`).
+
+De daadwerkelijke, afdoende bescherming bestaat al structureel: `crate::ID` (uit
+`declare_id!`) zit al in elke challenge-hash. Zolang mainnet gedeployed wordt onder een
+VERS, ONAFHANKELIJK gegenereerd programma-keypair - nooit het devnet-keypair-bestand
+hergebruikt - wijkt `crate::ID` vanzelf af en daarmee elke challenge (genonced of niet).
+**Hard vastgelegd als mainnet-vereiste, nog te doen bij een daadwerkelijke mainnet-deploy:**
+een apart, vers gegenereerd programma-keypair voor mainnet (nooit het devnet-bestand
+kopiëren), vooraf geverifieerd met dezelfde discipline als elke eerdere deploy
+(Programma-ID-byte-offset-sanity-check, secties 39/41/58) - plus een expliciete
+`crate::ID`-vergelijking tussen de lokale build en het devnet-adres vóór een mainnet-deploy
+begint, die weigert door te gaan bij een match.

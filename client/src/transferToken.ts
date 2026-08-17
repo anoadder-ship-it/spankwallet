@@ -8,7 +8,13 @@ import {
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  readActionNonce,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 
@@ -39,9 +45,11 @@ export async function buildTransferTokenTransaction(
   credentialId: Uint8Array,
   rpId: string
 ): Promise<TransferTokenResult> {
+  const nonce = await readActionNonce(connection, walletPda);
   const amountBytes = new Uint8Array(8);
   new DataView(amountBytes.buffer).setBigUint64(0, amount, true);
   const payload = concatBytes(
+    actionNonceLeBytes(nonce),
     recipientTokenAccount.toBytes(),
     tokenMint.toBytes(),
     amountBytes
@@ -64,6 +72,7 @@ export async function buildTransferTokenTransaction(
   const transferData = concatBytes(
     TRANSFER_TOKEN_DISCRIMINATOR,
     amountBytes,
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
@@ -75,7 +84,9 @@ export async function buildTransferTokenTransaction(
   const transferIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): TransferToken#wallet schrijft
+      // action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: false },
       { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
       { pubkey: recipientTokenAccount, isSigner: false, isWritable: true },

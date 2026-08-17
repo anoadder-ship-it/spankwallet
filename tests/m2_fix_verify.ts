@@ -20,6 +20,8 @@ import {
   signTestChallenge,
   buildSecp256r1Instruction,
   encodeOptionalI64,
+  fetchActionNonce,
+  nonceLeBytes,
 } from "./webauthnTestHelper";
 import {
   buildExecuteViaSessionTransaction,
@@ -132,7 +134,9 @@ describe("M-2 FIX VERIFY: echte client/src/sessionKeys.ts-functies tegen de loka
     const MAX_U64 = new BN("18446744073709551615");
     const currentSlot = await provider.connection.getSlot();
     const expirySlot = currentSlot + 10000;
+    const addNonce = await fetchActionNonce(provider.connection, walletPda);
     const addPayload = Buffer.concat([
+      nonceLeBytes(addNonce),
       sessionKeypair.publicKey.toBuffer(),
       new BN(expirySlot).toArrayLike(Buffer, "le", 8),
       Buffer.from([canExecute ? 1 : 0]),
@@ -166,6 +170,7 @@ describe("M-2 FIX VERIFY: echte client/src/sessionKeys.ts-functies tegen de loka
         tokenMint,
         canTransferToken ? MAX_U64 : new BN(0),
         canTransferToken ? MAX_U64 : new BN(0),
+        new BN(addNonce.toString()),
         addSigned.clientDataJSON
       )
       .accounts({

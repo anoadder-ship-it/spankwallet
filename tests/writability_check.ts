@@ -18,6 +18,8 @@ import {
   signTestChallenge,
   buildSecp256r1Instruction,
   encodeOptionalI64,
+  fetchActionNonce,
+  nonceLeBytes,
 } from "./webauthnTestHelper";
 
 const MAX_U64 = new BN("18446744073709551615");
@@ -103,7 +105,9 @@ describe("AUDIT M-2: session-PDA isWritable in execute_via_session", () => {
     // writability-vraag wordt hier getest, niet de spend-limit-logica).
     const expirySlot = currentSlot + 10000;
     const tokenMintPlaceholder = PublicKey.default;
+    const addNonce = await fetchActionNonce(provider.connection, walletPda);
     const addPayload = Buffer.concat([
+      nonceLeBytes(addNonce),
       sessionKeypair.publicKey.toBuffer(),
       new BN(expirySlot).toArrayLike(Buffer, "le", 8),
       Buffer.from([1]), // can_execute = true
@@ -133,6 +137,7 @@ describe("AUDIT M-2: session-PDA isWritable in execute_via_session", () => {
         tokenMintPlaceholder,
         new BN(0),
         new BN(0),
+        new BN(addNonce.toString()),
         addSigned.clientDataJSON
       )
       .accounts({

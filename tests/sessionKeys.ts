@@ -19,6 +19,8 @@ import {
   buildSecp256r1Instruction,
   encodeOptionalI64,
   advanceSlotPast,
+  fetchActionNonce,
+  nonceLeBytes,
   TestPasskey,
 } from "./webauthnTestHelper";
 
@@ -248,11 +250,13 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     policyPda: PublicKey,
     programIdToAllow: PublicKey
   ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), programIdToAllow.toBuffer()]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "add_allowed_program",
-      programIdToAllow.toBuffer()
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       signingPasskey,
@@ -265,7 +269,7 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
 
     return program.methods
-      .addAllowedProgram(programIdToAllow, clientDataJSON)
+      .addAllowedProgram(programIdToAllow, new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         policy: policyPda,
@@ -283,11 +287,13 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     policyPda: PublicKey,
     programId: PublicKey
   ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), programId.toBuffer()]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "remove_allowed_program",
-      programId.toBuffer()
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       signingPasskey,
@@ -300,7 +306,7 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
 
     return program.methods
-      .removeAllowedProgram(programId, clientDataJSON)
+      .removeAllowedProgram(programId, new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         policy: policyPda,
@@ -387,7 +393,8 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     const maxTokenAmountTotal =
       spendLimits.maxTokenAmountTotal ?? (canTransferToken ? MAX_U64 : new BN(0));
 
-    const payload = buildAddSessionKeyPayload(
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const rawPayload = buildAddSessionKeyPayload(
       sessionKey,
       expirySlot,
       canExecute,
@@ -400,6 +407,7 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       maxTokenAmountPerTx,
       maxTokenAmountTotal
     );
+    const payload = Buffer.concat([nonceLeBytes(nonce), rawPayload]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
@@ -431,6 +439,7 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
         tokenMint,
         maxTokenAmountPerTx,
         maxTokenAmountTotal,
+        new BN(nonce.toString()),
         clientDataJSON
       )
       .accounts({
@@ -452,11 +461,13 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     passkeysPda: PublicKey,
     sessionKey: PublicKey
   ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), sessionKey.toBuffer()]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "remove_session_key",
-      sessionKey.toBuffer()
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       signingPasskey,
@@ -469,7 +480,7 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
 
     return program.methods
-      .removeSessionKey(sessionKey, clientDataJSON)
+      .removeSessionKey(sessionKey, new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         session: deriveSessionPda(walletPda, sessionKey),

@@ -10,6 +10,7 @@ import {
 } from "@solana/web3.js";
 import { createHash } from "crypto";
 import { assert } from "chai";
+import BN from "bn.js";
 import type { Spankwallet } from "../target/types/spankwallet";
 import {
   generateTestPasskey,
@@ -17,6 +18,8 @@ import {
   signTestChallenge,
   buildSecp256r1Instruction,
   encodeOptionalI64,
+  fetchActionNonce,
+  nonceLeBytes,
   TestPasskey,
 } from "./webauthnTestHelper";
 
@@ -181,11 +184,13 @@ describe("spankwallet: programma-allowlist (add/remove_allowed_program) + execut
     policyPda: PublicKey,
     programId: PublicKey
   ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), programId.toBuffer()]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "add_allowed_program",
-      programId.toBuffer()
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       passkey,
@@ -198,7 +203,7 @@ describe("spankwallet: programma-allowlist (add/remove_allowed_program) + execut
     );
 
     return program.methods
-      .addAllowedProgram(programId, clientDataJSON)
+      .addAllowedProgram(programId, new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         policy: policyPda,
@@ -216,11 +221,13 @@ describe("spankwallet: programma-allowlist (add/remove_allowed_program) + execut
     policyPda: PublicKey,
     programId: PublicKey
   ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([nonceLeBytes(nonce), programId.toBuffer()]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
       "remove_allowed_program",
-      programId.toBuffer()
+      payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       passkey,
@@ -233,7 +240,7 @@ describe("spankwallet: programma-allowlist (add/remove_allowed_program) + execut
     );
 
     return program.methods
-      .removeAllowedProgram(programId, clientDataJSON)
+      .removeAllowedProgram(programId, new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         policy: policyPda,
@@ -284,7 +291,9 @@ describe("spankwallet: programma-allowlist (add/remove_allowed_program) + execut
     data: Buffer,
     extraSigners: Keypair[] = []
   ) {
-    const payload = buildExecuteAdvancedPayload(cpiProgramId, vaultPda, remainingAccounts, data);
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const rawPayload = buildExecuteAdvancedPayload(cpiProgramId, vaultPda, remainingAccounts, data);
+    const payload = Buffer.concat([nonceLeBytes(nonce), rawPayload]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
@@ -302,7 +311,7 @@ describe("spankwallet: programma-allowlist (add/remove_allowed_program) + execut
     );
 
     return program.methods
-      .executeAdvanced(data, clientDataJSON)
+      .executeAdvanced(data, new BN(nonce.toString()), clientDataJSON)
       .accounts({
         wallet: walletPda,
         vault: vaultPda,

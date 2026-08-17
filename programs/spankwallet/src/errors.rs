@@ -130,4 +130,10 @@ pub enum SpankWalletError {
 
     #[msg("token_mint is verplicht wanneer can_transfer_token true is")]
     SessionTokenMintRequired,
+
+    #[msg("Deze actie is ondertekend met een verouderde action_nonce - er is inmiddels een andere actie op dit wallet bevestigd, probeer opnieuw")]
+    StaleActionNonce,
+
+    #[msg("Onverwachte overflow bij het verhogen van action_nonce")]
+    ActionNonceOverflow,
 }

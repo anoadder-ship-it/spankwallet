@@ -8,7 +8,13 @@ import {
 } from "@solana/web3.js";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  readActionNonce,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 
 const ADD_PASSKEY_DISCRIMINATOR = Uint8Array.from([
@@ -94,7 +100,9 @@ export async function buildAddPasskeyTransaction(
   }
   const passkeysPda = derivePasskeysPda(walletPda);
 
-  const expectedChallenge = buildExpectedChallenge(walletPda, "add_passkey", newPasskey);
+  const nonce = await readActionNonce(connection, walletPda);
+  const payload = concatBytes(actionNonceLeBytes(nonce), newPasskey);
+  const expectedChallenge = buildExpectedChallenge(walletPda, "add_passkey", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -111,13 +119,16 @@ export async function buildAddPasskeyTransaction(
   const data = concatBytes(
     ADD_PASSKEY_DISCRIMINATOR,
     newPasskey,
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
   const addIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): AddPasskey#wallet schrijft
+      // action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: passkeysPda, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
@@ -160,7 +171,9 @@ export async function buildRemovePasskeyTransaction(
   }
   const passkeysPda = derivePasskeysPda(walletPda);
 
-  const expectedChallenge = buildExpectedChallenge(walletPda, "remove_passkey", targetPasskey);
+  const nonce = await readActionNonce(connection, walletPda);
+  const payload = concatBytes(actionNonceLeBytes(nonce), targetPasskey);
+  const expectedChallenge = buildExpectedChallenge(walletPda, "remove_passkey", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -177,13 +190,16 @@ export async function buildRemovePasskeyTransaction(
   const data = concatBytes(
     REMOVE_PASSKEY_DISCRIMINATOR,
     targetPasskey,
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
   const removeIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): RemovePasskey#wallet schrijft
+      // action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: passkeysPda, isSigner: false, isWritable: true },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
     ],

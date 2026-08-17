@@ -243,6 +243,11 @@ pub fn init_wallet(
     wallet.recovery_timelock_seconds =
         recovery_timelock_seconds.unwrap_or(DEFAULT_RECOVERY_TIMELOCK_SECONDS);
     wallet.deposit_authority = None;
+    // C-1-fix (STATUS.md sectie 69): geen client_action_nonce-argument nodig
+    // hier - init_wallet is al structureel replay-proof (de `init`-constraint
+    // op wallet hierboven faalt sowieso op een tweede aanroep met dezelfde
+    // seed_key, het account bestaat dan al). Nonce start gewoon op 0.
+    wallet.action_nonce = 0;
 
     let vault = &mut ctx.accounts.vault;
     vault.wallet = wallet.key();
@@ -536,11 +541,45 @@ fn build_expected_challenge(wallet: &Pubkey, domain: &[u8], payload: &[u8]) -> V
         .to_vec()
 }
 
+/// C-1-fix (STATUS.md sectie 69): controleert dat de client dezelfde
+/// action_nonce noemt als de autoritatieve, on-chain waarde - geeft een
+/// duidelijke, aparte foutmelding (StaleActionNonce) i.p.v. de generieke
+/// WebAuthnChallengeMismatch die zonder deze check zou optreden zodra de
+/// handtekening met een verouderde nonce ondertekend blijkt. Puur een
+/// UX-verbetering, GEEN veiligheidsmechanisme op zich: de daadwerkelijke
+/// bescherming komt van het feit dat de challenge hieronder in elke
+/// aanroepende instructie ALTIJD met deze autoritatieve wallet.action_nonce
+/// wordt opgebouwd, nooit met de client-waarde zelf - een client kan dus
+/// nooit met een verzonnen nonce een geldige handtekening produceren.
+fn check_current_action_nonce(wallet: &WalletAccount, client_action_nonce: u64) -> Result<u64> {
+    require!(
+        client_action_nonce == wallet.action_nonce,
+        SpankWalletError::StaleActionNonce
+    );
+    Ok(wallet.action_nonce)
+}
+
+/// Verhoogt action_nonce na een geslaagde handtekeningverificatie - maakt de
+/// zojuist gebruikte handtekening blijvend onbruikbaar voor een latere
+/// aanroep (het eigenlijke C-1-lek: replay van een eenmaal geldige,
+/// ondertekende actie). Atomair met de rest van de instructie: een latere
+/// require!-fout verderop in dezelfde instructie rolt deze verhoging vanzelf
+/// mee terug, Solana-transacties zijn all-or-nothing - geen nonce raakt ooit
+/// "verbrand" door een instructie die uiteindelijk faalt.
+fn consume_action_nonce(wallet: &mut WalletAccount) -> Result<()> {
+    wallet.action_nonce = wallet
+        .action_nonce
+        .checked_add(1)
+        .ok_or(SpankWalletError::ActionNonceOverflow)?;
+    Ok(())
+}
+
 // execute
 
 #[derive(Accounts)]
 pub struct Execute<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -592,9 +631,13 @@ pub struct Execute<'info> {
 pub fn execute(
     ctx: Context<Execute>,
     amount: u64,
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
-    let mut payload = Vec::with_capacity(32 + 8);
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + 32 + 8);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(ctx.accounts.recipient.key().as_ref());
     payload.extend_from_slice(&amount.to_le_bytes());
 
@@ -606,6 +649,7 @@ pub fn execute(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     // Directe lamport-manipulatie i.p.v. een System-Program-CPI: de vault is
     // eigendom van ONS programma, niet van System Program (zelfde situatie
@@ -642,6 +686,7 @@ pub fn execute(
 #[derive(Accounts)]
 pub struct TransferToken<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -698,9 +743,13 @@ pub struct TransferToken<'info> {
 pub fn transfer_token(
     ctx: Context<TransferToken>,
     amount: u64,
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
-    let mut payload = Vec::with_capacity(32 + 32 + 8);
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + 32 + 32 + 8);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(ctx.accounts.recipient_token_account.key().as_ref());
     payload.extend_from_slice(ctx.accounts.token_mint.key().as_ref());
     payload.extend_from_slice(&amount.to_le_bytes());
@@ -714,6 +763,7 @@ pub fn transfer_token(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     let wallet_key = ctx.accounts.wallet.key();
     let seeds = &[b"vault".as_ref(), wallet_key.as_ref(), &[ctx.accounts.vault.bump]];
@@ -763,6 +813,7 @@ pub fn transfer_token(
 #[derive(Accounts)]
 pub struct AddAllowedProgram<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -808,13 +859,17 @@ pub struct AddAllowedProgram<'info> {
 pub fn add_allowed_program(
     ctx: Context<AddAllowedProgram>,
     program_id: Pubkey,
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
-    let expected_challenge = build_expected_challenge(
-        &ctx.accounts.wallet.key(),
-        b"add_allowed_program",
-        program_id.as_ref(),
-    );
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(program_id.as_ref());
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"add_allowed_program", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
@@ -822,6 +877,7 @@ pub fn add_allowed_program(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     require!(program_id != crate::ID, SpankWalletError::SelfCpiNotAllowed);
 
@@ -856,6 +912,7 @@ pub fn add_allowed_program(
 #[derive(Accounts)]
 pub struct RemoveAllowedProgram<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -886,13 +943,17 @@ pub struct RemoveAllowedProgram<'info> {
 pub fn remove_allowed_program(
     ctx: Context<RemoveAllowedProgram>,
     program_id: Pubkey,
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
-    let expected_challenge = build_expected_challenge(
-        &ctx.accounts.wallet.key(),
-        b"remove_allowed_program",
-        program_id.as_ref(),
-    );
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(program_id.as_ref());
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"remove_allowed_program", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
@@ -900,6 +961,7 @@ pub fn remove_allowed_program(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     let policy = &mut ctx.accounts.policy;
     let count = policy.count as usize;
@@ -924,6 +986,7 @@ pub fn remove_allowed_program(
 #[derive(Accounts)]
 pub struct ExecuteAdvanced<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -937,11 +1000,23 @@ pub struct ExecuteAdvanced<'info> {
     )]
     pub vault: Account<'info, VaultAccount>,
 
+    /// CHECK: alleen gelezen (read_policy_account, tolerant), bewust
+    /// UncheckedAccount i.p.v. Account<PolicyAccount> - de BPF-stack heeft
+    /// een harde 4096-byte-limiet per frame, en PolicyAccount (1066 bytes,
+    /// allowed_programs) samen met WalletAccount in deze al-drukke struct
+    /// overschreed die limiet met exact de 8 bytes die action_nonce net
+    /// toevoegde (STATUS.md sectie 69, C-1-fix) - empirisch gevonden bij het
+    /// bouwen van die fix ("Stack offset ... exceeded max offset of 4096").
+    /// Zelfde patroon en reden als session in ExecuteAdvancedViaSession
+    /// hieronder. Functioneel gelijkwaardig aan de vorige typed variant - een
+    /// (in de praktijk nooit voorkomend, want add_allowed_program is altijd
+    /// een vereiste eerdere stap) ontbrekend PolicyAccount geeft nu netjes
+    /// ProgramNotAllowed i.p.v. AccountNotInitialized.
     #[account(
         seeds = [b"policy", wallet.key().as_ref()],
-        bump = policy.bump,
+        bump,
     )]
-    pub policy: Account<'info, PolicyAccount>,
+    pub policy: UncheckedAccount<'info>,
 
     /// CHECK: het CPI-doelprogramma - moet expliciet op policy.allowed_programs
     /// staan EN executable zijn (beide gecontroleerd in execute_advanced hieronder).
@@ -983,8 +1058,10 @@ pub struct ExecuteAdvanced<'info> {
 pub fn execute_advanced<'info>(
     ctx: Context<'info, ExecuteAdvanced<'info>>,
     cpi_instruction_data: Vec<u8>,
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
     let cpi_program_id = ctx.accounts.cpi_program.key();
 
     require!(
@@ -996,17 +1073,19 @@ pub fn execute_advanced<'info>(
         SpankWalletError::CpiTargetNotExecutable
     );
 
-    let policy = &ctx.accounts.policy;
-    let is_allowed = policy.allowed_programs[..policy.count as usize]
-        .iter()
-        .any(|p| *p == cpi_program_id);
+    let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
+    let is_allowed = policy
+        .as_ref()
+        .map(|p| p.allowed_programs[..p.count as usize].iter().any(|prog| *prog == cpi_program_id))
+        .unwrap_or(false);
     require!(is_allowed, SpankWalletError::ProgramNotAllowed);
 
     let vault_key = ctx.accounts.vault.key();
 
     let mut payload = Vec::with_capacity(
-        32 + 2 + ctx.remaining_accounts.len() * 34 + 4 + cpi_instruction_data.len(),
+        8 + 32 + 2 + ctx.remaining_accounts.len() * 34 + 4 + cpi_instruction_data.len(),
     );
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(cpi_program_id.as_ref());
     payload.extend_from_slice(&(ctx.remaining_accounts.len() as u16).to_le_bytes());
 
@@ -1042,6 +1121,7 @@ pub fn execute_advanced<'info>(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     account_infos.push(ctx.accounts.cpi_program.to_account_info());
 
@@ -1068,6 +1148,7 @@ pub fn execute_advanced<'info>(
 #[derive(Accounts)]
 pub struct Hunt<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
     )]
@@ -1106,12 +1187,18 @@ pub struct Hunt<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
 }
-pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
-    let expected_challenge = build_expected_challenge(
-        &ctx.accounts.wallet.key(),
-        b"hunt",
-        ctx.accounts.target_token_account.key().as_ref(),
-    );
+pub fn hunt(
+    ctx: Context<Hunt>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(ctx.accounts.target_token_account.key().as_ref());
+
+    let expected_challenge = build_expected_challenge(&ctx.accounts.wallet.key(), b"hunt", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
@@ -1119,6 +1206,7 @@ pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
     let wallet_key = ctx.accounts.wallet.key();
     let seeds = &[b"vault".as_ref(), wallet_key.as_ref(), &[ctx.accounts.vault.bump]];
     let signer_seeds = &[&seeds[..]];
@@ -1229,6 +1317,7 @@ pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
 #[derive(Accounts)]
 pub struct AddPasskey<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -1261,15 +1350,18 @@ pub struct AddPasskey<'info> {
 pub fn add_passkey(
     ctx: Context<AddPasskey>,
     new_passkey: [u8; PASSKEY_PUBKEY_LEN],
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
     validate_passkey_prefix(&new_passkey)?;
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
 
-    let expected_challenge = build_expected_challenge(
-        &ctx.accounts.wallet.key(),
-        b"add_passkey",
-        new_passkey.as_ref(),
-    );
+    let mut payload = Vec::with_capacity(8 + PASSKEY_PUBKEY_LEN);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(new_passkey.as_ref());
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"add_passkey", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
@@ -1277,6 +1369,7 @@ pub fn add_passkey(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     let passkeys = &mut ctx.accounts.passkeys;
 
@@ -1314,6 +1407,7 @@ pub fn add_passkey(
 #[derive(Accounts)]
 pub struct RemovePasskey<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -1341,13 +1435,17 @@ pub struct RemovePasskey<'info> {
 pub fn remove_passkey(
     ctx: Context<RemovePasskey>,
     target_passkey: [u8; PASSKEY_PUBKEY_LEN],
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
-    let expected_challenge = build_expected_challenge(
-        &ctx.accounts.wallet.key(),
-        b"remove_passkey",
-        target_passkey.as_ref(),
-    );
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + PASSKEY_PUBKEY_LEN);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(target_passkey.as_ref());
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"remove_passkey", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
@@ -1355,6 +1453,7 @@ pub fn remove_passkey(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     let owner_passkey = ctx.accounts.wallet.owner_passkey;
     let passkeys = &mut ctx.accounts.passkeys;
@@ -1441,13 +1540,19 @@ pub struct CancelRecovery<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) -> Result<()> {
+pub fn cancel_recovery(
+    ctx: Context<CancelRecovery>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
     let recovery = ctx
         .accounts
         .wallet
         .recovery_state
         .ok_or(SpankWalletError::NoRecoveryInProgress)?;
-    let mut payload = Vec::with_capacity(8 + PASSKEY_PUBKEY_LEN);
+    let mut payload = Vec::with_capacity(8 + 8 + PASSKEY_PUBKEY_LEN);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(&recovery.initiated_at.to_le_bytes());
     payload.extend_from_slice(&recovery.new_owner_passkey);
 
@@ -1460,6 +1565,7 @@ pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) 
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
     ctx.accounts.wallet.recovery_state = None;
     Ok(())
 }
@@ -1540,6 +1646,7 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
 #[instruction(session_key: Pubkey)]
 pub struct AddSessionKey<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -1606,8 +1713,11 @@ pub fn add_session_key(
     token_mint: Pubkey,
     max_token_amount_per_tx: u64,
     max_token_amount_total: u64,
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
     require!(
         session_allowed_programs.len() <= MAX_SESSION_PROGRAMS,
         SpankWalletError::SessionAllowlistFull
@@ -1661,8 +1771,9 @@ pub fn add_session_key(
     // sessie's spend-limiet niet cryptografisch gebonden zijn aan wat de
     // eigenaar daadwerkelijk goedkeurde.
     let mut payload = Vec::with_capacity(
-        32 + 8 + 3 + 4 + session_allowed_programs.len() * 32 + 8 + 8 + 32 + 8 + 8,
+        8 + 32 + 8 + 3 + 4 + session_allowed_programs.len() * 32 + 8 + 8 + 32 + 8 + 8,
     );
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(session_key.as_ref());
     payload.extend_from_slice(&expiry_slot.to_le_bytes());
     payload.push(can_execute as u8);
@@ -1687,6 +1798,7 @@ pub fn add_session_key(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     let session = &mut ctx.accounts.session;
     session.wallet = ctx.accounts.wallet.key();
@@ -1715,6 +1827,7 @@ pub fn add_session_key(
 #[instruction(session_key: Pubkey)]
 pub struct RemoveSessionKey<'info> {
     #[account(
+        mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
         constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
@@ -1753,13 +1866,17 @@ pub struct RemoveSessionKey<'info> {
 pub fn remove_session_key(
     ctx: Context<RemoveSessionKey>,
     session_key: Pubkey,
+    client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
-    let expected_challenge = build_expected_challenge(
-        &ctx.accounts.wallet.key(),
-        b"remove_session_key",
-        session_key.as_ref(),
-    );
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(session_key.as_ref());
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"remove_session_key", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
@@ -1767,6 +1884,7 @@ pub fn remove_session_key(
         &expected_challenge,
         &client_data_json,
     )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     Ok(())
 }

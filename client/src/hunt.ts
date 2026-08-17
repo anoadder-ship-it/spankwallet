@@ -19,7 +19,13 @@ import {
 import { ConnectedWallet } from "./wallet";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  readActionNonce,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 
@@ -99,11 +105,9 @@ export async function buildHuntTransaction(
   credentialId: Uint8Array,
   rpId: string
 ): Promise<HuntResult> {
-  const expectedChallenge = buildExpectedChallenge(
-    walletPda,
-    "hunt",
-    targetTokenAccount.toBytes()
-  );
+  const nonce = await readActionNonce(connection, walletPda);
+  const payload = concatBytes(actionNonceLeBytes(nonce), targetTokenAccount.toBytes());
+  const expectedChallenge = buildExpectedChallenge(walletPda, "hunt", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -117,12 +121,18 @@ export async function buildHuntTransaction(
     rawSignature
   );
 
-  const data = concatBytes(HUNT_DISCRIMINATOR, encodeBorshVecU8(clientDataJSON));
+  const data = concatBytes(
+    HUNT_DISCRIMINATOR,
+    actionNonceLeBytes(nonce),
+    encodeBorshVecU8(clientDataJSON)
+  );
 
   const huntIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): Hunt#wallet schrijft
+      // action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
       { pubkey: targetTokenAccount, isSigner: false, isWritable: true },
       { pubkey: tokenMint, isSigner: false, isWritable: true },

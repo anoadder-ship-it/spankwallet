@@ -15,6 +15,52 @@ export const SECP256R1_PROGRAM_ID = new PublicKey(
   "Secp256r1SigVerify1111111111111111111111111"
 );
 
+// C-1-fix (STATUS.md sectie 69): action_nonce staat als laatste veld
+// aangehangen aan WalletAccount, NA twee Option<T>-velden (recovery_state,
+// deposit_authority). Borsh codeert Option::None als exact 1 tagbyte, NIET
+// als de volledige "maximale" ruimte - WalletAccount::LEN is puur de
+// TOEGEWEZEN accountgrootte (space bij aanmaak), geen garantie dat elk veld
+// altijd op een vaste offset staat. Een NAIEF vast offset (231, "231-byte
+// oude layout + 8") bleek daardoor FOUT zodra recovery_state/
+// deposit_authority None zijn (het gewone geval) - empirisch ontdekt: Anchors
+// eigen program.account.walletAccount.fetch() gaf actionNonce=1 na een
+// geslaagde add_passkey, terwijl handmatig lezen op offset 231 stug 0 bleef
+// tonen (zowel "confirmed" als "finalized" - geen commitment-race, een
+// echt fout offset). Dus: de tag-bytes daadwerkelijk lezen en het echte,
+// variabele offset opbouwen - zelfde aanpak als recovery.ts al voor
+// recovery_state deed, hier doorgetrokken tot en met action_nonce.
+const OFFSET_RECOVERY_STATE_TAG = 148; // discriminator(8)+seed_key(33)+wallet_seed_hash(32)+owner_passkey(33)+bump(1)+vault_bump(1)+created_at(8)+backup_authority(32)
+const RECOVERY_STATE_LEN = 41; // initiated_at(8) + new_owner_passkey(33), zonder de 1-byte Option-tag
+
+export function actionNonceOffset(data: Buffer): number {
+  let offset = OFFSET_RECOVERY_STATE_TAG;
+  const recoveryStateTag = data[offset];
+  offset += 1;
+  if (recoveryStateTag === 1) offset += RECOVERY_STATE_LEN;
+  offset += 8; // recovery_timelock_seconds: i64, geen Option, altijd aanwezig
+  const depositAuthorityTag = data[offset];
+  offset += 1;
+  if (depositAuthorityTag === 1) offset += 32; // Pubkey
+  return offset;
+}
+
+export async function fetchActionNonce(
+  connection: Connection,
+  walletPda: PublicKey
+): Promise<bigint> {
+  const info = await connection.getAccountInfo(walletPda, "confirmed");
+  if (!info) {
+    throw new Error("fetchActionNonce: WalletAccount bestaat niet: " + walletPda.toBase58());
+  }
+  return info.data.readBigUInt64LE(actionNonceOffset(info.data));
+}
+
+export function nonceLeBytes(nonce: bigint): Buffer {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(nonce);
+  return buf;
+}
+
 export interface TestPasskey {
   privateKey: Uint8Array;
   compressedPublicKey: Buffer;

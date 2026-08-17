@@ -11,7 +11,13 @@ import {
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  readActionNonce,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 import { derivePolicyPda } from "./policy";
@@ -197,9 +203,12 @@ export async function buildAddSessionKeyTransaction(
   const maxTokenAmountTotalBytes = new Uint8Array(8);
   new DataView(maxTokenAmountTotalBytes.buffer).setBigUint64(0, maxTokenAmountTotal, true);
 
+  const nonce = await readActionNonce(connection, walletPda);
+
   // Spend-limits-ontwerpdocument §3: alle vijf nieuwe parameters worden mee
   // ondertekend, exact zoals elk ander sessieveld - zie instructions.rs::add_session_key.
   const payload = concatBytes(
+    actionNonceLeBytes(nonce),
     sessionKey.toBytes(),
     expirySlotBytes,
     Uint8Array.from([canExecute ? 1 : 0, canTransferToken ? 1 : 0, canExecuteAdvanced ? 1 : 0]),
@@ -236,13 +245,16 @@ export async function buildAddSessionKeyTransaction(
     tokenMint.toBytes(),
     maxTokenAmountPerTxBytes,
     maxTokenAmountTotalBytes,
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
   const addIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): AddSessionKey#wallet schrijft
+      // action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: sessionPda, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: policyPda, isSigner: false, isWritable: false },
@@ -277,11 +289,9 @@ export async function buildRemoveSessionKeyTransaction(
 ): Promise<RemoveSessionKeyResult> {
   const sessionPda = deriveSessionPda(walletPda, sessionKey);
 
-  const expectedChallenge = buildExpectedChallenge(
-    walletPda,
-    "remove_session_key",
-    sessionKey.toBytes()
-  );
+  const nonce = await readActionNonce(connection, walletPda);
+  const payload = concatBytes(actionNonceLeBytes(nonce), sessionKey.toBytes());
+  const expectedChallenge = buildExpectedChallenge(walletPda, "remove_session_key", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -298,13 +308,16 @@ export async function buildRemoveSessionKeyTransaction(
   const data = concatBytes(
     REMOVE_SESSION_KEY_DISCRIMINATOR,
     sessionKey.toBytes(),
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
   const removeIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): RemoveSessionKey#wallet schrijft
+      // action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: sessionPda, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },

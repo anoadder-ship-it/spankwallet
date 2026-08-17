@@ -37,61 +37,72 @@ pub mod spankwallet {
     pub fn execute(
         ctx: Context<Execute>,
         amount: u64,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::execute(ctx, amount, client_data_json)
+        instructions::execute(ctx, amount, client_action_nonce, client_data_json)
     }
 
     pub fn transfer_token(
         ctx: Context<TransferToken>,
         amount: u64,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::transfer_token(ctx, amount, client_data_json)
+        instructions::transfer_token(ctx, amount, client_action_nonce, client_data_json)
     }
 
     pub fn add_allowed_program(
         ctx: Context<AddAllowedProgram>,
         program_id: Pubkey,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::add_allowed_program(ctx, program_id, client_data_json)
+        instructions::add_allowed_program(ctx, program_id, client_action_nonce, client_data_json)
     }
 
     pub fn remove_allowed_program(
         ctx: Context<RemoveAllowedProgram>,
         program_id: Pubkey,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::remove_allowed_program(ctx, program_id, client_data_json)
+        instructions::remove_allowed_program(ctx, program_id, client_action_nonce, client_data_json)
     }
 
     pub fn execute_advanced<'info>(
         ctx: Context<'info, ExecuteAdvanced<'info>>,
         cpi_instruction_data: Vec<u8>,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::execute_advanced(ctx, cpi_instruction_data, client_data_json)
+        instructions::execute_advanced(ctx, cpi_instruction_data, client_action_nonce, client_data_json)
     }
 
-    pub fn hunt(ctx: Context<Hunt>, client_data_json: Vec<u8>) -> Result<()> {
-        instructions::hunt(ctx, client_data_json)
+    pub fn hunt(
+        ctx: Context<Hunt>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::hunt(ctx, client_action_nonce, client_data_json)
     }
 
     pub fn add_passkey(
         ctx: Context<AddPasskey>,
         new_passkey: [u8; PASSKEY_PUBKEY_LEN],
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::add_passkey(ctx, new_passkey, client_data_json)
+        instructions::add_passkey(ctx, new_passkey, client_action_nonce, client_data_json)
     }
 
     pub fn remove_passkey(
         ctx: Context<RemovePasskey>,
         target_passkey: [u8; PASSKEY_PUBKEY_LEN],
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::remove_passkey(ctx, target_passkey, client_data_json)
+        instructions::remove_passkey(ctx, target_passkey, client_action_nonce, client_data_json)
     }
 
     pub fn initiate_recovery(
@@ -103,9 +114,10 @@ pub mod spankwallet {
 
     pub fn cancel_recovery(
         ctx: Context<CancelRecovery>,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::cancel_recovery(ctx, client_data_json)
+        instructions::cancel_recovery(ctx, client_action_nonce, client_data_json)
     }
 
     pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
@@ -125,6 +137,7 @@ pub mod spankwallet {
         token_mint: Pubkey,
         max_token_amount_per_tx: u64,
         max_token_amount_total: u64,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
         instructions::add_session_key(
@@ -140,6 +153,7 @@ pub mod spankwallet {
             token_mint,
             max_token_amount_per_tx,
             max_token_amount_total,
+            client_action_nonce,
             client_data_json,
         )
     }
@@ -147,9 +161,10 @@ pub mod spankwallet {
     pub fn remove_session_key(
         ctx: Context<RemoveSessionKey>,
         session_key: Pubkey,
+        client_action_nonce: u64,
         client_data_json: Vec<u8>,
     ) -> Result<()> {
-        instructions::remove_session_key(ctx, session_key, client_data_json)
+        instructions::remove_session_key(ctx, session_key, client_action_nonce, client_data_json)
     }
 
     pub fn close_session(ctx: Context<CloseSession>) -> Result<()> {

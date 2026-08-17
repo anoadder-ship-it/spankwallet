@@ -52,13 +52,30 @@ pub struct WalletAccount {
     /// v0.2 §3.3 — voorbereiding fase 2. In fase 1 altijd None (permissionless deposits,
     /// gedraagt zich als een normale wallet). Fase 2 activeert dit veld.
     pub deposit_authority: Option<Pubkey>,
+
+    /// C-1-fix (STATUS.md sectie 69, externe-audit-bevinding): monotoon
+    /// verhogende teller, meegebonden in ELKE passkey-ondertekende challenge
+    /// (behalve init_wallet zelf, dat al structureel replay-proof is via de
+    /// `init`-constraint op dit account). Maakt een eenmaal geldige,
+    /// ondertekende actie permanent onbruikbaar voor een latere, herhaalde
+    /// aanroep - zonder deze teller was de challenge volledig deterministisch
+    /// (enkel program_id/wallet/domain/payload), dus een publiek zichtbare,
+    /// eenmaal geldige transactie bleef voor altijd letterlijk herhaalbaar.
+    /// Bewust ACHTERAAN toegevoegd, nooit ertussenin, zelfde reden als de
+    /// spend-limits-velden op SessionKeyAccount (sectie 53): Anchor/Borsh-
+    /// deserialisatie is offset-strikt, dus een bestaand, kortere-layout-
+    /// account (231 bytes, van vóór deze fix) faalt hierdoor SCHOON op
+    /// deserialisatie (AccountDidNotDeserialize, fail-closed) i.p.v. met een
+    /// giswaarde ingelezen te worden. Geen migratie-instructie gebouwd - zie
+    /// STATUS.md sectie 69 voor de expliciete, empirisch onderbouwde afweging.
+    pub action_nonce: u64,
 }
 
 impl WalletAccount {
     // discriminator (8) + seed_key (33) + wallet_seed_hash (32) + owner_passkey (33) + bump (1)
     // + vault_bump (1) + created_at (8) + backup_authority (32)
     // + recovery_state option (1 + RecoveryState::LEN) + recovery_timelock_seconds (8)
-    // + deposit_authority option (1 + 32)
+    // + deposit_authority option (1 + 32) + action_nonce (8)
     pub const LEN: usize = 8
         + PASSKEY_PUBKEY_LEN
         + 32
@@ -69,7 +86,8 @@ impl WalletAccount {
         + 32
         + (1 + RecoveryState::LEN)
         + 8
-        + (1 + 32);
+        + (1 + 32)
+        + 8;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]
@@ -269,4 +287,60 @@ impl SessionKeyAccount {
         + 8
         + 8
         + 8;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anchor_lang::{AccountDeserialize, AccountSerialize};
+
+    /// C-1-fix (STATUS.md sectie 69) - fail-closed migratieclaim, direct op
+    /// Anchor/Borsh's eigen (de)serialisatie getest i.p.v. via een volledige
+    /// on-chain-integratietest: een oude, 231-byte WalletAccount (van vóór
+    /// action_nonce toegevoegd werd) moet SCHOON falen tegen de nieuwe,
+    /// 239-byte structuurdefinitie - geen giswaarde voor action_nonce, een
+    /// echte deserialisatiefout. Native `cargo test` volstaat hiervoor (geen
+    /// SBF-target/live validator nodig, puur Borsh-lengte-/offsetlogica).
+    #[test]
+    fn old_231_byte_wallet_account_fails_closed_against_new_239_byte_layout() {
+        // recovery_state/deposit_authority bewust Some(...), niet None: Borsh
+        // codeert Option::None altijd als 1 byte ongeacht T, dus alleen de
+        // Some-tak geeft de volledige, WalletAccount::LEN-brede serialisatie
+        // die deze test nodig heeft om de oude-vs-nieuwe-layout-grens exact
+        // op byte 231 te simuleren.
+        let wallet = WalletAccount {
+            seed_key: [2u8; PASSKEY_PUBKEY_LEN],
+            wallet_seed_hash: [0u8; 32],
+            owner_passkey: [2u8; PASSKEY_PUBKEY_LEN],
+            bump: 255,
+            vault_bump: 255,
+            created_at: 0,
+            backup_authority: Pubkey::default(),
+            recovery_state: Some(RecoveryState {
+                initiated_at: 0,
+                new_owner_passkey: [2u8; PASSKEY_PUBKEY_LEN],
+            }),
+            recovery_timelock_seconds: DEFAULT_RECOVERY_TIMELOCK_SECONDS,
+            deposit_authority: Some(Pubkey::default()),
+            action_nonce: 0,
+        };
+
+        let mut current_layout_bytes = Vec::new();
+        wallet.try_serialize(&mut current_layout_bytes).unwrap();
+        assert_eq!(current_layout_bytes.len(), WalletAccount::LEN);
+
+        // De oude layout is exact de nieuwe MINUS de 8 achteraan toegevoegde
+        // action_nonce-bytes (nooit ertussenin, zie het veld-commentaar
+        // hierboven) - dus gewoon de eerste (LEN - 8) bytes van een geldig,
+        // huidig account simuleren een echt, bestaand vóór-de-fix account.
+        let old_layout_bytes = &current_layout_bytes[..WalletAccount::LEN - 8];
+        assert_eq!(old_layout_bytes.len(), 231);
+
+        let mut slice: &[u8] = old_layout_bytes;
+        let result = WalletAccount::try_deserialize(&mut slice);
+        assert!(
+            result.is_err(),
+            "een oude 231-byte WalletAccount had schoon moeten falen (fail-closed) tegen de nieuwe 239-byte layout, niet stilzwijgend een giswaarde voor action_nonce moeten aannemen"
+        );
+    }
 }

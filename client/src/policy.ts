@@ -8,7 +8,13 @@ import {
 } from "@solana/web3.js";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  readActionNonce,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 
@@ -79,11 +85,9 @@ export async function buildAddAllowedProgramTransaction(
 ): Promise<AddAllowedProgramResult> {
   const policyPda = derivePolicyPda(walletPda);
 
-  const expectedChallenge = buildExpectedChallenge(
-    walletPda,
-    "add_allowed_program",
-    programIdToAllow.toBytes()
-  );
+  const nonce = await readActionNonce(connection, walletPda);
+  const payload = concatBytes(actionNonceLeBytes(nonce), programIdToAllow.toBytes());
+  const expectedChallenge = buildExpectedChallenge(walletPda, "add_allowed_program", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -100,13 +104,16 @@ export async function buildAddAllowedProgramTransaction(
   const data = concatBytes(
     ADD_ALLOWED_PROGRAM_DISCRIMINATOR,
     programIdToAllow.toBytes(),
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
   const addIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): AddAllowedProgram#wallet
+      // schrijft action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: policyPda, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
@@ -145,11 +152,9 @@ export async function buildRemoveAllowedProgramTransaction(
 ): Promise<RemoveAllowedProgramResult> {
   const policyPda = derivePolicyPda(walletPda);
 
-  const expectedChallenge = buildExpectedChallenge(
-    walletPda,
-    "remove_allowed_program",
-    programIdToRemove.toBytes()
-  );
+  const nonce = await readActionNonce(connection, walletPda);
+  const payload = concatBytes(actionNonceLeBytes(nonce), programIdToRemove.toBytes());
+  const expectedChallenge = buildExpectedChallenge(walletPda, "remove_allowed_program", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -166,13 +171,16 @@ export async function buildRemoveAllowedProgramTransaction(
   const data = concatBytes(
     REMOVE_ALLOWED_PROGRAM_DISCRIMINATOR,
     programIdToRemove.toBytes(),
+    actionNonceLeBytes(nonce),
     encodeBorshVecU8(clientDataJSON)
   );
 
   const removeIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
-      { pubkey: walletPda, isSigner: false, isWritable: false },
+      // mut (C-1-fix, STATUS.md sectie 69): RemoveAllowedProgram#wallet
+      // schrijft action_nonce nu atomisch bij - was hier ten onrechte false.
+      { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: policyPda, isSigner: false, isWritable: true },
       { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },

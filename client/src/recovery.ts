@@ -8,7 +8,13 @@ import {
 } from "@solana/web3.js";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  readActionNonce,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 
@@ -22,6 +28,9 @@ const CANCEL_RECOVERY_DISCRIMINATOR = Uint8Array.from([
 const OFFSET_RECOVERY_STATE_TAG = 148;
 const OFFSET_RECOVERY_INITIATED_AT = 149;
 const OFFSET_RECOVERY_NEW_OWNER_PASSKEY = 157;
+// action_nonce (C-1-fix, STATUS.md sectie 69) staat NA dit veld en NA
+// recovery_timelock_seconds/deposit_authority - variabel offset, niet vast,
+// zie challenge.ts::readActionNonce voor de reden en de daadwerkelijke lezer.
 
 export interface ParsedRecoveryState {
   initiatedAt: bigint;
@@ -107,9 +116,10 @@ export async function buildCancelRecoveryTransaction(
   rpId: string,
   recoveryState: ParsedRecoveryState
 ): Promise<CancelRecoveryResult> {
+  const nonce = await readActionNonce(connection, walletPda);
   const initiatedAtBytes = new Uint8Array(8);
   new DataView(initiatedAtBytes.buffer).setBigInt64(0, recoveryState.initiatedAt, true);
-  const payload = concatBytes(initiatedAtBytes, recoveryState.newOwnerPasskey);
+  const payload = concatBytes(actionNonceLeBytes(nonce), initiatedAtBytes, recoveryState.newOwnerPasskey);
 
   const expectedChallenge = buildExpectedChallenge(walletPda, "cancel_recovery", payload);
 
@@ -125,7 +135,11 @@ export async function buildCancelRecoveryTransaction(
     rawSignature
   );
 
-  const data = concatBytes(CANCEL_RECOVERY_DISCRIMINATOR, encodeBorshVecU8(clientDataJSON));
+  const data = concatBytes(
+    CANCEL_RECOVERY_DISCRIMINATOR,
+    actionNonceLeBytes(nonce),
+    encodeBorshVecU8(clientDataJSON)
+  );
 
   const cancelIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,

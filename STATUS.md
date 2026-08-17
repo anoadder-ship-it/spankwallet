@@ -4774,6 +4774,136 @@ dekt. Vier lagen, elk het beste middel tegen zijn eigen specifieke dreiging:
 ALLE bovenstaande dreigingscategorieën tegelijk zou dekken (inclusief een gecompromitteerde
 browser/extensie zelf) - bewust een apart, toekomstig project, niet nu gebouwd.**
 
+**Aanvullend onderzocht: WebEnclave (academisch project) als mogelijke vijfde laag -
+sluit het gat NIET, ongeacht rijpheid.** Aangedragen: `github.com/webenclave/webenclave`,
+gepubliceerd als "WebEnclave: Protect Web Secrets From Browser Extensions With Software
+Enclave", IEEE Transactions on Dependable and Secure Computing, vol. 19 nr. 5, 2022
+(Wang, Du, Wang e.a.) - een echt, peer-reviewed venue, geen twijfelachtig tijdschrift.
+Grondig nagelezen (manifest.json, content.js, m.js), niet alleen het abstract.
+
+1. **Isolatiemechanisme, nagelezen in `content.js`:** een `<web-enclave>`-custom-element
+   wordt door de bijbehorende browserextensie vervangen door een **closed-mode Shadow DOM**
+   (`attachShadow({mode:'closed'})`, blokkeert externe `.shadowRoot`-toegang) met daarin
+   een **sandboxed iframe** die een pagina van de extensie zelf laadt
+   (`chrome.extension.getURL('proxy.html')`, plus een apart `sandbox.html` gedeclareerd via
+   manifest.json's `"sandbox":{"pages":[...]}`-sleutel - een Manifest V2-primitief die de
+   pagina een eigen, beperkte CSP en GEEN extensie-API-toegang geeft). Alle interactie
+   loopt via `postMessage` en een delegatie-registry (`mapEnclaves`/`DelegateFunc`/
+   `DelegateAttr`), nooit via directe DOM-manipulatie. **Conceptueel verwant aan het
+   Tauri-IPC-model** (een boundary die gewone paginacode niet zomaar kan oversteken), maar
+   - cruciaal, zie de vervolgvraag verderop in deze sectie - anders dan Tauri's
+   proces-grens leunt deze boundary volledig op de opaciteit van een closed Shadow DOM,
+   die zelf (nog) geen door de browser gegarandeerde beveiligingsgrens is.
+2. **Rijpheid: eenmalig academisch prototype, sinds 2020 stilgevallen - niet
+   productierijp.** Laatste commit 11 juli 2020 (13 commits totaal, allemaal
+   juni-juli 2020), 3 sterren, 1 fork, 0 issues sinds toen. `manifest.json` declareert
+   `"manifest_version": 2` - Chrome heeft MV2-extensies sindsdien grotendeels uitgefaseerd
+   (met een aflopende enterprise-policy-uitzondering); dit exemplaar is dus zonder
+   modernisering naar MV3 vandaag niet zomaar meer te laden in een gewone Chrome-installatie.
+3. **Sluit SpankWallet's specifieke WebAuthn-hijacking-gat NIET - structureel, niet
+   toevallig.** De auteurs noemen `navigator.credentials`/WebAuthn nergens in de
+   documentatie (nagelezen, niet aangenomen) - het doelwit is generieke DOM-geheimen (bv.
+   formuliervelden), niet credential-ceremonies. Een `navigator.credentials.get()`-aanroep
+   ZOU vanuit de enclave-iframe moeten gebeuren om beschermd te zijn tegen een
+   paginabrede `navigator.credentials`-override door een kwaadaardige extensie - maar die
+   iframe laadt vanaf `chrome-extension://<webenclave-ID>/...`, een ANDER origin dan
+   SpankWallet's eigen domein. WebAuthn bindt een credential onlosmakelijk aan het
+   aanroepende origin (de RP ID moet gelijk zijn aan, of een registreerbaar suffix van,
+   dat origin - een `chrome-extension://`-origin kan nooit een suffix van een
+   HTTPS-domein zijn) en dat origin wordt in `clientDataJSON` vastgelegd, precies het veld
+   dat dit project al verifieert (sectie 36-37, `challenge.ts`'s `domain`). Een
+   WebEnclave-enclave zou de ceremonie dus ofwel laten falen (browser weigert de
+   RP-ID-mismatch), ofwel - erger - de credential aan het GEDEELDE
+   WebEnclave-extensie-origin binden in plaats van aan SpankWallet's eigen origin, wat
+   de bestaande per-site-oorsprongisolatie juist zou verzwakken. Dit is eigen analyse op
+   basis van WebAuthn's spec-vastgelegde origin-binding, niet iets dat de auteurs zelf
+   claimen of weerleggen - expliciet zo vermeld omdat het geen letterlijk citaat is.
+4. **Integratie-inspanning: een tweede, verplichte extensie naast de wallet-extensie.**
+   Elke gebruiker zou naast Phantom/Solflare óók de WebEnclave-extensie moeten
+   installeren - een reële adoptiedrempel voor een retail-doelgroep, en de MV2->MV3-
+   modernisering (punt 2) zou eerst gedaan moeten worden voordat dat praktisch is.
+5. **Server-side middleware: self-hosted, geen nieuwe vertrouwde derde partij.** Nagelezen
+   in `WebEnclaveProxy/m.js`: een simpele reverse proxy die `<web-enclave>`-tags in de
+   HTML-respons markeert met een SHA-256-integriteitshash (`X-Enclave`-header) - geen
+   toegang tot of verwerking van gebruikersgeheimen, draait volledig lokaal/self-hosted
+   door de siteoperator zelf (`node m.js --src=... --port=... --des=... --out=...`). Zou
+   op zichzelf geen centrale, custodial afhankelijkheid introduceren - wel een extra
+   infrastructuurcomponent (reverse proxy vóór de site), wat wringt met SpankWallet
+   client's huidige volledig statische, server-loze Vite-SPA-opzet.
+
+**Vervolgvraag, cruciaal en bevestigend: isolated worlds delen de DOM, dus is
+"closed" Shadow DOM zelf al doorbroken - onafhankelijk van het WebAuthn-origin-probleem
+hierboven.** Correct vermoeden. Content scripts draaien in een apart V8-heap (isolated
+world) maar opereren op DEZELFDE, door Blink beheerde DOM-boom als de pagina - isolatie
+zit op het niveau van de JS-executiecontext, niet van de DOM-inhoud. Uitgezocht of
+WebEnclave hiertegen iets sterkers dan gewone `mode:'closed'` gebruikt: **nee, nagelezen
+in `content.js`, geen enkele aanvullende beveiliging.** En dat is ondertussen een
+aantoonbaar gat, niet een theoretisch risico:
+
+6. **`chrome.dom.openOrClosedShadowRoot()` - een officiële, gedocumenteerde
+   Chrome-extensie-API sinds Chrome 88 (januari 2021) - doorbreekt closed-mode Shadow DOM
+   volledig, geverifieerd tegen Chrome's eigen API-referentie.** Elke extensie met een
+   normale content-script-injectie kan hiermee de closed `ShadowRoot` van willekeurig
+   welk element opvragen - inclusief lezen ÉN schrijven, dus ook het vervangen/omleiden
+   van WebEnclave's eigen `<iframe src="chrome-extension://.../proxy.html">` naar een
+   door de aanvaller gekozen bron. **Cruciale timing:** WebEnclave's laatste commit is van
+   juli 2020, deze API kwam pas in januari 2021 - het project heeft dit mechanisme
+   simpelweg nooit kunnen verdisconteren, en is sindsdien niet bijgewerkt om het te
+   verdedigen. Bevestigt bovendien Chromium's eigen positie, letterlijk teruggevonden in
+   het ontwerpoverleg over deze API: closed-mode Shadow DOM is nooit als
+   beveiligingsgrens bedoeld geweest ("Shadow DOM is not a security mechanism"), ook al
+   wordt het in de praktijk soms zo gebruikt/aangeprezen - precies wat WebEnclave doet.
+   (Kon de exacte manifest-permissienaam voor deze API niet met een verse, losstaande
+   bronvermelding herbevestigen binnen deze sessie - vermeld daarom met dat voorbehoud:
+   naar mijn weten volstaat de gewone, niet-geprivilegieerde `"dom"`-permissie, geen
+   host-permissies boven wat een content-script toch al nodig heeft.)
+7. **`chrome.webAuthenticationProxy` blijft hoe dan ook, ook los van bovenstaande,
+   volledig buiten bereik van ELKE DOM-gebaseerde isolatietechniek - een ander,
+   dieper niveau, geen gat dat een sterkere Shadow-DOM-variant zou kunnen dichten.**
+   Dat mechanisme onderschept WebAuthn-aanroepen op browser-procesniveau (interne IPC
+   tussen renderer en browserproces), vóórdat/onafhankelijk van welke renderer-DOM-
+   constructie dan ook - shadow roots, iframes, of een nog sterker toekomstig
+   isolatiemechanisme zijn stuk voor stuk renderer-proces-/DOM-laag-concepten, en hebben
+   daar per definitie geen jurisdictie. Zelfde redenering als eerder al vastgesteld voor
+   CSP in deze sectie - hier opnieuw bevestigd voor DOM-isolatie in het algemeen, niet
+   specifiek voor WebEnclave.
+
+**Eindoordeel, aangescherpt na dit vervolgonderzoek: WebEnclave beschermt NIET tegen de
+WebAuthn-hijacking-dreigingsklasse - noch via de originele origin-bindingsroute (punt 3),
+noch via zijn eigen isolatiemechanisme (punt 6), en zou dat ook niet kunnen tegen
+`chrome.webAuthenticationProxy` specifiek (punt 7) zelfs als de eerste twee problemen niet
+bestonden.** Belangrijke nuance, zoals gevraagd: dit is niet hetzelfde als "WebEnclave is
+nutteloos in het algemeen" - de closed-shadow-DOM + sandboxed-iframe-aanpak is nog steeds
+een reëel obstakel tegen een LUIE of generieke DOM-scraper (een extensie die simpelweg
+`document.querySelectorAll`/`innerHTML` gebruikt zonder de `chrome.dom`-API te kennen of
+te gebruiken), en tegen dat specifieke, zwakkere dreigingsmodel (de generieke
+web-geheimen-bescherming die de paper zelf claimt) blijft het een geldig, gepubliceerd
+ontwerppatroon. Maar tegen een doelgerichte, moderne extensie die welbewust
+`chrome.dom.openOrClosedShadowRoot()` gebruikt - en al zeker tegen de specifieke
+WebAuthn-hijacking-dreigingsklasse van deze sectie - biedt het geen bescherming. Geen
+actie ondernomen; niet bruikbaar als vijfde laag, noch nu (rijpheid, sectie hierboven),
+noch structureel (dit vervolgonderzoek).
+
+**Sluitstuk, tot op broncode-niveau bevestigd: Blink's eigen `V8BindingDesign.md`.**
+Geverifieerd tegen de officiële Chromium-broncode-documentatie
+(`third_party/blink/renderer/bindings/core/v8/V8BindingDesign.md`): "All worlds in one
+isolate share underlying C++ DOM objects, but each world has its own DOM wrappers." Met
+andere woorden - isolated worlds isoleren uitsluitend de JavaScript-wrapper-laag (één
+V8-wrapper per world, beheerd via `DOMDataStore`), niet de onderliggende C++ DOM-node
+zelf; hoofdwereld en elke isolated world (elke content-script-extensie) opereren op
+dezelfde C++ DOM-objecten. Dit is de architecturale grondoorzaak achter punt 6 hierboven
+(`chrome.dom.openOrClosedShadowRoot()` kan closed Shadow DOM doorbreken omdat de
+onderliggende node sowieso al gedeeld is - de API opent alleen een JS-wrapper ernaartoe)
+en bevestigt de conclusie tot op broncode-niveau, niet alleen empirisch via de API-referentie:
+isolated worlds - en dus ook elke Shadow-DOM- of andere DOM-gebaseerde aanpak zoals
+WebEnclave's, hoe zorgvuldig ook - beschermen hooguit tegen gewone DOM-manipulatie/
+-scraping door een kwaadaardige extensie, nooit tegen de dieper liggende
+`chrome.webAuthenticationProxy`-route (punt 7), die volledig buiten de DOM-laag om werkt.
+De kern-WebAuthn-hijacking-dreiging van deze sectie blijft daarmee onopgelost door dit
+soort mechanismen - nu bevestigd op elk niveau: empirisch (de API bestaat en werkt),
+architecturaal (Chromium's eigen ontwerpdocumentatie) en protocolmatig (WebAuthn's
+origin-binding, punt 3).
+
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 
 Laatste kaart uit sectie 59's oorspronkelijke plan. Anders dan elke andere kaart heeft

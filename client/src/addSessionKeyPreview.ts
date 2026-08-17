@@ -2,9 +2,9 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { getMint } from "@solana/spl-token";
 import { showConfirmationCard, escapeHtml, ConfirmationCardField } from "./confirmationCard";
 import { formatTokenAmount, parseTokenAmount, defaultTokenAmountFieldValue } from "./tokenAmount";
+import { formatDurationEstimate } from "./slotDuration";
 
 const LAMPORT_DECIMALS = 9; // 1 SOL = 10^9 lamports - wiskundig identiek aan een token met 9 decimalen
-const SLOT_MS_ESTIMATE = 400; // Solana's veelgeciteerde gemiddelde/doel-blokduur - een SCHATTING, geen garantie
 
 export interface AddSessionKeyPreviewParams {
   connection: Connection;
@@ -27,14 +27,6 @@ export interface AddSessionKeyPreviewChoice {
   maxLamportsTotal: bigint;
   maxTokenAmountPerTx: bigint;
   maxTokenAmountTotal: bigint;
-}
-
-function formatDurationEstimate(slots: bigint): string {
-  const ms = Number(slots) * SLOT_MS_ESTIMATE;
-  const minutes = ms / 60000;
-  if (minutes < 1) return "< 1 minuut (schatting)";
-  if (minutes < 60) return "~" + minutes.toFixed(1) + " minuten (schatting)";
-  return "~" + (minutes / 60).toFixed(1) + " uur (schatting)";
 }
 
 /**

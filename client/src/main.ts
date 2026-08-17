@@ -33,6 +33,7 @@ import { showAddAllowedProgramPreview } from "./addAllowedProgramPreview";
 import { showTransferTokenPreview } from "./transferTokenPreview";
 import { showAddSessionKeyPreview } from "./addSessionKeyPreview";
 import { showRemoveAllowedProgramPreview } from "./removeAllowedProgramPreview";
+import { showRemoveSessionKeyPreview } from "./removeSessionKeyPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -43,6 +44,7 @@ import {
   deriveSessionPda,
   readSessionKeyAccount,
   buildAddSessionKeyTransaction,
+  buildRemoveSessionKeyTransaction,
   buildExecuteViaSessionTransaction,
   buildExecuteAdvancedViaSessionTransaction,
   buildCloseExpiredSessionTransaction,
@@ -2012,6 +2014,192 @@ async function runStep20(): Promise<void> {
     log("(stap 16), zelfstandig ondertekenen zonder ENIGE prompt (stap 17), de");
     log("scope-beperking die andere instructies weigert (stap 18), daadwerkelijk");
     log("verlopen (stap 19), en permissionless opruiming door een derde (stap 20).");
+    log("");
+    log("Klaar voor stap 21.");
+
+    (document.getElementById("step21-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep21(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet || !lastBackupAuthority) {
+    log("Voer eerst stap 1, 2 en 4 uit.");
+    return;
+  }
+  log("Stap 21: remove_session_key (STATUS.md sectie 58/59/67) - vroegtijdige");
+  log("intrekking door een geldige passkey, LAAG-risicoklasse, gewone klik.");
+  log("Eigen, verse sessiesleutel voor deze stap - onafhankelijk van de sessie uit");
+  log("stap 16-20 (die is al gesloten).");
+  log("");
+
+  try {
+    const sessionKeypair = Keypair.generate();
+    log("Sessiesleutel (publiek): " + sessionKeypair.publicKey.toBase58());
+
+    const currentSlot = BigInt(await connection.getSlot());
+    log("21a. add_session_key om deze sessie op te zetten (rechtstreeks aangeroepen,");
+    log("geen kaart hier - die is al volledig gedekt in stap 16). Ruime expiry (3600");
+    log("slots) zodat de recovery-cyclus hieronder comfortabel past.");
+    log("navigator.credentials.get() wordt aangeroepen - keur de prompt goed.");
+
+    const { transaction: addTx, sessionPda } = await buildAddSessionKeyTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      sessionKeypair.publicKey,
+      currentSlot + 3600n,
+      true,
+      false,
+      false,
+      [],
+      50_000n,
+      100_000n,
+      PublicKey.default,
+      0n,
+      0n,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+    const { blockhash: addBh } = await connection.getLatestBlockhash();
+    addTx.recentBlockhash = addBh;
+    const { signature: addSig } = await lastWallet.signAndSendTransaction(addTx);
+    await connection.confirmTransaction(addSig, "confirmed");
+    log("Bevestigd. session PDA: " + sessionPda.toBase58());
+    log("");
+
+    log("21b. initiate_recovery (backup_authority, GEEN passkey) - om de");
+    log("recovery-in-progress-weigering hieronder ECHT te testen, niet synthetisch.");
+    const dummyNewOwnerPasskey = crypto.getRandomValues(new Uint8Array(33));
+    dummyNewOwnerPasskey[0] = 0x02;
+    const initiateTx = await buildInitiateRecoveryTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastBackupAuthority,
+      dummyNewOwnerPasskey
+    );
+    const { signature: initiateSig } = await lastWallet.signAndSendTransaction(initiateTx);
+    await connection.confirmTransaction(initiateSig, "confirmed");
+    const afterInitiate = await readWalletAccount(connection, lastPdas.walletPda);
+    if (!afterInitiate.recoveryState) {
+      log("FOUT: recovery_state is None na bevestigde initiate_recovery (onverwacht).");
+      return;
+    }
+    log("Bevestigd - recovery_state is gezet.");
+    log("");
+
+    log("21c. Bevestigingskaart tonen terwijl recovery loopt - moet DIRECT");
+    log("'would-fail: recovery-in-progress' teruggeven, GEEN kaart, GEEN prompt.");
+    const duringRecovery = await showRemoveSessionKeyPreview(connection, lastPdas.walletPda, sessionKeypair.publicKey);
+    if (duringRecovery.kind !== "would-fail" || duringRecovery.reason !== "recovery-in-progress") {
+      log("FOUT: verwachtte would-fail/recovery-in-progress, kreeg: " + JSON.stringify(duringRecovery));
+      return;
+    }
+    log("Bevestigd: " + JSON.stringify(duringRecovery) + " - geen kaart getoond.");
+    log("");
+
+    log("21d. cancel_recovery (ECHTE passkey-handtekening) om de normale staat te");
+    log("herstellen.");
+    log("navigator.credentials.get() wordt aangeroepen - keur de prompt goed.");
+    const { transaction: cancelTx } = await buildCancelRecoveryTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname,
+      afterInitiate.recoveryState
+    );
+    const { blockhash: cancelBh } = await connection.getLatestBlockhash();
+    cancelTx.recentBlockhash = cancelBh;
+    const { signature: cancelSig } = await lastWallet.signAndSendTransaction(cancelTx);
+    await connection.confirmTransaction(cancelSig, "confirmed");
+    const afterCancel = await readWalletAccount(connection, lastPdas.walletPda);
+    if (afterCancel.recoveryState) {
+      log("FOUT: recovery_state is nog steeds gezet na bevestigde cancel_recovery.");
+      return;
+    }
+    log("Bevestigd - recovery_state is weer None.");
+    log("");
+
+    log("21e. Bevestigingskaart opnieuw tonen, nu ZONDER lopende recovery - moet de");
+    log("sessie tonen (scope, resterende caps, resterende geldigheid) en op een");
+    log("gewone klik wachten (LAAG-risicoklasse, geen hold-to-confirm).");
+    const choice = await showRemoveSessionKeyPreview(connection, lastPdas.walletPda, sessionKeypair.publicKey);
+    if (choice.kind === "denied") {
+      log("Geweigerd in de bevestigingskaart - remove_session_key NIET aangeroepen,");
+      log("geen passkey-prompt.");
+      return;
+    }
+    if (choice.kind === "would-fail") {
+      log("FOUT: onverwacht 'would-fail' (" + choice.reason + ") - de sessie zou hier");
+      log("nog moeten bestaan en er loopt geen recovery meer.");
+      return;
+    }
+    log("Bevestigd.");
+    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+    const { transaction: removeTx } = await buildRemoveSessionKeyTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      sessionKeypair.publicKey,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+
+    const simResult = await connection.simulateTransaction(removeTx);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    log("Simulatie logs:");
+    for (const line of simResult.value.logs ?? []) {
+      log("  " + line);
+    }
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash: removeBh } = await connection.getLatestBlockhash();
+    removeTx.recentBlockhash = removeBh;
+    const { signature: removeSig } = await lastWallet.signAndSendTransaction(removeTx);
+    log("Verstuurd. Signature: " + removeSig);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(removeSig, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    const afterRemove = await readSessionKeyAccount(connection, sessionPda);
+    if (afterRemove !== null) {
+      log("FOUT: het session-account had gesloten moeten zijn.");
+      return;
+    }
+    log("Session-account is gesloten - remove_session_key heeft daadwerkelijk");
+    log("gewerkt, met een ECHTE passkey-handtekening.");
+    log("");
+
+    log("21f. Bevestigingskaart een derde keer tonen, tegen dezelfde (nu");
+    log("verwijderde) sessie - moet DIRECT 'would-fail: not-found' teruggeven, GEEN");
+    log("kaart, GEEN prompt.");
+    const afterClose = await showRemoveSessionKeyPreview(connection, lastPdas.walletPda, sessionKeypair.publicKey);
+    if (afterClose.kind !== "would-fail" || afterClose.reason !== "not-found") {
+      log("FOUT: verwachtte would-fail/not-found, kreeg: " + JSON.stringify(afterClose));
+      return;
+    }
+    log("Bevestigd: " + JSON.stringify(afterClose) + " - geen kaart getoond.");
+    log("");
+
+    log("SUCCES - remove_session_key end-to-end bewezen op devnet: beide");
+    log("gegarandeerde weigeringen (recovery-in-progress, not-found) ECHT getest,");
+    log("plus de daadwerkelijke intrekking met een echte passkey-handtekening.");
   } catch (err) {
     log("");
     log("FOUT:");
@@ -2084,4 +2272,7 @@ document.getElementById("step19-btn")!.addEventListener("click", () => {
 });
 document.getElementById("step20-btn")!.addEventListener("click", () => {
   runStep20();
+});
+document.getElementById("step21-btn")!.addEventListener("click", () => {
+  runStep21();
 });

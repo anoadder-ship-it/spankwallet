@@ -4261,3 +4261,72 @@ vervangen door het bevestigde `programToRemove`.
 
 **Openstaand binnen LAAG:** `remove_session_key`, `cancel_recovery`, `hunt` - daarna is
 UI-fase 1 compleet.
+
+## 67. `remove_session_key`-bevestigingskaart: tweede LAAG-kaart, vroegtijdige intrekking van een sessiesleutel
+
+Negende kaart van UI-fase 1. Gebouwd in de sessie die op een rate-limit-checkpoint stuitte
+(`refs/claude/checkpoint-fe6cecb8`, zie `.claude/RESUME.md`) - deze sessie heeft het resterende
+werk afgemaakt: de drie scratch-tests, screenshot, deze sectie.
+
+**`slotDuration.ts` (nieuw):** `formatDurationEstimate()` ontleed uit `addSessionKeyPreview.ts` -
+de tweede plek die dezelfde slot-naar-leestijd-omrekening nodig had (zelfde behandeling als
+`knownPrograms.ts` in sectie 66). `addSessionKeyPreview.ts` bijgewerkt om dit te hergebruiken
+(mechanisch, geen gedragswijziging).
+
+**`removeSessionKeyPreview.ts` (nieuw):** twee on-chain-gegarandeerde afwijzingen, beide vooraf te
+bepalen zonder simulatie: de sessie bestaat niet (meer) (geen `init_if_needed` op `session`,
+seeds naar `session.bump` zelf - zelfde patroon als `remove_passkey`/`remove_allowed_program`), of
+er loopt een recovery (`wallet.recovery_state.is_none()`-constraint, hier voor het eerst als
+pre-flight-check meegenomen i.p.v. alleen on-chain afgedwongen). Wie mag intrekken (nagelezen in
+`verify_passkey_signature_multi`, niet aangenomen): elke actieve passkey van de eigenaar (owner OF
+additional), geen restrictie tot wie de sessie oorspronkelijk aanmaakte. De sessiesleutel zelf is
+bewust GEEN bewerkbaar veld (in tegenstelling tot `remove_allowed_program`/`remove_passkey`): een
+sessie is een aparte PDA per sleutel, en een ander getypt doel zou een verse RPC-call binnen de
+synchrone `validate()` vergen - breekt het "wat je ziet is wat je ondertekent"-snapshot-principe.
+Kaart is daarom puur informatief/read-only (`fields: []`), toont sessiesleutel, resterende
+geldigheid (met `formatDurationEstimate`), resterend budget per scope (SOL/token, incl.
+token-decimalen-lookup alleen als `canTransferToken`), en de volledige scope-dump.
+`friction: "click"`, geen `tone:"danger"` - LAAG, zelfde classificatie-afspraak als
+`remove_allowed_program`.
+
+**`main.ts` stap 21**: volledige devnet-eindtoets met ECHTE hardware-passkey-handtekeningen -
+21a zet een verse sessie op (los van de al-gesloten sessie uit stap 16-20), 21b start een echte
+`initiate_recovery` zodat de recovery-in-progress-weigering ECHT getest wordt (niet synthetisch),
+21c bewijst dat de kaart dan direct `would-fail`/`recovery-in-progress` teruggeeft zonder
+prompt, 21d annuleert de recovery weer (`cancel_recovery`, echte handtekening), 21e toont de kaart
+opnieuw zonder lopende recovery en bevestigt met een echte handtekening, 21f bewijst dat een
+derde aanroep tegen dezelfde (nu gesloten) sessie direct `would-fail`/`not-found` teruggeeft. Dit
+stap-21-traject is in de checkpoint-sessie al succesvol op devnet doorlopen met echte
+hardware-passkey-handtekeningen, vóór het rate-limit-checkpoint.
+
+**Geverifieerd (deze sessie, drie scratch-tests + screenshot):**
+- **Test A - echte devnet-integratie (not-found-pad):** tegen een ANDER, al langer bestaand
+  `WalletAccount` (opgezocht via `getProgramAccounts`, dataSize-gefilterd, dus onafhankelijk van
+  het wallet uit stap 21) met een volkomen willekeurige session-key-pubkey - echt bevraagd,
+  resultaat `{kind:"would-fail", reason:"not-found"}`.
+- **Test B - kaartmechaniek (confirmed- en denied-pad, synthetisch):** met een lokaal
+  gesimuleerde sessie die BEIDE scopes (`canExecute` en `canTransferToken`) aanzet - de
+  token-budget-/token-mint-regels van de kaart zijn hiermee voor het eerst daadwerkelijk
+  gerenderd en gecontroleerd (stap 21's echte sessie had alleen `canExecute`, dus die tak bleef
+  tot nu toe ongetest). Binnen één ononderbroken `javascript_exec`-aanroep geverifieerd: geen
+  `tone:"danger"` (`preview-card-danger`-klasse afwezig), confirm-knop-klasse is
+  `preview-btn preview-confirm` (GEEN `preview-confirm-hold` - bevestigt `click`-friction, geen
+  hold-to-confirm), headline bevat zowel de sessiesleutel als de `Token-mint`-regel, en de
+  deny-knop resolvet naar `null` met een leeggemaakte `#preview-root`. Losstaand (aparte aanroep)
+  is ook het confirm-pad bevestigd: resolvet naar een niet-`null`-waarde (`{}` - correct voor
+  `fields: []`). Screenshot genomen van de gerenderde kaart met beide scope-takken zichtbaar.
+- **Test C - pre-flight-logica recovery-in-progress (synthetisch):** de vroege-return zelf is één
+  ongeconditioneerde if-check, identiek qua vorm aan het al devnet-bewezen not-allowed-pad van
+  `remove_allowed_program` (sectie 66) - beide takken (met/zonder `recoveryState`) bevestigd.
+- Zelfde bekende tab-inactiviteitsverschijnsel als sectie 66 opnieuw waargenomen (kaart
+  verdwijnt visueel na een tussentijdse aparte tool-aanroep, geen code-bug) - opgelost door Test
+  B's assertions binnen één ononderbroken `javascript_exec`-aanroep te doen i.p.v. via losse
+  screenshot-rondes.
+
+`tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten, geen nieuwe.
+
+`client/src/_manualTestScratch.ts` (het scratch-bestand met de drie testfuncties hierboven) is
+NIET meegecommit - zelfde behandeling als de synthetische console-tests uit sectie 66, puur een
+wegwerp-testhulpmiddel, geen onderdeel van de blijvende codebase.
+
+**Openstaand binnen LAAG:** `cancel_recovery`, `hunt` - daarna is UI-fase 1 compleet.

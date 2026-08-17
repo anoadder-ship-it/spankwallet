@@ -28,9 +28,12 @@ const CANCEL_RECOVERY_DISCRIMINATOR = Uint8Array.from([
 const OFFSET_RECOVERY_STATE_TAG = 148;
 const OFFSET_RECOVERY_INITIATED_AT = 149;
 const OFFSET_RECOVERY_NEW_OWNER_PASSKEY = 157;
-// action_nonce (C-1-fix, STATUS.md sectie 69) staat NA dit veld en NA
-// recovery_timelock_seconds/deposit_authority - variabel offset, niet vast,
-// zie challenge.ts::readActionNonce voor de reden en de daadwerkelijke lezer.
+// recovery_timelock_seconds staat NA recovery_state (Option<RecoveryState>) -
+// dus zijn offset is VARIABEL, niet vast: 149 (tag+0 bytes) als recovery_state
+// None is, 190 (157+33) als het Some is. Beide takken hieronder berekenen 'm
+// apart - zelfde reden/patroon als action_nonce (C-1-fix, STATUS.md sectie
+// 69, zie challenge.ts::readActionNonce): Borsh codeert Option::None als
+// exact 1 tagbyte, nooit de "maximale" ruimte.
 
 export interface ParsedRecoveryState {
   initiatedAt: bigint;
@@ -39,6 +42,7 @@ export interface ParsedRecoveryState {
 
 export interface ParsedWalletAccount {
   recoveryState: ParsedRecoveryState | null;
+  recoveryTimelockSeconds: bigint;
 }
 
 export async function readWalletAccount(
@@ -53,7 +57,8 @@ export async function readWalletAccount(
 
   const tag = data[OFFSET_RECOVERY_STATE_TAG];
   if (tag === 0) {
-    return { recoveryState: null };
+    const recoveryTimelockSeconds = data.readBigInt64LE(OFFSET_RECOVERY_INITIATED_AT);
+    return { recoveryState: null, recoveryTimelockSeconds };
   }
 
   const initiatedAtBytes = data.subarray(
@@ -67,8 +72,9 @@ export async function readWalletAccount(
       OFFSET_RECOVERY_NEW_OWNER_PASSKEY + 33
     )
   );
+  const recoveryTimelockSeconds = data.readBigInt64LE(OFFSET_RECOVERY_NEW_OWNER_PASSKEY + 33);
 
-  return { recoveryState: { initiatedAt, newOwnerPasskey } };
+  return { recoveryState: { initiatedAt, newOwnerPasskey }, recoveryTimelockSeconds };
 }
 
 export async function buildInitiateRecoveryTransaction(

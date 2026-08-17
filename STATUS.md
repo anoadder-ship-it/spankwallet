@@ -4504,3 +4504,130 @@ kopiëren), vooraf geverifieerd met dezelfde discipline als elke eerdere deploy
 (Programma-ID-byte-offset-sanity-check, secties 39/41/58) - plus een expliciete
 `crate::ID`-vergelijking tussen de lokale build en het devnet-adres vóór een mainnet-deploy
 begint, die weigert door te gaan bij een match.
+
+## 70. C-1-deploy: voorstel #8 geannuleerd en vervangen door een gecombineerd voorstel #10
+
+Vervolg op sectie 69's mainnet-vereiste-analyse: voorstel #8 (spend-limits-only, sectie 58)
+stond al 2-van-2 goedgekeurd te wachten op zijn 72u-timelock (executable 2026-08-19T16:42:18Z)
+toen de C-1-fix klaar kwam. Expliciet overwogen i.p.v. blind gebouwd: kan de C-1-fix in
+dezelfde buffer/voorstel als #8 meeliften, of moet het apart, en welke volgorde is dan
+sneller voor de kritieke fix? Beide vragen eerst hard beantwoord vóór er iets on-chain
+gebeurde.
+
+**Kan een al-goedgekeurd voorstel z'n buffer-inhoud nog wijzigen?** Nee, bevestigd tegen de
+daadwerkelijke Squads v4-broncode (niet de docs-samenvatting, die dat ten onrechte
+"unilateral" noemde - zie hieronder): zodra een buffer-authority een Squads-vault-PDA is,
+kan die PDA alleen ooit tekenen via `invoke_signed` vanuit `vault_transaction_execute.rs`,
+zelf weer gated door `proposal.status == Approved` + de timelock - er is geen enkel ander
+pad om nieuwe bytes in die buffer te schrijven zonder opnieuw door Squads heen te gaan.
+Conclusie: annuleren + een nieuw voorstel is de ENIGE weg, geen "voorstel #8 stiekem
+bijwerken" mogelijk (en ook geen TOCTOU-gat, precies omdat dat pad niet bestaat).
+
+**Timing-afweging:** sequentieel (eerst #8 laten uitvoeren, dan een apart C-1-voorstel) zou
+spend-limits in ~2,2 dag live brengen maar C-1 pas na een VOLLEDIGE nieuwe 72u-timelock
+daarna (~5+ dagen). Annuleren-en-samenvoegen (één nieuw voorstel met spend-limits+C-1
+gecombineerd vanaf de huidige HEAD) brengt BEIDE tegelijk live in ~3 dagen - sneller voor de
+kritieke fix, ten koste van een dag vertraging voor spend-limits zelf. Gekozen: annuleren-en-
+samenvoegen, gegeven C-1's ernst.
+
+**Build/buffer-voorbereiding (het deel dat ik zelf mocht doen, zelfde discipline als sectie
+58):** verse build vanaf HEAD (`414068c`), programma-ID-byte-offset-check (exact 1 treffer),
+sha256 vooraf vastgelegd. Buffer `2JnLSDRXSMb5LYwH2JBFG74mPj3pZkUyeqtGLKt7Wz7r` geschreven met
+de lokale deploy-sleutel, teruggedumpt en `cmp`/sha256-identiek bevestigd, authority
+overgedragen naar de vault-PDA, onafhankelijk herbevraagd. `admin/wallet-signer.html`'s
+`BUFFER`-constante bijgewerkt + `PAGE_BUILD` opgehoogd, live server herstart, opnieuw
+path-traversal-/CSP-sanity-check gedaan (zelfde als sectie 64) - allemaal vóór enige
+multisig-actie, diff apart getoond en goedgekeurd (security-kritiek bestand, vaste afspraak).
+
+**Annuleren zelf bleek de custom-tool niet te ondersteunen - gebouwd, niet uitgeweken naar de
+kapotte officiële Squads-UI.** `app.squads.so` bleek onbetrouwbaar voor deze multisig
+(landingspagina toont demodata, de directe multisig-link 404't). `wallet-signer.html` had
+alleen propose/approve/execute, geen cancel/reject. In plaats van de gebruiker naar de
+kapotte officiële UI te sturen: een nieuwe knop "1c. Voorstel #8 annuleren" toegevoegd,
+rechtstreeks op transactionIndex=8n gericht (niet via `findCanonicalProposal()`, die zoekt
+op de HUIDIGE `BUFFER`-constante en zou #8 dus nooit meer vinden). Vóór het bouwen eerst
+zelf tegen de daadwerkelijke Squads v4-broncode geverifieerd (niet de docs-pagina geloofd,
+die "unilateral" beweerde): `proposal_vote.rs`'s `Vote::Cancel`-tak roept
+`proposal.cancel(member, multisig.threshold)` aan - EXACT dezelfde
+drempel-stemaccumulatie als `approve()`, dus annuleren vereist net als goedkeuren 2-van-3,
+geen eenmalige actie. `multisig.transactions.proposalCancelV2` bevestigd aanwezig in de
+exact gepinde SDK-versie (`@sqds/multisig@2.1.4`, gecontroleerd tegen de echte npm-tarball,
+niet aangenomen vanuit de `main`-branch) met een parametervorm identiek aan
+`proposalApprove`.
+
+**On-chain uitgevoerd en bij elke stap onafhankelijk herbevraagd (niet op de paginalog
+vertrouwd):**
+- Voorstel #8: eerste annuleer-stem (hoofd-pc), tweede annuleer-stem (co-signer) ->
+  status `Cancelled`, beide stemmen zichtbaar in `proposal.cancelled`, tijdstip
+  2026-08-17T14:57:55Z - rechtstreeks via `@sqds/multisig` tegen devnet bevraagd, niet
+  uit de pagina aangenomen.
+- Voorstel #10 (nieuw, via knop "2. Voorstel indienen" nadat #8 op Cancelled stond, dus
+  geen herhaling van de sectie-58-valkuil met dubbele actieve voorstellen): de
+  `VaultTransaction`'s enige instructie onafhankelijk gedecodeerd - een echte BPF-loader-
+  Upgrade-instructie (opcode 3), met exact de nieuwe buffer (`2JnLSDRX...`), het
+  SpankWallet-programma-ID, de ProgramData, en de vault-PDA als authority - de oude buffer
+  komt nergens in voor. Aangemaakt door de hoofd-pc-sleutel, status `Active`, 0
+  goedkeuringen op dat moment.
+- Beide goedkeuringen (telefoon via Solflare-deep-link, tweede apparaat) bevestigd: status
+  `Approved`, 2-van-2, tweede goedkeuring geregistreerd op 2026-08-17T15:08:23Z (decimaal
+  uit de BN gelezen, niet de hex-`JSON.stringify`-vorm - dezelfde gotcha als sectie 56).
+  Timelock 72u exact -> **executable-at 2026-08-20T15:08:23Z.**
+
+Niets meer te doen tot die datum, dan "4. Uitvoeren" op voorstel #10 - en pas daarna de
+echte devnet-plus-hardware-passkey-browserproef voor C-1 (STATUS.md sectie 68/69's
+oorspronkelijke laatste-stap-vraag).
+
+## 71. `cancel_recovery`-bevestigingskaart: vierde LAAG-kaart, noodrem tegen een lopende recovery
+
+Vervolg op sectie 66/67 (UI-fase 1, LAAG-groep), gebouwd terwijl de C-1-timelock afloopt.
+Anders dan elke eerdere kaart: dit is een VETO tegen iets dat al loopt, geen bevoegdheid-
+versmallende actie - frictie zou hier averechts werken (elke seconde telt tegen een
+kwaadwillende `backup_authority`-overname), dus `friction: "click"`, geen `tone:"danger"`,
+zelfde classificatie-afspraak als de andere LAAG-kaarten maar nu vanuit een andere
+motivatie (haast, niet "weinig risico").
+
+**Pre-flight is de INVERSE van elke eerdere kaart:** alle vorige LAAG/MIDDEN-kaarten falen
+vooraf als een bepaalde toestand WEL bestaat (bv. recovery-in-progress bij
+`remove_session_key`); deze kaart bestaat uitsluitend OM een lopende recovery tegen te
+houden, dus `would-fail`/`no-recovery-in-progress` treedt op als er GEEN recovery loopt.
+
+**`recovery.ts` uitgebreid:** `readWalletAccount()`/`ParsedWalletAccount` toonden tot nu toe
+alleen `recoveryState`. `recovery_timelock_seconds` (een WalletAccount-breed veld, NA
+`recovery_state` maar zelf geen Option) had ik nodig voor de finalize-datum-context (zie
+hieronder) - zelfde offset-valkuil als `action_nonce` (sectie 69): het veld staat NA een
+`Option<RecoveryState>`, dus zijn offset is 149 (recovery_state=None) of 190
+(recovery_state=Some, 157+33) - geen vast getal, beide takken apart berekend, geen breuk
+voor bestaande aanroepers (puur additief veld).
+
+**`cancelRecoveryPreview.ts` (nieuw):** toont expliciet WAT er wordt tegengehouden (geen
+understatement, vaste afspraak) - sinds wanneer de recovery loopt (`initiatedAt`, absolute
+datum + "~X uur/dagen geleden"), welke `new_owner_passkey` er klaarstond (33 rauwe
+secp256r1-bytes, GEEN Solana-Pubkey - dus `bytesToHex()` uit `hex.ts`, exact dezelfde
+labelconventie als `addPasskeyPreview.ts`/`removePasskeyPreview.ts`, niet per ongeluk als
+base58-adres weergegeven), en op verzoek ook wanneer `finalize_recovery` mogelijk zou zijn
+geworden (`initiatedAt + recoveryTimelockSeconds`, met een expliciete "al verstreken, hoe
+eerder je annuleert hoe beter"-waarschuwing als dat moment al gepasseerd is). Op bevestigen
+geeft de kaart de AL-opgehaalde `recoveryState` terug (geen tweede fetch) - "wat je ziet is
+wat je ondertekent", `main.ts` geeft 'm rechtstreeks door aan het al bestaande
+`buildCancelRecoveryTransaction`.
+
+**`main.ts` stap 22**: 22a toont de kaart tegen de huidige wallet (nog geen recovery) ->
+`would-fail`; 22b start een ECHTE `initiate_recovery` (backup_authority); 22c toont de
+kaart opnieuw (nu gevuld, confirmed-pad) en verstuurt met een ECHTE passkey-handtekening;
+22d toont de kaart een derde keer -> weer `would-fail`. Vereist echte hardware-passkey-
+interactie (stappen 1/2/4 als vereisten) - dat deel is aan de gebruiker, niet iets ik zelf
+kan doorlopen.
+
+**Wat ik zelf wel kon verifiëren (zelfde tweetrapsaanpak als sectie 66, geen hardware
+nodig):**
+- Echte devnet-integratie: tegen een bestaand `WalletAccount` zonder lopende recovery ->
+  `{kind:"would-fail", reason:"no-recovery-in-progress"}`, geen kaart, geen prompt.
+- Kaartmechaniek (synthetisch, binnen één ononderbroken `javascript_exec`-aanroep, zelfde
+  bekende tab-inactiviteits-mitigatie als sectie 66/67): geen `tone:"danger"`, confirm-knop
+  is `preview-btn preview-confirm` (geen `-hold`-suffix), headline bevat zowel de
+  hex-sleutel als de finalize-regel, bevestigen resolvet naar een niet-`null`-waarde,
+  weigeren naar `null` met een leeggemaakte `#preview-root`. Screenshot genomen.
+
+`tsc --noEmit`: exact de 4 bekende, pre-bestaande fouten, geen nieuwe.
+
+**Openstaand binnen LAAG:** `hunt` - daarna is UI-fase 1 compleet.

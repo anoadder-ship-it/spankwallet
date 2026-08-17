@@ -34,6 +34,7 @@ import { showTransferTokenPreview } from "./transferTokenPreview";
 import { showAddSessionKeyPreview } from "./addSessionKeyPreview";
 import { showRemoveAllowedProgramPreview } from "./removeAllowedProgramPreview";
 import { showRemoveSessionKeyPreview } from "./removeSessionKeyPreview";
+import { showCancelRecoveryPreview } from "./cancelRecoveryPreview";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -2200,6 +2201,113 @@ async function runStep21(): Promise<void> {
     log("SUCCES - remove_session_key end-to-end bewezen op devnet: beide");
     log("gegarandeerde weigeringen (recovery-in-progress, not-found) ECHT getest,");
     log("plus de daadwerkelijke intrekking met een echte passkey-handtekening.");
+    log("");
+    log("Klaar voor stap 22.");
+
+    (document.getElementById("step22-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep22(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet || !lastBackupAuthority) {
+    log("Voer eerst stap 1, 2 en 4 uit.");
+    return;
+  }
+  log("Stap 22: cancel_recovery-bevestigingskaart (STATUS.md sectie 71) - noodrem");
+  log("tegen een lopende recovery, LAAG-risicoklasse, gewone klik, geen tone:danger.");
+  log("");
+
+  try {
+    log("22a. Kaart tonen VOORDAT er een recovery loopt - moet DIRECT");
+    log("'would-fail: no-recovery-in-progress' teruggeven, GEEN kaart, GEEN prompt.");
+    const before = await showCancelRecoveryPreview(connection, lastPdas.walletPda);
+    if (before.kind !== "would-fail" || before.reason !== "no-recovery-in-progress") {
+      log("FOUT: verwachtte would-fail/no-recovery-in-progress, kreeg: " + JSON.stringify(before));
+      return;
+    }
+    log("Bevestigd: " + JSON.stringify(before) + " - geen kaart getoond.");
+    log("");
+
+    log("22b. initiate_recovery (backup_authority, GEEN passkey) om een echte");
+    log("recovery te starten om tegen te houden.");
+    const dummyNewOwnerPasskey = crypto.getRandomValues(new Uint8Array(33));
+    dummyNewOwnerPasskey[0] = 0x02;
+    const initiateTx = await buildInitiateRecoveryTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastBackupAuthority,
+      dummyNewOwnerPasskey
+    );
+    const { signature: initiateSig } = await lastWallet.signAndSendTransaction(initiateTx);
+    await connection.confirmTransaction(initiateSig, "confirmed");
+    log("Bevestigd - recovery_state is gezet.");
+    log("");
+
+    log("22c. Kaart opnieuw tonen - nu WEL een lopende recovery, moet de echte");
+    log("initiated_at/new_owner_passkey/finalize-datum tonen en op een gewone klik");
+    log("wachten (LAAG-risicoklasse, geen hold-to-confirm).");
+    const choice = await showCancelRecoveryPreview(connection, lastPdas.walletPda);
+    if (choice.kind === "denied") {
+      log("Geweigerd in de bevestigingskaart - cancel_recovery NIET aangeroepen,");
+      log("geen passkey-prompt.");
+      return;
+    }
+    if (choice.kind === "would-fail") {
+      log("FOUT: onverwacht 'would-fail' (" + choice.reason + ") - er zou hier juist een");
+      log("lopende recovery moeten zijn.");
+      return;
+    }
+    log(
+      "Bevestigd. Kaart toonde initiated_at=" + choice.recoveryState.initiatedAt +
+        ", new_owner_passkey=" + bytesToHex(choice.recoveryState.newOwnerPasskey)
+    );
+    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+    const { transaction: cancelTx } = await buildCancelRecoveryTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname,
+      choice.recoveryState
+    );
+    const { blockhash: cancelBh } = await connection.getLatestBlockhash();
+    cancelTx.recentBlockhash = cancelBh;
+    const { signature: cancelSig } = await lastWallet.signAndSendTransaction(cancelTx);
+    log("Verstuurd. Signature: " + cancelSig);
+    await connection.confirmTransaction(cancelSig, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    const afterCancel = await readWalletAccount(connection, lastPdas.walletPda);
+    if (afterCancel.recoveryState) {
+      log("FOUT: recovery_state is nog steeds gezet na bevestigde cancel_recovery.");
+      return;
+    }
+    log("recovery_state is weer None - cancel_recovery heeft daadwerkelijk gewerkt,");
+    log("met een ECHTE passkey-handtekening en de exacte snapshot uit de kaart.");
+    log("");
+
+    log("22d. Kaart een derde keer tonen - recovery is nu weer geannuleerd, moet");
+    log("opnieuw DIRECT 'would-fail: no-recovery-in-progress' teruggeven.");
+    const after = await showCancelRecoveryPreview(connection, lastPdas.walletPda);
+    if (after.kind !== "would-fail" || after.reason !== "no-recovery-in-progress") {
+      log("FOUT: verwachtte would-fail/no-recovery-in-progress, kreeg: " + JSON.stringify(after));
+      return;
+    }
+    log("Bevestigd: " + JSON.stringify(after) + " - geen kaart getoond.");
+    log("");
+
+    log("SUCCES - cancel_recovery-bevestigingskaart end-to-end bewezen op devnet:");
+    log("beide gegarandeerde takken (geen recovery ervoor, geen recovery erna) ECHT");
+    log("getest, plus de daadwerkelijke annulering met een echte passkey-handtekening.");
   } catch (err) {
     log("");
     log("FOUT:");
@@ -2275,4 +2383,7 @@ document.getElementById("step20-btn")!.addEventListener("click", () => {
 });
 document.getElementById("step21-btn")!.addEventListener("click", () => {
   runStep21();
+});
+document.getElementById("step22-btn")!.addEventListener("click", () => {
+  runStep22();
 });

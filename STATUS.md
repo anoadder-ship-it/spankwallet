@@ -4910,6 +4910,21 @@ soort mechanismen - nu bevestigd op elk niveau: empirisch (de API bestaat en wer
 architecturaal (Chromium's eigen ontwerpdocumentatie) en protocolmatig (WebAuthn's
 origin-binding, punt 3).
 
+**Vervolgvraag: zou een sandboxed `<iframe>` (nog steeds in de huidige browserarchitectuur,
+geen Tauri) hetzelfde gat dichten? Nee, bevestigd tegen Chrome's eigen API-referentie voor
+`chrome.webAuthenticationProxy`.** `attach()` maakt een extensie letterlijk "the active Web
+Authentication API request proxy" - enkelvoudig en exclusief (de aanroep faalt alleen als
+een ANDERE extensie al is aangehecht), zonder enige vermelding van tab-, frame- of
+origin-scoping. Dit bevestigt: eenmaal aangehecht onderschept de extensie WebAuthn-
+aanroepen browser-breed, ongeacht of de aanroep uit de hoofdpagina of een (sandboxed)
+iframe komt - een sandboxed iframe isoleert een document van de OMLIGGENDE PAGINA, niet
+van een extensie die op browser-procesniveau meeluistert. Zelfde architecturale grondslag
+als hierboven al vastgesteld voor CSP/isolated worlds/Shadow DOM: dit mechanisme zit
+stelselmatig een laag te diep voor elke document-/frame-gebaseerde mitigatie, sandboxing
+inbegrepen. Dit is exact de reden waarom een volledige Tauri-migratie (waar geen
+browserextensie-ecosysteem bestaat, zie het aparte ontwerp hiervoor) de enige structurele
+oplossing blijft - zie het Tauri-migratie-ontwerp.
+
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 
 Laatste kaart uit sectie 59's oorspronkelijke plan. Anders dan elke andere kaart heeft

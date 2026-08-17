@@ -4891,7 +4891,13 @@ isolate share underlying C++ DOM objects, but each world has its own DOM wrapper
 andere woorden - isolated worlds isoleren uitsluitend de JavaScript-wrapper-laag (één
 V8-wrapper per world, beheerd via `DOMDataStore`), niet de onderliggende C++ DOM-node
 zelf; hoofdwereld en elke isolated world (elke content-script-extensie) opereren op
-dezelfde C++ DOM-objecten. Dit is de architecturale grondoorzaak achter punt 6 hierboven
+dezelfde C++ DOM-objecten. Precieze hiërarchie, zoals dat document 'm beschrijft: V8
+Isolate -> V8 Context -> Blink "world" (`DOMWrapperWorld`) -> wrapper-opslag via
+`DOMDataStore` - de isolatie zit uitsluitend in die laatste, JS-gerichte laag. Een Shadow
+DOM-element verandert hier niets aan: het is zelf gewoon nog een C++ DOM-node binnen
+diezelfde gedeelde boom, geen aparte structuur die aan dit mechanisme ontsnapt - exact
+waarom WebEnclave's enclave, ondanks de closed-mode-opzet, nooit buiten deze gedeelde-
+node-realiteit kon vallen. Dit is de architecturale grondoorzaak achter punt 6 hierboven
 (`chrome.dom.openOrClosedShadowRoot()` kan closed Shadow DOM doorbreken omdat de
 onderliggende node sowieso al gedeeld is - de API opent alleen een JS-wrapper ernaartoe)
 en bevestigt de conclusie tot op broncode-niveau, niet alleen empirisch via de API-referentie:

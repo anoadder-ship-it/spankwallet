@@ -5111,6 +5111,22 @@ dreigingsklasse. De Tauri-migratie (geen extensie-ecosysteem, structureel) en de
 on-chain-verankerde vervolgstappen (gelaagde privileges, control-plane/data-plane)
 blijven de enige structurele richtingen.**
 
+**Afsluitende versterking, "assume breach"-herkadrering - geen nieuwe scope, scherpere
+onderbouwing van een al gekozen richting.** Een geslaagde extensie-hijack kan zich
+mogelijk camoufleren tegen detectiepogingen binnen het browser-domein (zelfde reden als
+hierboven: elke detectie zou uit dezelfde, potentieel gecompromitteerde laag moeten
+komen). Conclusie: stop met proberen te detecteren/voorkomen BINNEN dat domein, en maak
+een geslaagde hijack in plaats daarvan onwinstgevend, vertraagd, en achteraf
+detecteerbaar via mechanismen BUITEN dat domein - on-chain timelock op high-value acties,
+de al-geplande spend-cap, eventueel een drempel-gebaseerde tweede-passkey-eis, en
+achteraf-detectie via events/balansmonitoring. Bevestigt en verscherpt de al gekozen
+richting uit de gelaagde-privileges-roadmap hierboven (2-of-2-passkey/timelock boven een
+drempel) tegenover de afgewezen Wallet-Guardian-companion-extensie - zelfde conclusie,
+nu vanuit een "ga uit van een geslaagde inbraak"-perspectief in plaats van een
+"voorkom de inbraak"-perspectief. Uitwerking (het "pending withdrawal"-ontwerp met
+timelock + drempel-gebaseerde tweede-passkey-eis) volgt als eigen, apart ontwerpgesprek,
+na de Tauri-fase-0-migratie - niet nu.
+
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 
 Laatste kaart uit sectie 59's oorspronkelijke plan. Anders dan elke andere kaart heeft

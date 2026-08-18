@@ -5116,16 +5116,54 @@ onderbouwing van een al gekozen richting.** Een geslaagde extensie-hijack kan zi
 mogelijk camoufleren tegen detectiepogingen binnen het browser-domein (zelfde reden als
 hierboven: elke detectie zou uit dezelfde, potentieel gecompromitteerde laag moeten
 komen). Conclusie: stop met proberen te detecteren/voorkomen BINNEN dat domein, en maak
-een geslaagde hijack in plaats daarvan onwinstgevend, vertraagd, en achteraf
-detecteerbaar via mechanismen BUITEN dat domein - on-chain timelock op high-value acties,
-de al-geplande spend-cap, eventueel een drempel-gebaseerde tweede-passkey-eis, en
-achteraf-detectie via events/balansmonitoring. Bevestigt en verscherpt de al gekozen
+een geslaagde hijack in plaats daarvan onwinstgevend, vertraagd, achteraf detecteerbaar,
+**en duur om te PROBEREN** - vier dimensies, niet drie: naast het vertragen van de
+daadwerkelijke uitbetaling ook de kosten van een poging zelf verhogen (bv. een
+gefaalde/geblokkeerde poging die alsnog transactiekosten of een cooldown kost voor de
+aanvaller, niet gratis herhaalbaar) via mechanismen BUITEN dat domein - on-chain timelock
+op high-value acties, de al-geplande spend-cap, eventueel een drempel-gebaseerde
+tweede-passkey-eis, en achteraf-detectie via events/balansmonitoring. Bevestigt en
+verscherpt de al gekozen
 richting uit de gelaagde-privileges-roadmap hierboven (2-of-2-passkey/timelock boven een
 drempel) tegenover de afgewezen Wallet-Guardian-companion-extensie - zelfde conclusie,
 nu vanuit een "ga uit van een geslaagde inbraak"-perspectief in plaats van een
 "voorkom de inbraak"-perspectief. Uitwerking (het "pending withdrawal"-ontwerp met
 timelock + drempel-gebaseerde tweede-passkey-eis) volgt als eigen, apart ontwerpgesprek,
 na de Tauri-fase-0-migratie - niet nu.
+
+**Onderzocht en afgewezen: automatische "sweep bij toegangsprijs-betaling" - drie
+onafhankelijke, elk al-dodelijke redenen.** Voorstel: elke gevoelige actie vereist eerst
+een kleine betaling naar een tweede, eigenaar-gecontroleerd adres; zodra die landt,
+verplaatst een automatisch mechanisme onmiddellijk ook het resterende walletsaldo naar
+dat adres, vóór de eigenlijke (mogelijk kwaadaardige) actie kan lukken.
+1. **Geen onderscheid eigenaar/aanvaller mogelijk** - een geldige handtekening via een
+   gekaapte ceremonie is bit-voor-bit identiek aan een echte; geen timing-heuristiek of
+   actie-type-koppeling lost dit fundamenteel op, alleen een volledig onafhankelijke
+   tweede credential zou dat doen (= dezelfde al-geplande 2-of-2-richting, geen nieuw idee).
+2. **Saboteert normaal gebruik** - triggert net zo goed bij de eigenaar's eigen, legitieme
+   acties; de wallet wordt onbruikbaar voor routinegebruik. Als het tweede adres door
+   dezelfde ene passkey wordt gecontroleerd, bovendien nul extra beveiliging (dezelfde
+   kwetsbaarheid verplaatst, niet opgelost).
+3. **De timing werkt sowieso niet** - binnen één atomische transactie rolt een falende
+   vervolgstap de HELE transactie terug, inclusief de sweep zelf (Solana-atomiciteit) -
+   functioneel gelijk aan een gewone balans-check, geen "aanvaller treft lege wallet
+   aan"-moment. Over losse transacties is het een race die de aanvaller structureel wint
+   - hij bepaalt zelf de timing van zijn vervolgtransactie, een reactief sweep-mechanisme
+   heeft altijd meer stappen/latency.
+
+**Enige overeindblijvende vorm: een opt-in "panic button" - een toekomstige, mogelijk met
+optie B te combineren uitbreiding, niet nu te bouwen.** Verplaatst de beslissing naar het
+menselijk oordeel (de eigenaar merkt zelf iets verdachts en activeert bewust een
+noodgreep) i.p.v. een automatische trigger - omzeilt zo punt 1/2 hierboven volledig.
+Functioneel hetzelfde patroon als het al-bestaande `initiate_recovery`/`cancel_recovery`
+(secties 10-12), nu toegepast op bestedingen i.p.v. eigenaarschap. Twee harde
+voorwaarden: (a) de trigger-ceremonie moet via een kanaal lopen dat NIET dezelfde
+kwetsbaarheid deelt als de hoofd-passkey (anders kaapt een aanvaller ook de
+paniekpoging), en (b) eerlijk framen als schadebeperking, niet preventie - een
+geautomatiseerd aanvalsscript is waarschijnlijk sneller dan menselijke reactietijd.
+Terminologie-nuance: "honeypot" heeft in de security-wereld een andere, gevestigde
+betekenis (een bewuste lokwallet om aanvallers te detecteren) - wat hier bedoeld wordt
+mapt beter op bekende "panic button"/"duress wallet"- en "circuit breaker"-patronen.
 
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 

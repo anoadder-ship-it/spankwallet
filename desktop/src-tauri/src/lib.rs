@@ -1,3 +1,5 @@
+mod fee_payer;
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -8,7 +10,13 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .manage(fee_payer::FeePayerState::default())
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            fee_payer::setup_fee_payer,
+            fee_payer::unlock_fee_payer,
+            fee_payer::fee_payer_exists,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

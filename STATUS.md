@@ -932,6 +932,20 @@ vandaag opgepakt (groter werk dan één sessie rechtvaardigt):
   situatie); grote/eerste-keer-naar-dit-adres/advanced-CPI = passkey + timelock, of
   passkey + backup_authority-cosign, analoog aan de al bestaande recovery-timelock-
   architectuur.
+  **Versterkt door het WebAuthn-hijacking-onderzoek (STATUS.md §72):** geen enkele
+  verdediging BINNEN het browser-domein is een muur (CSP, isolated worlds, Shadow DOM,
+  WebEnclave, Tauri's extensie-eliminatie - stuk voor stuk aangetoond respectievelijk
+  ontoereikend of gedeeltelijk) - de winnende aanpak is vertrouwen verplaatsen naar
+  domeinen die een aanvaller niet controleert: hardware, een tweede device, of de chain
+  zelf. Concreet voor dit punt: een 2-of-2-passkey-vereiste of een aparte timelock
+  specifiek voor bedragen boven een drempel zou betekenen dat zelfs een succesvol
+  gekaapte WebAuthn-handtekening niet direct kan uitbetalen - de on-chain-laag wordt de
+  achterstop wanneer de client-laag (hoe goed ook, zie Tauri-migratie) toch faalt.
+  Overwogen alternatief, bewust NIET gekozen: een losse "Wallet Guardian"-companion-
+  extensie - zou zelf weer in hetzelfde kwetsbare browserextensie-domein leven dat dit
+  hele onderzoek net structureel onbetrouwbaar bleek, dus fundamenteel zwakker dan een
+  on-chain-verankerde maatregel. Nog niet gebouwd, zelfde reden als de rest van deze
+  roadmap (groter werk dan één sessie rechtvaardigt) - vastgelegd als vervolgstap.
 - **transfer_token als volgende getypeerde actie** (zelfde patroon als transfer_sol, maar
   voor SPL-tokens) - logische eerstvolgende uitbreiding, hergebruikt grotendeels de
   hunt-achtige SPL-Token-CPI-kennis die al aanwezig is in dit project.
@@ -5000,6 +5014,49 @@ frontend-code (Tauri verkleint het aanvalsoppervlak aanzienlijk door geen extern
 te laden, sluit het niet automatisch - blijft een doorlopende code-discipline-eis), en
 (c) het nu wél gesloten extensie-/`webAuthenticationProxy`-gat. Geen van deze drie wordt
 door dit onderzoek overclaimd of ondergerapporteerd.
+
+**Onderzocht en afgewezen: post-signature challenge-verificatie als client-side
+detectielaag - voegt geen echte waarde toe tegen de hijacking-dreigingsklasse.** Voorstel:
+na `navigator.credentials.get()` de `clientDataJSON.challenge` decoderen en vergelijken
+tegen de door de kaart oorspronkelijk opgebouwde challenge, verzending blokkeren bij een
+mismatch. **Punt 1 (haalbaarheid): dit mechanisme bestaat al**, correct geïmplementeerd in
+`client/src/webauthnSign.ts` (regel 26/49/52-59) - `clientDataJSON` wordt precies één keer
+gelezen, in een const opgeslagen, en diezelfde waarde voedt zowel de vergelijking als de
+`signedMessage`-opbouw voor de on-chain-verificatie (single-read/single-source-of-truth,
+geen losse implementatie-bug).
+
+**Punt 2/3 (voegt het waarde toe tegen de hijacking-dreiging?), met protocolbewijs
+uitgewerkt:**
+- **Responsvervalsing om de check te slim af te zijn is cryptografisch afgesloten, niet
+  slechts moeilijk.** De WebAuthn-assertion-handtekening bindt `authenticatorData ||
+  SHA256(clientDataJSON)` - een extensie zonder de private key kan geen geldige
+  handtekening produceren die matcht met een VERVALSTE `clientDataJSON` (die de originele
+  challenge claimt) terwijl de ECHTE handtekening over een ANDERE, gemanipuleerde
+  `clientDataJSON` gaat. Bevestigd tegen de bestaande single-read-implementatie: welke
+  bytes de check ook ziet, exact diezelfde bytes voeden de on-chain-verificatie - een
+  vervalste respons die de check zou foppen, zou ook de precompile-verificatie laten
+  falen. Dit specifieke pad is dus daadwerkelijk dicht, niet slechts "moeilijk".
+- **De daadwerkelijke omzeiling zit fundamenteler: de detectielaag is irrelevant, niet
+  omzeild.** `chrome.webAuthenticationProxy` (Chrome's eigen API-referentie, hierboven al
+  geciteerd) geeft de aangehechte extensie de ECHTE, geldig-ondertekende respons
+  rechtstreeks in haar EIGEN, bevoorrechte extensie-achtergrondcontext (`onGetRequest`/
+  `completeGetRequest()` - dat IS de ontwerpdoelstelling van de API: de extensie is de
+  tussenpersoon voor de volledige ceremonie). Zodra de extensie een geldig-getekende
+  respons over haar zelfgekozen (kwaadaardige) challenge in handen heeft, hoeft ze de
+  pagina niets meer te laten geloven - ze kan die handtekening ZELF, via haar eigen,
+  sowieso al aanwezige netwerktoegang, rechtstreeks naar een Solana-RPC-endpoint sturen,
+  volledig buiten de pagina's eigen verzendcode om. Een client-side blokkade van
+  "verzending" raakt uitsluitend het pad waarlangs de PAGINA zelf zou verzenden - dat
+  levert geen enkele bescherming op tegen een aanvaller die uberhaupt niet afhankelijk is
+  van dat pad.
+
+**Conclusie: bevestigd omzeilbaar, geen nieuwe bouwstap.** Niet via responsvervalsing (dat
+mechanisme is - correct geïmplementeerd - al aanwezig en houdt precies wat het belooft),
+maar omdat de hele premisse "detecteer vóór verzending" een aanvaller veronderstelt die
+via de pagina's eigen verzendpad MOET gaan - iets waar `chrome.webAuthenticationProxy`
+specifiek niet toe gedwongen is. Zelfde structurele conclusie als de rest van deze sectie:
+de enige fix is de laag zelf wegnemen (Tauri, geen extensie-ecosysteem), niet een sterkere
+check binnen een laag die de aanvaller toch al kan omzeilen.
 
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 

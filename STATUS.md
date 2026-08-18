@@ -949,6 +949,17 @@ vandaag opgepakt (groter werk dan één sessie rechtvaardigt):
 - **transfer_token als volgende getypeerde actie** (zelfde patroon als transfer_sol, maar
   voor SPL-tokens) - logische eerstvolgende uitbreiding, hergebruikt grotendeels de
   hunt-achtige SPL-Token-CPI-kennis die al aanwezig is in dit project.
+- **Control-plane/data-plane-architectuurscheiding - grote, aparte toekomstige richting,
+  hier voor het eerst vastgelegd.** Bron: extern voorgesteld, NIET binnen een Claude-Code-
+  sessie van dit project ontstaan - de gebruiker besprak dit idee, na de zesde externe
+  audit, in een apart gesprek met Claude (buiten deze repo/sessie om), en gaf akkoord om
+  het als toekomstige agenda-post te bewaren, niet nu te bouwen. Kernidee, zelfde principe
+  als de hierboven al genoteerde gelaagde-privileges-richting maar in extremere vorm: de
+  passkey besteedt nooit rechtstreeks - een "control plane" (passkey-geautoriseerd) stelt
+  alleen BELEID/LIMIETEN/GOEDKEURINGEN vast, een gescheiden "data plane" voert de
+  daadwerkelijke geldbeweging uit binnen die vooraf vastgestelde grenzen. Nog geen
+  ontwerpdetails uitgewerkt in dit project - puur vastgelegd als richting, net als de
+  Tauri-migratie ooit begon, niet nu op te pakken.
 
 Deze roadmap is bewust NIET geïmplementeerd vandaag - v1 (transfer_sol, gesloten getypeerd,
 geen allowlist-complexiteit) is de veiligste, kleinste, meest verdedigbare basis. Uitbreiding
@@ -5057,6 +5068,48 @@ via de pagina's eigen verzendpad MOET gaan - iets waar `chrome.webAuthentication
 specifiek niet toe gedwongen is. Zelfde structurele conclusie als de rest van deze sectie:
 de enige fix is de laag zelf wegnemen (Tauri, geen extensie-ecosysteem), niet een sterkere
 check binnen een laag die de aanvaller toch al kan omzeilen.
+
+**Laatste onderzochte variant, sluit het WebAuthn-hijacking-onderzoekstraject af: kan een
+tweede, "bewakende" extensie de eerste detecteren of tegenhouden via
+`chrome.webAuthenticationProxy`? Vermoeden bevestigd, met bronbewijs op beide punten.**
+1. **Detecteren: nee.** Extensies zijn onderling geïsoleerd, niet alleen van de pagina -
+   bevestigd (Chrome's eigen documentatie over content-script-werelden): "An isolated
+   world is a private execution environment that isn't accessible to the page **or other
+   extensions**... JavaScript variables in an extension's content scripts are not visible
+   to the host page or other extensions' content scripts." `chrome.webAuthenticationProxy`
+   draait bovendien in de achtergrondcontext (service worker/background page), een laag
+   die nog sterker geïsoleerd is dan content-scripts (geen gedeelde DOM tussen
+   achtergrondcontexten van verschillende extensies, uberhaupt). Bevestigd tegen de
+   officiële API-referentie: geen `isAttached`-achtige query, geen event, geen enkele
+   manier om een andere extensie's proxy-activiteit te observeren - de enige API-leden
+   zijn `attach()`, `detach()`, `onRemoteSessionStateChange` (uitsluitend voor de EIGEN
+   sessie-status). De enige indirecte informatie die een tweede extensie zou kunnen
+   krijgen is een gefaalde eigen `attach()`-poging - maar dat onthult niet WELKE extensie
+   al actief is, niet WAT ze doet, en kan een legitiem gebruik (bv. een remote-desktop-app)
+   niet onderscheiden van een kwaadaardige.
+2. **Tegenhouden: nee, om precies de reden die het vermoeden al noemt.** Bevestigd tegen
+   Chrome's eigen API-referentie: `attach()` "fails with an error if a different extension
+   is already attached" - enkelvoudig, exclusief, wie er EERST is wint. Een kwaadaardige
+   extensie die als eerste attacht, sluit een latere, legitieme "bewaker" juist BUITEN, niet
+   andersom. Enige theoretische uitzondering: een bewaker die zelf PROACTIEF, bij elke
+   browserstart, als eerste attacht (vóór enige kwaadaardige extensie de kans krijgt) zou
+   de exclusieve sleuf kunnen bezetten - maar dat is exact de eerder al overwogen en
+   afgewezen "Wallet Guardian"-companion-extensie (zie de gelaagde-privileges-roadmap
+   hierboven): zelf weer in hetzelfde kwetsbare browserextensie-domein, race-afhankelijk
+   (verliest alsnog als de kwaadaardige extensie ooit eerder start, bv. na een
+   browser-herstart vóórdat de bewaker actief is), en zonder enig onderscheidingsvermogen
+   tussen legitieme en kwaadaardige aanvragers voor de sleuf die ze bezet houdt. Geen
+   nieuwe bescherming, geen nieuwe conclusie - bevestigt alleen waarom dit pad al
+   terecht was afgewezen.
+
+**Hiermee is het WebAuthn-hijacking-onderzoekstraject (secties 72, met de losse
+vervolgvragen over acceptlijsten/wachtwoorden, WebEnclave, sandboxed iframes, BitM+/
+W3C-1965, post-signature-verificatie en nu de bewaker-extensie) afgerond met een
+consistente, herhaaldelijk bevestigde conclusie: elke verdediging binnen het
+browserextensie-domein zelf is aantoonbaar ontoereikend tegen deze specifieke
+dreigingsklasse. De Tauri-migratie (geen extensie-ecosysteem, structureel) en de
+on-chain-verankerde vervolgstappen (gelaagde privileges, control-plane/data-plane)
+blijven de enige structurele richtingen.**
 
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 

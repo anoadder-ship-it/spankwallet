@@ -1,0 +1,29 @@
+[workspace]
+# Losstaand van de root-Cargo-workspace (programs/spankwallet) - dit is een
+# apart project (Tauri-migratie-ontwerp, STATUS.md), geen Anchor-programma.
+
+[package]
+name = "spankwallet-desktop"
+version = "0.1.0"
+description = "SpankWallet desktop-app (Tauri) - fase 0 van de browser->native-migratie, zie STATUS.md"
+authors = ["SpankWallet"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "spankwallet_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

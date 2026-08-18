@@ -4925,6 +4925,82 @@ inbegrepen. Dit is exact de reden waarom een volledige Tauri-migratie (waar geen
 browserextensie-ecosysteem bestaat, zie het aparte ontwerp hiervoor) de enige structurele
 oplossing blijft - zie het Tauri-migratie-ontwerp.
 
+**Eerlijke grens van de Tauri-migratie: twee aangedragen bevindingen, één corrigeert de
+eerdere framing, één is een echt, nieuw, derde restgat naast het al-bekende
+OS-malware-gat.**
+
+**1. W3C webauthn issue #1965 ("self-XSS kan een legitieme gebruiker's authenticator laten
+tekenen") betekent bij nalezing NIET wat de titel suggereert - correctie op eerdere
+aanname, niet aangenomen maar nagelezen tot en met de sluiting.** Het daadwerkelijke,
+door de spec-editor (`emlun`) uitgeschreven en door de werkgroep geaccepteerde
+aanvalsverloop: de aanvaller injecteert script IN ZICHZELF om
+`PublicKeyCredentialRequestOptions` te bemachtigen, stuurt die naar een TROJAN DIE AL OP
+HET SLACHTOFFERS APPARAAT DRAAIT, het slachtoffer interacteert met die trojan (tekent
+zonder het te weten), en de trojan stuurt de handtekening terug. Sluitingscommentaar,
+letterlijk (WG-call, 29 november 2023): "the attacker-in-the-browser scenario is not
+within our threat model." Dit vereist dus AL malware op het slachtoffers apparaat - geen
+lichtgewicht, losstaande aanvalsklasse, maar een herformulering van het al bestaande,
+al erkende OS-malware-restgat (zie hierboven, "Bewust geaccepteerd, buiten scope"). Geen
+nieuwe conclusie nodig, wel een correctie: dit issue bewijst niet meer dan wat al
+vastgesteld was.
+
+**2. BitM+ (Catalano, Chezzi, Barletta, Tommasi - Journal of Computer Virology and Hacking
+Techniques, mei 2025) is wél een echt, apart, nieuw restgat - geverifieerd tegen het
+daadwerkelijke aanvalsmechanisme, niet alleen het abstract.** Drie actoren: V (het
+slachtoffers browser, overgenomen via een Browser-in-the-Middle-opzet - een klassieke
+remote-browser-phishing-infrastructuur, bv. via een gestreamde/geproxyde browsersessie),
+B (de aanvaller's machine, de BitM-tussenlaag), RP (de Relying Party - hier: SpankWallet's
+eigen frontend - met een ECHTE, aanwezige reflected-XSS-kwetsbaarheid). Het slachtoffer
+navigeert (via de BitM-opzet) naar een XSS-kwetsbare URL op het ECHTE RP-domein; de
+geïnjecteerde payload neemt de WebAuthn-API-aanroepen van de pagina over, TERWIJL browser
+en hardware-sleutel oprecht denken op het echte origin te zijn - GEEN trojan nodig, geen
+al-gecompromitteerd apparaat, uitsluitend een reële XSS-bug in de doelsite zelf plus de
+BitM-phishing-laag.
+
+**Raakt dit de Tauri-migratie? Gesplitst antwoord, geen overclaim in beide richtingen.**
+- De **BitM-component** (het slachtoffer via een phishing-link naar een gestreamde/
+  geproxyde browsersessie lokken) is fundamenteel een browser-tab-/adresbalk-fenomeen -
+  vereist dat het slachtoffer eerst een gewone browser opent en een aanvaller-gekozen URL
+  bezoekt. Een Tauri-app heeft geen adresbalk en (mits zo ontworpen, wat dit ontwerp
+  voorschrijft) geen willekeurige externe navigatie - er is domweg geen intredepunt
+  waarlangs een phishing-link een NATIVE app-venster zou kunnen kapen. Dit deel van BitM+
+  draagt dus niet direct over.
+- De **reflected-XSS-op-de-RP-zelf-component sluit Tauri NIET automatisch af - dit is een
+  derde, eigen restgat, los van het extensie-gat (nu gesloten) en het OS-malware-gat (nooit
+  geclaimd gesloten).** Een Tauri-webview voert nog steeds de eigen frontend-code van
+  SpankWallet uit; als die code ooit onvertrouwde invoer (bv. een toekomstige
+  deep-link-/custom-URL-scheme-handler, zie de al-bestaande zorgvuldigheid rond
+  deeplink-state-verval in `admin/https-server.js`) ongefilterd in de DOM zou zetten,
+  bestaat exact dezelfde onderliggende kwetsbaarheidsklasse - Tauri verandert niets aan
+  "is de eigen applicatiecode vrij van XSS", dat blijft net zo'n doorlopende
+  code-kwaliteitseis als in elke webapp.
+
+**Concrete, Tauri-specifieke partiële mitigaties (verkleinen, sluiten niet volledig):**
+1. Een gebundelde, statische frontend die NOOIT externe/aanvaller-aanleverbare URL's laadt
+   of rendert (geen `<iframe src="...">` naar vreemde origins, geen "open deze link in de
+   app"-functionaliteit zonder allowlist) - elimineert het grootste deel van het
+   klassieke reflected-XSS-oppervlak dat een gewone, publiek bereikbare website inherent
+   heeft.
+2. Elke toekomstige deep-link-/custom-URL-scheme-invoer behandelen als volledig
+   onvertrouwd, zelfde discipline als de al-bestaande deeplink-state-verval-termijn-fix
+   (git-commit `db8a89b`) - nooit ongefilterd in de DOM.
+3. **Devtools standaard uitgeschakeld in productie-Tauri-builds - bevestigd, niet
+   aangenomen:** de `devtools`-Cargo-feature moet expliciet worden ingeschakeld, staat
+   standaard UIT ("it is not recommended that you ship your app with devtools enabled",
+   officiële Tauri-documentatie). Dit sluit specifiek de klassieke, meest voorkomende
+   self-XSS-variant in het wild (een gebruiker overtuigen om aanvaller-code in de eigen
+   devtools-console te plakken) volledig af - die console bestaat simpelweg niet in een
+   productiebuild.
+
+**Eindstand, eerlijk: de Tauri-migratie sluit het `webAuthenticationProxy`-gat structureel,
+maar is geen garantie tegen elke vorm van WebAuthn-ceremonie-manipulatie.** Drie
+onderscheiden restgaten, niet één: (a) OS-level malware (nooit geclaimd gesloten door
+welk browser- of app-ontwerp dan ook), (b) reflected/self-XSS in SpankWallet's eigen
+frontend-code (Tauri verkleint het aanvalsoppervlak aanzienlijk door geen externe content
+te laden, sluit het niet automatisch - blijft een doorlopende code-discipline-eis), en
+(c) het nu wél gesloten extensie-/`webAuthenticationProxy`-gat. Geen van deze drie wordt
+door dit onderzoek overclaimd of ondergerapporteerd.
+
 ## 73. `hunt`-bevestigingskaart: vijfde en laatste LAAG-kaart - UI-fase 1 compleet
 
 Laatste kaart uit sectie 59's oorspronkelijke plan. Anders dan elke andere kaart heeft

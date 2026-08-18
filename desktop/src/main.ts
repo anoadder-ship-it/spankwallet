@@ -1,22 +1,121 @@
 import { invoke } from "@tauri-apps/api/core";
+import { createSpankWalletPasskey } from "./passkey";
+import { showExecutePreview } from "./executePreview";
+import { runExecuteAction } from "./executeAction";
+import { showFeePayerSetupCard } from "./feePayerSetupCard";
+import { showFeePayerUnlockCard } from "./feePayerUnlockCard";
+import { PublicKey } from "@solana/web3.js";
 
-let greetInputEl: HTMLInputElement | null;
-let greetMsgEl: HTMLElement | null;
+const RP_ID = window.location.hostname || "localhost";
+const RP_NAME = "SpankWallet (desktop, fase 0)";
 
-async function greet() {
-  if (greetMsgEl && greetInputEl) {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsgEl.textContent = await invoke("greet", {
-      name: greetInputEl.value,
+let lastCredentialId: Uint8Array | null = null;
+let lastPasskeyPublicKey: Uint8Array | null = null;
+
+const outputEl = () => document.getElementById("output")!;
+
+function log(line: string): void {
+  outputEl().textContent += line + "\n";
+}
+
+async function bootstrapFeePayer(): Promise<void> {
+  log("Fee-payer-status controleren...");
+  const exists = await invoke<boolean>("fee_payer_exists");
+  if (exists) {
+    log("Bestaand fee-payer-snapshot gevonden - ontgrendelen.");
+    const pubkey = await showFeePayerUnlockCard();
+    log("Fee-payer ontgrendeld: " + pubkey);
+  } else {
+    log("Geen fee-payer-snapshot gevonden - eenmalige installatie.");
+    const pubkey = await showFeePayerSetupCard();
+    log("Fee-payer aangemaakt: " + pubkey);
+  }
+}
+
+async function registerPasskey(): Promise<void> {
+  log("Stap 1: nieuwe passkey registreren voor deze Tauri-webview (rpId=" + RP_ID + ")...");
+  log("navigator.credentials.create() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+  try {
+    const result = await createSpankWalletPasskey(RP_NAME, RP_ID, "spankwallet-desktop");
+    lastCredentialId = result.credentialId;
+    lastPasskeyPublicKey = result.compressedPublicKey;
+
+    const pubkeyHex = Array.from(result.compressedPublicKey)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    log("Passkey geregistreerd. Gecomprimeerde publieke sleutel (hex, 33 bytes):");
+    log(pubkeyHex);
+    log("");
+    log("Voeg deze sleutel nu toe aan een bestaande wallet via de browser-client's");
+    log("add_passkey-flow (secties 11-15), ondertekend door PASSKEY 1. Vul daarna");
+    log("hierboven het wallet-PDA-adres in en klik op stap 2.");
+
+    (document.getElementById("execute-btn") as HTMLButtonElement).disabled = false;
+  } catch (err) {
+    log("FOUT bij passkey-registratie: " + String(err));
+    console.error(err);
+  }
+}
+
+async function runExecute(): Promise<void> {
+  if (!lastCredentialId || !lastPasskeyPublicKey) {
+    log("Registreer eerst een passkey (stap 1).");
+    return;
+  }
+  const walletPdaInput = document.getElementById("wallet-pda-input") as HTMLInputElement;
+  const walletPda = walletPdaInput.value.trim();
+  if (!walletPda) {
+    log("Vul eerst het wallet-PDA-adres in.");
+    return;
+  }
+  let walletPubkey: PublicKey;
+  try {
+    walletPubkey = new PublicKey(walletPda);
+  } catch {
+    log("Ongeldig wallet-PDA-adres.");
+    return;
+  }
+
+  log("Stap 2: execute-bevestigingskaart tonen...");
+  const choice = await showExecutePreview(walletPubkey, 1_000_000n);
+  if (!choice) {
+    log("Geweigerd in de bevestigingskaart - execute_action NIET aangeroepen.");
+    return;
+  }
+
+  log(
+    "Bevestigd: " + choice.amountLamports.toString() + " lamports naar " + choice.recipient.toBase58() + "."
+  );
+  log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+  try {
+    const signature = await runExecuteAction({
+      walletPda,
+      recipient: choice.recipient.toBase58(),
+      amountLamports: choice.amountLamports,
+      rpId: RP_ID,
+      credentialId: lastCredentialId,
+      passkeyCompressedPublicKey: lastPasskeyPublicKey,
     });
+    log("SUCCES - execute-transactie bevestigd op devnet. Signature:");
+    log(signature);
+  } catch (err: any) {
+    const message = typeof err?.message === "string" ? err.message : JSON.stringify(err);
+    log("FOUT bij execute_action: " + message);
+    console.error(err);
   }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  greetInputEl = document.querySelector("#greet-input");
-  greetMsgEl = document.querySelector("#greet-msg");
-  document.querySelector("#greet-form")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    greet();
+  document.getElementById("register-passkey-btn")!.addEventListener("click", () => {
+    registerPasskey();
+  });
+  document.getElementById("execute-btn")!.addEventListener("click", () => {
+    runExecute();
+  });
+
+  bootstrapFeePayer().catch((err) => {
+    log("FOUT bij fee-payer-bootstrap: " + String(err));
+    console.error(err);
   });
 });

@@ -41,6 +41,7 @@ impl Default for FeePayerState {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FeePayerInfo {
     pub pubkey_base58: String,
 }
@@ -198,6 +199,47 @@ pub fn unlock_fee_payer(
 #[tauri::command]
 pub fn fee_payer_exists(app: AppHandle) -> Result<bool, FeePayerError> {
     Ok(snapshot_path(&app)?.exists())
+}
+
+/// Vraagt een devnet-airdrop aan voor het (al ontgrendelde) fee-payer-adres
+/// - kleine, goedkope toevoeging (Tauri-migratie-ontwerp, Stronghold-
+/// deelplan punt 2) i.p.v. uitsluitend handmatig funden. Rate-gelimiteerd
+/// door het RPC-endpoint zelf (STATUS.md sectie 25's al-bekende ervaring) -
+/// geeft een duidelijke RateLimited-fout terug i.p.v. een kale RPC-string.
+#[tauri::command]
+pub fn request_fee_payer_airdrop(state: State<'_, FeePayerState>) -> Result<String, FeePayerError> {
+    let pubkey_base58 = fee_payer_pubkey(&state)?;
+    let pubkey: solana_sdk::pubkey::Pubkey = pubkey_base58
+        .parse()
+        .map_err(|_| FeePayerError::Internal("ongeldige fee-payer-pubkey".to_string()))?;
+
+    let rpc = crate::rpc::rpc_client();
+    match rpc.request_airdrop(&pubkey, 1_000_000_000) {
+        Ok(signature) => Ok(signature.to_string()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("429") || msg.to_lowercase().contains("rate") {
+                Err(FeePayerError::Io(
+                    "Devnet-airdrop is rate-gelimiteerd - probeer een webfaucet (bv. faucet.solana.com)."
+                        .to_string(),
+                ))
+            } else {
+                Err(FeePayerError::Internal(msg))
+            }
+        }
+    }
+}
+
+/// Publieke sleutel van het AL ONTGRENDELDE fee-payer-keypair, zonder
+/// opnieuw een wachtwoord te vragen - gebruikt door execute_action om de
+/// fee-payer als transactie-signer te kunnen opnemen.
+pub fn fee_payer_pubkey(state: &State<'_, FeePayerState>) -> Result<String, FeePayerError> {
+    let guard = state.0.lock().unwrap();
+    let stronghold = guard.as_ref().ok_or(FeePayerError::NotSetUp)?;
+    let client = stronghold
+        .get_client(FEE_PAYER_CLIENT)
+        .map_err(|e| FeePayerError::Internal(e.to_string()))?;
+    read_pubkey_base58(&client)
 }
 
 /// Ondertekent `message` met het ontgrendelde fee-payer-keypair. De

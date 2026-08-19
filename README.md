@@ -27,6 +27,7 @@ Non-custodial Solana wallet met **passkey-authenticatie** (WebAuthn / secp256r1)
 | Session keys                        | Bewezen end-to-end op devnet (slot-gebonden expiry, scope-beperking, permissionless cleanup) |
 | Browser-testpagina                  | Werkend (Vite + Wallet Standard), 20 teststappen                |
 | Open CPI / arbitrary instructions   | Bewust verwijderd (zie STATUS.md sectie 25-26)                  |
+| Tauri-desktop-migratie (fase 0)      | In ontwikkeling: skeleton, fee-payer (Stronghold), execute_action en passkey-backend (ctap-hid-fido2) gebouwd; echte hardware-ceremonie met de nieuwe backend nog niet bewezen (zie STATUS.md sectie 72/74/75) |
 
 **Program ID (devnet):** 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9
 
@@ -120,6 +121,14 @@ tests/                        - Anchor-tests (49/49 groen)
   recovery.ts                       - recovery-flow
   sessionKeys.ts                     - session keys, alle 7 instructies
   webauthnTestHelper.ts               - gedeelde testhelpers (o.a. slot-/tijd-advancers)
+desktop/                      - Tauri-desktop-migratie (fase 0, native, extensie-vrije runtime,
+                                 zie desktop/README.md + STATUS.md sectie 72/74/75)
+  src-tauri/src/passkey_ctap.rs  - passkey-ceremonie (ctap-hid-fido2, rechtstreeks CTAP2/HID)
+  src-tauri/src/execute.rs       - execute_action (onafhankelijke challenge-herberekening + tx-opbouw)
+  src-tauri/src/fee_payer.rs     - lokaal, Stronghold-versleuteld fee-payer-keypair
+  src-tauri/src/challenge.rs      - Rust-poort van challenge-/action-nonce-logica
+  src-tauri/src/secp256r1.rs      - DER->raw-low-S + secp256r1-precompile-instructie
+  src/main.ts, passkey.ts, webauthn.ts, executeAction.ts - frontend-orchestratie
 scripts/
 STATUS.md                     - lees dit eerst
 SECURITY.md
@@ -199,6 +208,17 @@ Connection). Bij structureel intensiever testen: overweeg een gratis account bij
 dedicated RPC-provider (Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke
 endpoints.
 
+### Desktop-app (Tauri, fase 0)
+
+```bash
+cd desktop
+npm install
+npm run tauri dev      # development
+npm run tauri build    # production-bundle (.deb/.rpm/.AppImage op Linux)
+```
+
+Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend, status).
+
 ## Veiligheidsprincipes
 
 - Geen open CPI - alleen expliciet getypeerde acties, of CPI naar een programma dat de
@@ -233,6 +253,9 @@ endpoints.
   - Session keys (tijdelijke, gescopede sleutels) - afgerond, bewezen op devnet
 - Fase 2: fee-gated PDA-inbox
 - Fase 3: USB 2-of-2 / post-quantum (later)
+- Parallel: Tauri-desktop-migratie (native, extensie-vrije runtime - sluit de
+  `chrome.webAuthenticationProxy`-dreigingsklasse structureel, zie STATUS.md sectie 72) -
+  fase 0 in ontwikkeling, zie `desktop/README.md`
 
 ## Licentie en Security
 

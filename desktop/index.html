@@ -17,6 +17,14 @@
       ecosysteem bestaat in deze webview, zie het Tauri-migratie-ontwerp.
     </p>
     <p>
+      WebKitGTK (de webview-engine op Linux) heeft geen eigen navigator.credentials/
+      WebAuthn-ondersteuning (structurele engine-limitatie, niet onze configuratie -
+      zie STATUS.md). De passkey-ceremonie loopt daarom via tauri-plugin-webauthn,
+      dat op Linux uitsluitend EXTERNE FIDO2-hardware-sleutels aanspreekt (USB-HID,
+      via mozilla/authenticator-rs) - sluit je hardware-sleutel aan voordat je stap 1
+      of 2 klikt.
+    </p>
+    <p>
       Vereist een REEDS BESTAANDE wallet (via de browser-client geinitialiseerd)
       met een Tauri-specifieke passkey toegevoegd via add_passkey - zie de
       klikvolgorde in het technisch plan. Stap 1 hieronder registreert die

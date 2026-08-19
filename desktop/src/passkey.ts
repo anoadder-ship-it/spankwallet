@@ -1,5 +1,22 @@
+import { register } from "tauri-plugin-webauthn-api";
 import { cborDecode, CborValue } from "./cbor";
+import { base64urlDecode, base64urlEncode } from "./webauthn";
 
+/**
+ * Desktop-eigen passkey-registratie - gebruikt tauri-plugin-webauthn's
+ * register() i.p.v. navigator.credentials.create() (bestaat niet in
+ * WebKitGTK/Linux, STATUS.md / Tauri-migratie-ontwerp: bevestigd via
+ * tauri-apps/tauri#4073 en bugs.webkit.org#205350 - een structurele
+ * engine-limitatie, geen configuratiefout). Op Linux spreekt dit plugin
+ * uitsluitend externe FIDO2-hardware-sleutels aan via USB-HID (mozilla/
+ * authenticator-rs, dezelfde library als Firefox) - GEEN platform-
+ * authenticator-pad, want dat bestaat niet op Linux.
+ *
+ * De CBOR-/COSE-sleutel-extractielogica hieronder is ONGEWIJZIGD t.o.v. de
+ * browser-client (client/src/passkey.ts) - alleen de bron van de rauwe
+ * attestationObject-bytes verandert: het plugin retourneert base64url-
+ * strings (@simplewebauthn/types-conventie), geen ArrayBuffer's.
+ */
 export interface PasskeyCreationResult {
   compressedPublicKey: Uint8Array;
   credentialId: Uint8Array;
@@ -26,7 +43,7 @@ function extractCredentialPublicKeyBytes(
   if ((flags & AT_FLAG) === 0) {
     throw new Error(
       "authenticatorData bevat geen attested credential data (AT-flag niet gezet) " +
-        "- dit hoort niet voor te komen bij navigator.credentials.create()"
+        "- dit hoort niet voor te komen bij een registratie-respons"
     );
   }
 
@@ -86,49 +103,33 @@ function coseKeyToCompressedPublicKey(coseKey: CborValue): Uint8Array {
 export async function createSpankWalletPasskey(
   rpName: string,
   rpId: string,
-  userName: string
+  userName: string,
+  origin: string
 ): Promise<PasskeyCreationResult> {
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const userId = crypto.getRandomValues(new Uint8Array(16));
 
-  const credential = (await navigator.credentials.create({
-    publicKey: {
-      challenge,
-      rp: { name: rpName, id: rpId },
-      user: {
-        id: userId,
-        name: userName,
-        displayName: userName,
-      },
-      // Uitsluitend ES256 (-7, secp256r1/P-256) - GEEN RS256 erbij, ondanks
-      // Chrome's console-waarschuwing dat pubKeyCredParams "at least one of
-      // ES256 and RS256" mist. Dit is bewust, niet vergeten: het on-chain
-      // programma kan uitsluitend secp256r1-handtekeningen verifieren (via
-      // Solana's secp256r1-precompile, zie SECP256R1_PROGRAM_ID in
-      // instructions.rs) - er bestaat geen RSA-verificatie-precompile op
-      // Solana, en owner_passkey/seed_key zijn altijd exact een 33-byte
-      // gecomprimeerde secp256r1-sleutel (PASSKEY_PUBKEY_LEN in state.rs).
-      // RS256 toevoegen zou een authenticator die RSA prefereert een
-      // credential kunnen laten aanmaken die dit programma NOOIT kan
-      // verifieren - coseKeyToCompressedPublicKey hieronder zou dat direct
-      // met een duidelijke fout afvangen, maar beter om de browser al bij
-      // create() nooit die keuze aan te bieden.
-      pubKeyCredParams: [{ type: "public-key", alg: -7 }],
-      authenticatorSelection: {
-        residentKey: "preferred",
-        userVerification: "required",
-      },
-      timeout: 120000,
-      attestation: "none",
+  const result = await register(origin, {
+    rp: { name: rpName, id: rpId },
+    user: {
+      id: base64urlEncode(userId),
+      name: userName,
+      displayName: userName,
     },
-  })) as PublicKeyCredential;
+    challenge: base64urlEncode(challenge),
+    // Uitsluitend ES256 (-7, secp256r1/P-256) - zelfde, bewuste keuze als de
+    // browser-client: het on-chain programma kan uitsluitend secp256r1-
+    // handtekeningen verifieren (Solana's secp256r1-precompile), geen RSA.
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+    authenticatorSelection: {
+      residentKey: "preferred",
+      userVerification: "required",
+    },
+    timeout: 120000,
+    attestation: "none",
+  });
 
-  if (!credential) {
-    throw new Error("navigator.credentials.create() gaf geen credential terug");
-  }
-
-  const response = credential.response as AuthenticatorAttestationResponse;
-  const attestationObjectBytes = new Uint8Array(response.attestationObject);
+  const attestationObjectBytes = base64urlDecode(result.response.attestationObject);
 
   const attestationObject = cborDecode(attestationObjectBytes);
   if (!(attestationObject instanceof Map)) {

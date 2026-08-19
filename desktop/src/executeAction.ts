@@ -13,6 +13,7 @@ export interface ExecuteActionParams {
   walletPda: string;
   recipient: string;
   amountLamports: bigint;
+  origin: string;
   rpId: string;
   credentialId: Uint8Array;
   passkeyCompressedPublicKey: Uint8Array;
@@ -34,7 +35,7 @@ export async function runExecuteAction(params: ExecuteActionParams): Promise<str
     amountLamports: Number(params.amountLamports),
   });
 
-  const response = await signWithPasskeyRaw(params.rpId, params.credentialId, prepared.challengeB64url);
+  const response = await signWithPasskeyRaw(params.origin, params.rpId, params.credentialId, prepared.challengeB64url);
 
   const result = await invoke<ExecuteActionResult>("execute_action", {
     input: {

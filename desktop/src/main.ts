@@ -7,6 +7,7 @@ import { showFeePayerUnlockCard } from "./feePayerUnlockCard";
 import { PublicKey } from "@solana/web3.js";
 
 const RP_ID = window.location.hostname || "localhost";
+const RP_ORIGIN = window.location.origin;
 const RP_NAME = "SpankWallet (desktop, fase 0)";
 
 let lastCredentialId: Uint8Array | null = null;
@@ -34,9 +35,11 @@ async function bootstrapFeePayer(): Promise<void> {
 
 async function registerPasskey(): Promise<void> {
   log("Stap 1: nieuwe passkey registreren voor deze Tauri-webview (rpId=" + RP_ID + ")...");
-  log("navigator.credentials.create() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+  log("tauri-plugin-webauthn's register() wordt aangeroepen (WebKitGTK heeft geen eigen");
+  log("navigator.credentials - zie STATUS.md) - sluit je externe FIDO2-hardware-sleutel");
+  log("aan en keur de PIN-/aanraak-prompt goed.");
   try {
-    const result = await createSpankWalletPasskey(RP_NAME, RP_ID, "spankwallet-desktop");
+    const result = await createSpankWalletPasskey(RP_NAME, RP_ID, "spankwallet-desktop", RP_ORIGIN);
     lastCredentialId = result.credentialId;
     lastPasskeyPublicKey = result.compressedPublicKey;
 
@@ -86,13 +89,15 @@ async function runExecute(): Promise<void> {
   log(
     "Bevestigd: " + choice.amountLamports.toString() + " lamports naar " + choice.recipient.toBase58() + "."
   );
-  log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+  log("tauri-plugin-webauthn's authenticate() wordt aangeroepen - keur de PIN-/aanraak-prompt");
+  log("op je hardware-sleutel goed.");
 
   try {
     const signature = await runExecuteAction({
       walletPda,
       recipient: choice.recipient.toBase58(),
       amountLamports: choice.amountLamports,
+      origin: RP_ORIGIN,
       rpId: RP_ID,
       credentialId: lastCredentialId,
       passkeyCompressedPublicKey: lastPasskeyPublicKey,

@@ -1,11 +1,18 @@
+import { authenticate } from "tauri-plugin-webauthn-api";
+import type { AuthenticationResponseJSON } from "@simplewebauthn/types";
+
 /**
- * Desktop-eigen WebAuthn-aanroep-helper - bewust VEREENVOUDIGD t.o.v.
- * client/src/webauthnSign.ts: de challenge-vergelijking en de DER->raw-
- * low-S-conversie gebeuren niet meer hier, maar in Rust (execute.rs), zie
- * het Tauri-migratie-ontwerp (hoofdplan punt 1) - dit bestand doet
- * uitsluitend de rauwe navigator.credentials.get()-aanroep zelf (moet in
- * JS blijven, kan niet anders) en base64url-encodeert de respons-velden
- * voor invoke().
+ * Desktop-eigen WebAuthn-aanroep-helper - gebruikt tauri-plugin-webauthn's
+ * authenticate() i.p.v. navigator.credentials.get() (bestaat niet in
+ * WebKitGTK/Linux, zie passkey.ts's doc-comment voor de volledige
+ * onderbouwing). De challenge-vergelijking en de DER->raw-low-S-conversie
+ * gebeuren nog steeds niet hier, maar in Rust (execute.rs) - dit bestand
+ * doet uitsluitend de ceremonie-aanroep zelf (moet in JS/via het plugin,
+ * kan niet anders) en base64url-(de)codeert de velden voor invoke().
+ *
+ * Het plugin retourneert/verwacht base64url-strings voor alle binaire
+ * velden (@simplewebauthn/types-conventie: Base64URLString = string),
+ * geen ArrayBuffer's zoals de browser-native navigator.credentials.
  */
 export interface WebAuthnRawResponse {
   clientDataJsonB64url: string;
@@ -13,13 +20,13 @@ export interface WebAuthnRawResponse {
   signatureDerB64url: string;
 }
 
-function base64urlEncode(bytes: Uint8Array): string {
+export function base64urlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function base64urlDecode(value: string): Uint8Array {
+export function base64urlDecode(value: string): Uint8Array {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(value.length + ((4 - (value.length % 4)) % 4), "=");
   const binary = atob(padded);
   const bytes = new Uint8Array(binary.length);
@@ -28,32 +35,27 @@ function base64urlDecode(value: string): Uint8Array {
 }
 
 export async function signWithPasskeyRaw(
+  origin: string,
   rpId: string,
   credentialId: Uint8Array,
   challengeB64url: string
 ): Promise<WebAuthnRawResponse> {
-  const challenge = base64urlDecode(challengeB64url);
+  // authenticate() is getypeerd als Promise<PublicKeyCredentialJSON>, een
+  // union met RegistrationResponseJSON - onnauwkeurig aan de plugin-kant
+  // (authenticate() geeft semantisch altijd een AuthenticationResponseJSON
+  // terug, nooit een registratie-respons). Expliciete, gerechtvaardigde
+  // vernauwing i.p.v. een blinde `as any`.
+  const result = (await authenticate(origin, {
+    challenge: challengeB64url,
+    rpId,
+    allowCredentials: [{ id: base64urlEncode(credentialId), type: "public-key" }],
+    userVerification: "required",
+    timeout: 120000,
+  })) as AuthenticationResponseJSON;
 
-  const assertion = (await navigator.credentials.get({
-    publicKey: {
-      challenge,
-      rpId,
-      allowCredentials: [{ id: credentialId, type: "public-key" }],
-      userVerification: "required",
-      timeout: 120000,
-    },
-  })) as PublicKeyCredential;
-
-  if (!assertion) {
-    throw new Error("navigator.credentials.get() gaf geen credential terug");
-  }
-
-  const response = assertion.response as AuthenticatorAssertionResponse;
   return {
-    clientDataJsonB64url: base64urlEncode(new Uint8Array(response.clientDataJSON)),
-    authenticatorDataB64url: base64urlEncode(new Uint8Array(response.authenticatorData)),
-    signatureDerB64url: base64urlEncode(new Uint8Array(response.signature)),
+    clientDataJsonB64url: result.response.clientDataJSON,
+    authenticatorDataB64url: result.response.authenticatorData,
+    signatureDerB64url: result.response.signature,
   };
 }
-
-export { base64urlEncode, base64urlDecode };

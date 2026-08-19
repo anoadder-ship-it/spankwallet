@@ -36,6 +36,14 @@ solana-client = "2"
 solana-secp256r1-program = "2"
 p256 = "0.13"
 base64 = "0.22"
+# 0.2.0 op crates.io compileert niet (interne conflict: authenticator
+# verwacht CredProps.rk: bool, webauthn-authenticator-rs pint
+# webauthn-rs-proto exact op een versie waar dat Option<bool> is) - al
+# gefixt op de git main-branch, nog niet als nieuwe crates.io-versie
+# gepubliceerd. Vastgepind op de exacte, geverifieerde commit i.p.v. een
+# losse branch/tag - reproduceerbaar, met bewuste user-goedkeuring
+# (STATUS.md / Tauri-migratie-ontwerp).
+tauri-plugin-webauthn = { git = "https://github.com/Profiidev/tauri-plugin-webauthn", rev = "d997cb6a6f5bb6ff42dbb623aaa632e98ea63012" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,20 +1,22 @@
-import { authenticate } from "tauri-plugin-webauthn-api";
-import type { AuthenticationResponseJSON } from "@simplewebauthn/types";
+import { invoke } from "@tauri-apps/api/core";
 
 /**
- * Desktop-eigen WebAuthn-aanroep-helper - gebruikt tauri-plugin-webauthn's
- * authenticate() i.p.v. navigator.credentials.get() (bestaat niet in
- * WebKitGTK/Linux, zie passkey.ts's doc-comment voor de volledige
- * onderbouwing). De challenge-vergelijking en de DER->raw-low-S-conversie
- * gebeuren nog steeds niet hier, maar in Rust (execute.rs) - dit bestand
- * doet uitsluitend de ceremonie-aanroep zelf (moet in JS/via het plugin,
- * kan niet anders) en base64url-(de)codeert de velden voor invoke().
+ * Desktop-eigen WebAuthn-aanroep-helper - roept het eigen sign_with_passkey-
+ * Tauri-command aan (Rust, ctap-hid-fido2 direct). Zie passkey.ts's
+ * doc-comment voor de volledige onderbouwing (STATUS.md sectie 75) van
+ * waarom dit niet meer via tauri-plugin-webauthn/authenticator-rs loopt.
  *
- * Het plugin retourneert/verwacht base64url-strings voor alle binaire
- * velden (@simplewebauthn/types-conventie: Base64URLString = string),
- * geen ArrayBuffer's zoals de browser-native navigator.credentials.
+ * De challenge-vergelijking en de DER->raw-low-S-conversie gebeuren nog
+ * steeds niet hier, maar in Rust (execute.rs) - dit bestand doet
+ * uitsluitend de base64url-(de)codering en de invoke()-aanroep zelf.
  */
 export interface WebAuthnRawResponse {
+  clientDataJsonB64url: string;
+  authenticatorDataB64url: string;
+  signatureDerB64url: string;
+}
+
+interface SignWithPasskeyResult {
   clientDataJsonB64url: string;
   authenticatorDataB64url: string;
   signatureDerB64url: string;
@@ -38,24 +40,20 @@ export async function signWithPasskeyRaw(
   origin: string,
   rpId: string,
   credentialId: Uint8Array,
-  challengeB64url: string
+  challengeB64url: string,
+  pin: string
 ): Promise<WebAuthnRawResponse> {
-  // authenticate() is getypeerd als Promise<PublicKeyCredentialJSON>, een
-  // union met RegistrationResponseJSON - onnauwkeurig aan de plugin-kant
-  // (authenticate() geeft semantisch altijd een AuthenticationResponseJSON
-  // terug, nooit een registratie-respons). Expliciete, gerechtvaardigde
-  // vernauwing i.p.v. een blinde `as any`.
-  const result = (await authenticate(origin, {
-    challenge: challengeB64url,
+  const result = await invoke<SignWithPasskeyResult>("sign_with_passkey", {
     rpId,
-    allowCredentials: [{ id: base64urlEncode(credentialId), type: "public-key" }],
-    userVerification: "required",
-    timeout: 120000,
-  })) as AuthenticationResponseJSON;
+    origin,
+    credentialIdB64url: base64urlEncode(credentialId),
+    challengeB64url,
+    pin,
+  });
 
   return {
-    clientDataJsonB64url: result.response.clientDataJSON,
-    authenticatorDataB64url: result.response.authenticatorData,
-    signatureDerB64url: result.response.signature,
+    clientDataJsonB64url: result.clientDataJsonB64url,
+    authenticatorDataB64url: result.authenticatorDataB64url,
+    signatureDerB64url: result.signatureDerB64url,
   };
 }

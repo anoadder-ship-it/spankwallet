@@ -36,14 +36,14 @@ solana-client = "2"
 solana-secp256r1-program = "2"
 p256 = "0.13"
 base64 = "0.22"
-# 0.2.0 op crates.io compileert niet (interne conflict: authenticator
-# verwacht CredProps.rk: bool, webauthn-authenticator-rs pint
-# webauthn-rs-proto exact op een versie waar dat Option<bool> is) - al
-# gefixt op de git main-branch, nog niet als nieuwe crates.io-versie
-# gepubliceerd. Vastgepind op de exacte, geverifieerde commit i.p.v. een
-# losse branch/tag - reproduceerbaar, met bewuste user-goedkeuring
-# (STATUS.md / Tauri-migratie-ontwerp).
-tauri-plugin-webauthn = { git = "https://github.com/Profiidev/tauri-plugin-webauthn", rev = "d997cb6a6f5bb6ff42dbb623aaa632e98ea63012" }
+# Vervangt tauri-plugin-webauthn/mozilla-authenticator-rs (STATUS.md sectie
+# 75): authenticator-rs bleek structureel te hangen op deze machine binnen
+# perform_register, empirisch bewezen via Rust-instrumentatie. ctap-hid-
+# fido2 is een eigen, from-scratch Rust-CTAP2-implementatie (GEEN libfido2-
+# C-bindings-wrapper - geverifieerd tegen de crate's eigen Cargo.toml),
+# provenance onderzocht: crates.io sinds 2020, MIT, actief onderhouden,
+# cargo audit toont nul bekende RustSec-advisories.
+ctap-hid-fido2 = "3.5.13"
 
 [dev-dependencies]
 tempfile = "3"

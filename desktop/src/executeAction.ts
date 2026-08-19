@@ -17,6 +17,7 @@ export interface ExecuteActionParams {
   rpId: string;
   credentialId: Uint8Array;
   passkeyCompressedPublicKey: Uint8Array;
+  pin: string;
 }
 
 interface PrepareExecuteChallengeResult {
@@ -35,7 +36,13 @@ export async function runExecuteAction(params: ExecuteActionParams): Promise<str
     amountLamports: Number(params.amountLamports),
   });
 
-  const response = await signWithPasskeyRaw(params.origin, params.rpId, params.credentialId, prepared.challengeB64url);
+  const response = await signWithPasskeyRaw(
+    params.origin,
+    params.rpId,
+    params.credentialId,
+    prepared.challengeB64url,
+    params.pin
+  );
 
   const result = await invoke<ExecuteActionResult>("execute_action", {
     input: {

@@ -5278,3 +5278,109 @@ vermoedelijk geweigerd. Permissie-identifiers bevestigd tegen de plugin's eigen
 
 **Nog niet bewezen: de echte hardware-key-ceremonie zelf** - vereist de fysieke sleutel,
 alleen door de gebruiker uit te voeren, net als elke eerdere fase in dit project.
+
+## 75. `register()` bleek structureel te hangen: authenticator-rs vervangen door ctap-hid-fido2
+
+Vervolg op sectie 74's laatste, nog onbewezen stap: de eerste echte hardware-key-ceremonie
+in de Tauri-app. Klikken op "1. Nieuwe passkey registreren" produceerde de startlog-regel,
+maar nooit een PIN-/aanraakprompt, geen resultaat, geen foutmelding, geen timeout - ook niet
+na de bewezen ~60s-mechanismes in `authenticator-rs`. Herhaalde klikken maakten het erger in
+plaats van beter.
+
+**Root cause, bewezen met tijdelijke Rust-instrumentatie (`eprintln!` vlak vóór/na de
+manager-`Mutex`-lock en de `perform_register`-aanroep zelf, in de gepinde plugin-checkout):**
+de eerste aanroep hangt BINNEN `perform_register` (diep in de `authenticator`-crate's
+CTAP2/HID-I/O), geeft nooit de controle terug. Een tweede klik verwerft daardoor nooit de
+`Mutex` (die de plugin voor de VOLLEDIGE duur van `perform_register` vasthoudt) - vandaar het
+"erger bij herhaald klikken"-effect: geen nieuwe hang, een wachtrij op een al hangende lock.
+
+**Alternatieve verklaringen definitief uitgesloten, met bewijs, vóór er geconcludeerd werd:**
+- Permissies/ACL's/cgroups/seccomp/AppArmor: `/proc/<pid>/status` toonde `Seccomp: 0`,
+  `unconfined` AppArmor-label, cgroup v2 zonder `devices`-controller - en doorslaggevend, de
+  gebruiker's eigen test: de hang trad OOK op als root, wat elke permissie-gebaseerde
+  verklaring uitsluit.
+- Kernel-/hidraw-laag onder de FIDO2-stack: een kale, dependency-loze Rust-tool
+  (`hidraw-probe`, uitsluitend `libc::open()`+`poll()` met een harde 5s-timeout, rechtstreeks
+  tegen `/dev/hidraw5`) opende schoon (5.168µs) en timede netjes uit (5.005447038s) - geen
+  hang op het laagste niveau.
+- Het CTAP2-protocolkanaal zelf, tegen dezelfde fysieke sleutel: een volledig onafhankelijke
+  Rust-CTAP2-implementatie (`ctap-hid-fido2`, andere HID-backend dan `authenticator-rs`, geen
+  gedeelde code) toonde tweemaal een schone, snelle, correcte uitwisseling - een geslaagde
+  `CTAPHID_INIT`-handshake (verzonden/ontvangen nonce identiek) en direct daarna een
+  betekenisvolle, gestructureerde CTAP2-foutcode (`CTAP2_ERR_UNSUPPORTED_OPTION`, later
+  `CTAP2_ERR_PIN_REQUIRED`) - nooit stilte. `fido2-tools`/`fido2-token -L` (de oorspronkelijk
+  geplande libfido2-referentietest) bleek niet beschikbaar via apt op dit systeem
+  (Ubuntu 24.04 aarch64/DGX Spark) - de crate-gebaseerde test verving deze rol volwaardig,
+  onafhankelijk bevestigd via `cargo audit`/crates.io/GitHub-provenance (zie hieronder).
+
+**Conclusie:** hardware, kernel, USB en het CTAP2-protocolkanaal zelf zijn stuk voor stuk
+gezond bevonden. De hang is specifiek voor `authenticator-rs`/de plugin's eigen
+transportlaag op deze machine - niet voor iets fundamentelers.
+
+### Provenance van `ctap-hid-fido2` (geverifieerd vóór adoptie, niet aangenomen)
+
+Eigen, from-scratch Rust-CTAP2-implementatie - GEEN libfido2-C-bindings-wrapper
+(bevestigd tegen de crate's eigen `Cargo.toml`: `hidapi` met de `linux-static-hidraw`-
+feature, geen `libfido2-sys`/libusb). crates.io sinds 2020-09-22, huidige versie `3.5.13`
+(laatst gepubliceerd 2026-08-12), 213.554 downloads totaal, 134.551 in de laatste 90 dagen,
+42 gepubliceerde versies. GitHub (`gebogebogebo/ctap-hid-fido2`): MIT, 58 stars, 23 forks,
+2 open issues. Meerdere reverse-dependencies op crates.io (waaronder één met 335.516 eigen
+downloads) - reëel productiegebruik. `cargo audit` (verse advisory-db, 1217 advisories)
+tegen de volledige 89-crate dependency-tree: nul treffers.
+
+Crypto-laag (`ring`, hetzelfde audited-vertrouwen als `rustls`) nagelezen tot op
+primitiefniveau: ECDH P-256 via `ring::agreement::agree_ephemeral` (punt-validatie intern
+in `ring`, geen eigen ongevalideerde puntparsing ervoor), PIN/UV Auth Protocol Twee
+(HKDF-SHA256 met domeingescheiden HMAC-/AES-sleutels, echte willekeurige IV, volledige
+32-byte HMAC) correct geïmplementeerd; Protocol Eén (vaste zero-IV, 16-byte-afgekapte HMAC)
+is spec-conform maar het oudere, zwakkere ontwerp - de crate onderhandelt niet automatisch
+naar Protocol Twee en gebruikt Protocol Eén als default. Niet exploiteerbaar over een lokale
+USB-verbinding zonder on-path-aanvaller, maar genoteerd als een corner die teruggehaald moet
+worden als deze code ooit verder verhardt.
+
+### Structuurvergelijking en de kritieke clientDataJSON-bevinding
+
+`ctap-hid-fido2` retourneert al een getypeerd `Attestation`/`Assertion`-Rust-struct (geen
+rauwe CBOR zoals het vorige pad, waar `passkey.ts` zelf `attestationObject` decodeerde) -
+de CBOR-/COSE-extractielogica die voorheen in TypeScript stond, is vervallen; `PublicKey.der`
+is (ondanks de naam) het rauwe SEC1-uncompressed-point (`0x04 || X || Y`), niet echte X.509-
+DER. Het DER-handtekeningformaat zelf is ongewijzigd bevestigd: `Assertion.signature` komt
+rechtstreeks, ongewijzigd uit CBOR-veld `0x03` van het device-antwoord - een eigenschap van
+het CTAP2-draadprotocol, niet van de library.
+
+**Kritiek, tijdens onderzoek ontdekt:** `ctap-hid-fido2` bouwt zelf GEEN WebAuthn-
+`clientDataJSON` en biedt geen API om een kant-en-klare `clientDataHash` te injecteren - het
+hasht simpelweg wat je als `challenge` meegeeft. Opgelost door de volledige,
+zelf-geconstrueerde `clientDataJSON`-bytes als `challenge`-argument door te geven
+(`passkey_ctap.rs::build_client_data_json`), zodat de library exact `SHA256(clientDataJSON)`
+berekent - spec-conform en compatibel met `execute_action`'s onafhankelijke
+challenge-verificatie. Was dit gemist, dan was dit pas bij een echte `execute_action`-aanroep
+als een stille `ChallengeMismatch` naar boven gekomen.
+
+User-verification is bevestigd even hard afgedwongen als voorheen: dit device ondersteunt
+geen ingebouwde UV (`CTAP2_ERR_UNSUPPORTED_OPTION` bij `uv:true`), alleen client-side
+PIN-verificatie via `pinUvAuthParam` - `passkey_ctap.rs` vraagt daarom altijd een PIN op en
+gebruikt nooit `without_pin_and_uv()`; zonder PIN geeft het device zelf een harde
+`CTAP2_ERR_PIN_REQUIRED` terug, geen stille fallback naar aanraken-alleen.
+
+### Implementatie
+
+`tauri-plugin-webauthn` volledig verwijderd (Cargo.toml, `lib.rs`'s `.plugin()`-registratie,
+`capabilities/default.json`'s `webauthn:allow-*`-permissies - niet meer nodig, eigen
+commands hebben geen capability-entry nodig, zelfde als elk ander custom command in dit
+project, `package.json`'s npm-binding). Nieuw: `desktop/src-tauri/src/passkey_ctap.rs` met
+twee eigen Tauri-commands, `register_passkey`/`sign_with_passkey`, die rechtstreeks tegen
+`ctap-hid-fido2` binden - geen plugin-laag meer ertussen. `passkey.ts`/`webauthn.ts` fors
+vereenvoudigd (CBOR-/COSE-parsing vervallen, nu pure `invoke()`-aanroepen). PIN-invoer is
+voorlopig een simpele `window.prompt()` in `main.ts` - functioneel, maar UI-kwaliteit is nog
+niet op het niveau van de rest van dit project's bevestigingskaarten; genoteerd als
+vervolgpunt, niet blokkerend.
+
+Geverifieerd: `cargo check`/`cargo test` (8/8 groen, inclusief nieuwe tests voor
+publieke-sleutel-compressie en clientDataJSON-constructie), `tsc --noEmit` (0 fouten),
+`npm install` (package-lock.json bijgewerkt, geen nieuwe kwetsbaarheden - de 3 bestaande
+`npm audit`-meldingen zijn pre-existing/transitief via `@solana/web3.js`, ongerelateerd aan
+deze wijziging).
+
+**Nog niet bewezen: de echte hardware-key-ceremonie met de nieuwe backend** - vereist de
+fysieke sleutel, alleen door de gebruiker uit te voeren.

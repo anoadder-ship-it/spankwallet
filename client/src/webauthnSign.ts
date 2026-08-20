@@ -1,4 +1,5 @@
 import { derSignatureToRawLowS } from "./secp256r1";
+import { assertByteIdentical } from "./challenge";
 
 export interface WebAuthnSignResult {
   signedMessage: Uint8Array;
@@ -13,11 +14,13 @@ function base64urlEncode(bytes: Uint8Array): string {
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function sha256(data: Uint8Array): Promise<Uint8Array> {
+export async function sha256(data: Uint8Array): Promise<Uint8Array> {
   // EIS 2 (STATUS.md sectie 76/77) - zelfde reden als initWallet.ts::sha256:
   // een echte kopie naar een gegarandeerd vers ArrayBuffer, geen
   // type-only-onderdrukking.
-  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(data));
+  const copy = new Uint8Array(data);
+  assertByteIdentical(copy, data, "webauthnSign.sha256() input"); // PUNT 2
+  const digest = await crypto.subtle.digest("SHA-256", copy);
   return new Uint8Array(digest);
 }
 
@@ -32,13 +35,18 @@ export async function signWithPasskey(
   // navigator.credentials.get()'s BufferSource-velden (challenge, elke
   // allowCredentials[].id) krijgen hier echte kopieën, geen type-only-
   // onderdrukking.
+  const challengeCopy = new Uint8Array(expectedChallenge);
+  assertByteIdentical(challengeCopy, expectedChallenge, "signWithPasskey() challenge"); // PUNT 2
+  const credentialIdCopy = new Uint8Array(credentialId);
+  assertByteIdentical(credentialIdCopy, credentialId, "signWithPasskey() allowCredentials[].id"); // PUNT 2
+
   const assertion = (await navigator.credentials.get({
     publicKey: {
-      challenge: new Uint8Array(expectedChallenge),
+      challenge: challengeCopy,
       rpId,
       allowCredentials: [
         {
-          id: new Uint8Array(credentialId),
+          id: credentialIdCopy,
           type: "public-key",
         },
       ],

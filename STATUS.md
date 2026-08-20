@@ -5846,3 +5846,112 @@ terugkomen, elke testrun controleert het nu zelf.
 - **Niet in deze ronde gedaan, bewust genoteerd, geen aanname:** geen deploy, geen nieuwe
   program-buffer, geen nieuw Squads-voorstel - alles blijft in git tot expliciete
   toestemming. Voorstel #10 (uitvoerbaar 2026-08-20T15:08:23 UTC) niet aangeraakt.
+
+## 78. FASE C-voorwaarden: PUNT 1-4 vóór FASE C zelf begint
+
+Akkoord voor FASE C kwam met vier verplichte voorwaarden, in volgorde. PUNT 4 (binary-
+versheidscontrole structureel maken) is al beschreven in sectie 77's "Eis 1"-subsectie
+(commit `70065db`) - de reden om het daar te laten staan i.p.v. hier te dupliceren: het
+bewijs hoort bij de oorspronkelijke claim, niet ernaast. Dit hoofdstuk beschrijft PUNT 1-3.
+
+### PUNT 1: expliciet disclosure-beleid vastgelegd, "lokaal houden" bevestigd als beste aanpak
+
+Deze repo is publiek; commits `33e2876`/`47d23b8`/`95a4dcc`/`1f11b35` beschrijven samen twee
+exploiteerbare bevindingen (mét werkende bewijs-tests) in het programma dat nog live staat op
+devnet. `SECURITY.md` kreeg een nieuwe sectie "Eigen beveiligingsfixes: lokaal tot de upgrade
+live staat" (commit `236252c`): fixes en hun bewijs-tests blijven lokaal gecommit, ongepusht,
+tot de bijbehorende upgrade daadwerkelijk is uitgevoerd en onafhankelijk geverifieerd.
+
+**Overwogen alternatief: private fork of gescheiden commits.** Beide afgewezen, met reden.
+Een private fork verplaatst het disclosure-risico naar een tweede repo waarvan de
+zichtbaarheid, ledenlijst en org-instellingen apart bijgehouden moeten worden, en voegt een
+sync-/opruimstap toe die na elke deploy vergeten kan worden - een extra plek waar deze
+discipline stil kan verslappen, zonder dat het onderliggende risico kleiner wordt.
+Gescheiden commits die exploitdetails pas na de deploy laten landen is inhoudelijk hetzelfde
+als "lokaal houden, dan pushen" - alleen anders verwoord, geen echt ander garantieniveau.
+**Wel een reële, apart benoemde blootstelling: single-machine-risico** - als deze laptop
+verloren gaat, gestolen wordt of stuk gaat vóórdat een upgrade live is, verdwijnt de enige
+kopie van zowel de fix als de lokale commits mee. Voorgesteld (niet gebouwd, gebruikers
+keuze): een periodieke, met `age`/`gpg` versleutelde `git bundle` van `main` op een externe
+of offline drager, in plaats van een tweede netwerk-remote - dat lost het back-up-probleem op
+zonder de bloststellingsoppervlakte opnieuw te vergroten.
+
+### PUNT 2: `new Uint8Array(x)`-kopieën op de 4 Web-Crypto/WebAuthn-grensovergangen, per site geverifieerd met bewijs
+
+De EIS 2-aanname ("`new Uint8Array(data)` is overal een veilige kopie") is niet
+categorisch waar: op een `Uint8Array` kopieert de constructor, op een kale `ArrayBuffer`
+wrapt hij het HELE buffer zonder kopie. Empirisch bevestigd (niet aangenomen) met een klein
+Node-script vóór verder onderzoek:
+
+```
+subView (view over een groter buffer, byteOffset=5, byteLength=5): [5,6,7,8,9]
+new Uint8Array(subView): [5,6,7,8,9], eigen buffer (shares buffer? false)
+na mutatie van het originele grote buffer: copy blijft [5,6,7,8,9] (echte kopie, geen alias)
+
+new Uint8Array(arrayBuffer) (kale ArrayBuffer, geen view): shares buffer? true
+na mutatie van het origineel: de "kopie" verandert mee (zero-copy-aliasing, GEEN kopie)
+```
+
+Conclusie uit dit experiment: `new Uint8Array(typedArrayInstance)` kopieert altijd correct,
+ook met een niet-nul `byteOffset`/gedeeltelijke `byteLength` - de constructor itereert over
+de view's eigen logische lengte, niet over het onderliggende buffer. Het gevaar dat EIS 2
+beschreef bestaat uitsluitend wanneer het argument een kale `ArrayBuffer` is, niet wanneer
+het al een `Uint8Array`-view is. Dit maakt de vraag per site simpel: is de invoer daar
+statisch én in de praktijk gegarandeerd een echte `Uint8Array`-instantie?
+
+Per site, met codebewijs (geen aanname):
+
+| # | Plek | Herkomst getraceerd tot | Bewijs |
+|---|------|--------------------------|--------|
+| 1 | `initWallet.ts::sha256`, aanroep `sha256(seedKey)` | `passkey.ts:80` `compressed = new Uint8Array(33)` | Verse allocatie, volledige buffer, offset 0 |
+| 2 | `webauthnSign.ts::sha256`, aanroep `sha256(clientDataJSON)` | `webauthnSign.ts:56` `new Uint8Array(response.clientDataJSON)` | Al een echte Uint8Array-instantie tegen de tijd dat `sha256()` hem ziet |
+| 3 | `webauthnSign.ts` `challenge: new Uint8Array(expectedChallenge)` | `challenge.ts::buildExpectedChallenge` -> `keccak_256(combined)` (`@noble/hashes`) | Noble's Keccak-implementatie retourneert een verse 32-byte Uint8Array |
+| 4 | `webauthnSign.ts` `allowCredentials[0].id: new Uint8Array(credentialId)` | `passkey.ts:39` `authenticatorData.slice(offset, offset + credIdLen)` | `.slice()` geeft altijd een onafhankelijke kopie, nooit een view |
+
+Alle vier zijn dus aantoonbaar echte `Uint8Array`-instanties op het moment dat `new
+Uint8Array(x)` erop wordt toegepast - de kopieën zijn correct. Geen van de vier hoefde
+gecorrigeerd te worden.
+
+**Regressiebewaking toegevoegd (niet optioneel achteraf, verplicht deel van deze opdracht):**
+een nieuwe `assertByteIdentical(copy, original, label)`-helper in `client/src/challenge.ts`,
+gebruikt op alle vier de plekken direct na de `new Uint8Array(...)`-kopie - vergelijkt lengte
+en elke byte, gooit een duidelijke fout bij een mismatch. Vandaag altijd een no-op (bewezen
+hierboven), maar een toekomstige wijziging die `x` per ongeluk naar een kale ArrayBuffer of
+iets anders laat verschuiven faalt hiermee hard i.p.v. stilzwijgend verkeerde bytes te
+hashen/tekenen. `initWallet.ts::sha256` en `webauthnSign.ts::sha256` zijn hiervoor
+`export`ed (waren `function`, niet geëxporteerd) zodat ze rechtstreeks getest kunnen worden.
+
+**Directe unit-tests, `tests/uint8ArrayByteFidelity.ts` (nieuw bestand), 5 tests:**
+1. Bewijst het algemene JS-gedrag (subarray-view-kopie, byteOffset intact) met een
+   handgeconstrueerd voorbeeld.
+2. Bewijst het contrast (kale ArrayBuffer = zero-copy-alias) - maakt concreet wélk gevaar
+   hierboven wordt uitgesloten, niet alleen beweerd.
+3. `initWallet.sha256()` tegen een subarray-view (33 bytes, dezelfde lengte als seed_key in
+   de praktijk) - digest vergeleken met een ONAFHANKELIJKE referentie (`node:crypto`'s
+   `createHash("sha256")`, niet `crypto.subtle` - een andere implementatie, geen
+   cirkelredenering).
+4. `webauthnSign.sha256()` - zelfde aanpak, 60-byte view (representatief voor
+   `clientDataJSON`'s ordegrootte).
+5. `assertByteIdentical()` zelf - bevestigt dat de guard een afwijkende lengte EN een
+   afwijkende byte-op-gelijke-lengte allebei detecteert.
+
+Site 3/4 (`challenge`/`allowCredentials[].id`) zitten in `signWithPasskey()`, achter een
+echte `navigator.credentials.get()`-aanroep - niet rechtstreeks aanroepbaar in deze
+Node/mocha-omgeving zonder een WebAuthn-mock (bewust geen mock gebouwd: dat zou een ander
+soort test zijn dan "bewijs dat DEZE constructor-aanroep correct is", zie test 1/2 die het
+onderliggende gedrag al bewijzen op exact hetzelfde codepatroon). Deze twee plekken dragen nu
+wel dezelfde `assertByteIdentical`-guard in de productiecode, en worden aanvullend indirect
+bevestigd door elke slagende WebAuthn-test in de rest van de suite: als deze twee plekken ooit
+de challenge- of credentialId-bytes zouden corrumperen, zou de on-chain secp256r1-precompile-
+check dat als `WebAuthnChallengeMismatch` afwijzen - dat is in geen van de 80 slagende tests
+gebeurd.
+
+**Geverifieerd:**
+- `npx ts-mocha tests/uint8ArrayByteFidelity.ts` (los): 5/5 passing.
+- Volledige suite (`anchor test --skip-local-validator --skip-build --skip-deploy`, na een
+  echte rebuild+redeploy van de lokale testbinary): **80 passing, 0 failing, 2 pending**
+  (was 75/0/2 vóór deze ronde - de 5 nieuwe PUNT-2-tests verklaren het verschil).
+  sha256 van de lokale testbinary (local-test-program-ID `8KedC...`, inhoudelijk identiek
+  aan de eerder geregistreerde hash uit sectie 77): `248922eb78f820d742e7739fe6f0139602f4eeba6c0e3115aea00296d93ecafd`.
+- `cd client && npx tsc --noEmit`: exitcode 0, geen nieuwe fouten - de twee nieuwe
+  `export`s en de nieuwe `assertByteIdentical`-aanroepen breken de EIS 2-garantie niet.

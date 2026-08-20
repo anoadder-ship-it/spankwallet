@@ -6,6 +6,32 @@ import { SPANKWALLET_PROGRAM_ID } from "./programId";
 // execute.ts, hunt.ts, recovery.ts en initWallet.ts (vier bijna-identieke
 // kopieen). Samengevoegd tot dit ene gedeelde bestand - zie STATUS.md.
 
+/**
+ * PUNT 2 (STATUS.md sectie 78): regressiebewaking op de vier `new
+ * Uint8Array(x)`-kopieerplekken op het Web-Crypto/WebAuthn-tekenpad
+ * (initWallet.ts::sha256, webauthnSign.ts::sha256, webauthnSign.ts'
+ * `challenge`/`allowCredentials[].id`). Vandaag is elke `x` daar aantoonbaar
+ * al een echte Uint8Array (getraceerd tot een `.slice()`/verse-allocatie/
+ * hash-output-oorsprong, zie STATUS.md), dus `new Uint8Array(x)` kopieert
+ * altijd correct - het gevaar zit uitsluitend in het ANDERE geval (`x` een
+ * kale ArrayBuffer, zero-copy over het hele buffer). Deze check maakt dat
+ * geen aanname voor de toekomst: als een latere wijziging `x` ooit naar een
+ * ArrayBuffer-achtig, byte-verschillend object verandert, faalt dit hard in
+ * plaats van stilzwijgend verkeerde bytes te tekenen/hashen.
+ */
+export function assertByteIdentical(copy: Uint8Array, original: Uint8Array, label: string): void {
+  if (copy.length !== original.length) {
+    throw new Error(
+      `${label}: kopie heeft afwijkende lengte (${copy.length} vs ${original.length}) - PUNT 2-regressie`
+    );
+  }
+  for (let i = 0; i < copy.length; i++) {
+    if (copy[i] !== original[i]) {
+      throw new Error(`${label}: kopie wijkt af op byte ${i} - PUNT 2-regressie`);
+    }
+  }
+}
+
 export function concatBytes(...arrays: Uint8Array[]): Uint8Array {
   const total = arrays.reduce((sum, a) => sum + a.length, 0);
   const out = new Uint8Array(total);

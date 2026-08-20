@@ -6032,13 +6032,19 @@ gebruikt wordt.
 
 Alle lokale, nog-ongepushte commits (`origin/main..HEAD`) gebundeld:
 `/home/michel/spankwallet-backups/spankwallet-main-2026-08-20.bundle`
-(sha256: `53d48f60c2fb269e5bb9b93d790cdbe3c289a8e8e34ccfb23d05a25860f0bcb2`), geverifieerd met
+(sha256: `f65a1e6ce6906bd4148c2dbdc464c299f8cd12c186557c01d6dc9ba3ff7e1b20`), geverifieerd met
 `git bundle verify`. Een dunne/incrementele bundle (`origin/main..HEAD`, niet de volledige
 geschiedenis) - alles vóór het fork-punt (`b6793f7`) staat al veilig op de publieke
 GitHub-remote, dat opnieuw meenemen zou de bundle nodeloos groter maken zonder extra dekking.
-**Bevat 9 commits, niet de 8 die genoemd werden** - VOORAF A's opruimcommit (`22265d6`) landde
-ná dat verzoek, dus telt logischerwijs mee in "alle nog-ongepushte lokale commits"; expliciet
-genoemd i.p.v. stilzwijgend op 8 gehouden.
+**Bevat 10 commits, niet de 8 die genoemd werden** - VOORAF A's opruimcommit (`22265d6`) en
+deze documentatiecommit zelf landden ná dat verzoek, dus tellen logischerwijs mee in "alle
+nog-ongepushte lokale commits"; expliciet genoemd i.p.v. stilzwijgend op 8 gehouden. Inherente
+beperking, geen fout: een bundle kan nooit de hash van de commit bevatten die zijn eigen hash
+noteert - deze sha256 is dus geregenereerd NA `bedcd1e` (10 commits, inclusief `bedcd1e` zelf)
+en met deze aanvullende `Edit` bijgewerkt, in plaats van de eerste, inmiddels-verouderde hash
+(9 commits, vóór `bedcd1e`) te laten staan. Bij een volgende regeneratie (aanbevolen na elke
+volgende sessie met nieuwe lokale commits, zie de eerder gegeven aanbeveling in PUNT 1)
+verschuift dat getal opnieuw, met dezelfde onvermijdelijke reden.
 
 **Wat deze bundle wél dekt:** git-niveau-ongelukken op deze machine - exact het scenario uit
 sectie 69 ("een `git checkout -- programs/...` veegde per ongeluk de hele map schoon, niets

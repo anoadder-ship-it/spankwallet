@@ -175,7 +175,7 @@ fn verify_passkey_signature_core(
     actual_pubkey.copy_from_slice(actual_pubkey_slice);
 
     let message_source =
-        resolve_instruction_data(ix_sysvar, offsets.message_data_instruction_index, &precompile_ix.data)?;
+        resolve_instruction_data(ix_sysvar, offsets.message_instruction_index, &precompile_ix.data)?;
     let msg_start = offsets.message_data_offset as usize;
     let msg_end = msg_start + offsets.message_data_size as usize;
     let actual_message = message_source

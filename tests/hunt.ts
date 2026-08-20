@@ -214,6 +214,13 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
   // writable account" - geen programmabug, een eigenschap van hoe Anchors
   // gemaksbuilder zich verhoudt tot interne CPI's, al eerder correct
   // omzeild in de productieclient.
+  // B5 (STATUS.md sectie 76): rent_destination nu gebonden in de payload
+  // (nonce || target_token_account || rent_destination), in lockstep met
+  // instructions.rs::hunt en client/src/hunt.ts. `signAsRentDestination`
+  // laat toe om een AFWIJKENDE rentDestination te ondertekenen dan wat
+  // daadwerkelijk in de instructie terechtkomt - alleen gebruikt door de
+  // B5-manipulatietest hieronder om te bewijzen dat zo'n mismatch de
+  // handtekeningverificatie laat falen.
   async function callHunt(
     signingPasskey: TestPasskey,
     walletPda: PublicKey,
@@ -221,10 +228,15 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     passkeysPda: PublicKey,
     targetTokenAccount: PublicKey,
     tokenMint: PublicKey,
-    rentDestination: PublicKey
+    rentDestination: PublicKey,
+    signAsRentDestination?: PublicKey
   ) {
     const nonce = await fetchActionNonce(provider.connection, walletPda);
-    const payload = Buffer.concat([nonceLeBytes(nonce), targetTokenAccount.toBuffer()]);
+    const payload = Buffer.concat([
+      nonceLeBytes(nonce),
+      targetTokenAccount.toBuffer(),
+      (signAsRentDestination ?? rentDestination).toBuffer(),
+    ]);
     const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "hunt", payload);
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
       signingPasskey,
@@ -268,22 +280,22 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     return Array.from(bytes);
   }
 
-  it("hunt burnt het saldo en sluit het account, met 50/50-rentsplitsing", async () => {
+  it("hunt burnt het saldo en sluit het account, met 50/50-rentsplitsing naar zowel rent_destination als de incinerator", async () => {
     const { passkey, walletPda, vaultPda, passkeysPda } = await createWallet();
     const { mint, tokenAccount } = await setupSpamTokenAccount(vaultPda, 1000);
-    // provider.wallet.publicKey bestaat al (en heeft al SOL) - in
-    // tegenstelling tot INCINERATOR, dat op een verse lokale validator zijn
-    // EERSTE ooit lamports-credit krijgt via deze aanroep. Balansdelta's op
-    // een reeds bestaand account zijn op een lokale validator betrouwbaar
-    // direct zichtbaar; het EERSTE-bestaan van een gloednieuw account bleek
-    // dat empirisch niet altijd te zijn (RPC-lees-propagatie-vertraging,
-    // zelfde categorie fenomeen als STATUS.md sectie 17 al documenteert,
-    // hier nog uitgesprokener). Deze test verifieert de 50/50-splitsing
-    // daarom via rentDestination's balansdelta, niet via INCINERATOR direct.
+    // INCINERATOR krijgt op een verse lokale validator zijn EERSTE ooit
+    // lamports-credit via deze aanroep - een losse, onmiddellijk
+    // daaropvolgende balansquery bleek daarvoor empirisch niet altijd
+    // betrouwbaar (RPC-lees-propagatie, zelfde categorie fenomeen als
+    // STATUS.md sectie 17 al documenteert). Opgelost door de daadwerkelijke
+    // pre-/post-lamport-balansen rechtstreeks uit de transactie-meta te
+    // lezen (zie txInfo hieronder) i.p.v. losse balansqueries vóór/na.
     const rentDestination = provider.wallet.publicKey;
-    const rentDestinationBefore = await provider.connection.getBalance(rentDestination);
 
-    await callHunt(
+    const tokenAccountRentExempt =
+      await provider.connection.getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_LEN);
+
+    const signature = await callHunt(
       passkey,
       walletPda,
       vaultPda,
@@ -293,46 +305,88 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
       rentDestination
     );
 
+    // Harde bron van waarheid: de daadwerkelijke pre-/post-lamport-balansen
+    // uit de transactie zelf (zelfde bewijspatroon als STATUS.md sectie 17 -
+    // "solana confirm -v" i.p.v. een losse, mogelijk vroege balansquery).
+    // Korte poll: getTransaction() bleek vlak na sendAndConfirm() soms nog
+    // null terug te geven op deze lokale validator (zelfde RPC-lees-
+    // propagatie-fenomeen als elders in dit project, nu op deze RPC-methode).
+    let txInfo = await provider.connection.getTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    for (let i = 0; i < 20 && (!txInfo || !txInfo.meta); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      txInfo = await provider.connection.getTransaction(signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+    }
+    if (!txInfo || !txInfo.meta) {
+      throw new Error("kon de hunt-transactie niet terugvinden voor balansverificatie");
+    }
+    // preBalances/postBalances zijn geïndexeerd volgens de SAMENGEVOEGDE
+    // accountKeys-lijst van de HELE transactie (fee-payer eerst, dan alle
+    // unieke accounts uit ALLE instructies, in Solana's eigen signer-/
+    // writable-gesorteerde volgorde) - NIET simpelweg de lokale keys-lijst
+    // van de hunt-instructie alleen (die ook nog eens de secp256r1Ix's eigen
+    // accounts mist). De index moet dus uit de transactie's eigen
+    // boodschap komen, niet uit `keys` hierboven.
+    const txAccountKeys = txInfo.transaction.message.getAccountKeys().staticAccountKeys;
+    const incineratorIndex = txAccountKeys.findIndex((k) => k.equals(INCINERATOR));
+    const incineratorTxDelta =
+      txInfo.meta.postBalances[incineratorIndex] - txInfo.meta.preBalances[incineratorIndex];
+
     const closedAccountInfo = await provider.connection.getAccountInfo(tokenAccount.publicKey);
     assert.isNull(closedAccountInfo, "target_token_account had gesloten moeten zijn na hunt");
 
-    const rentDestinationAfter = await provider.connection.getBalance(rentDestination);
-    // rentDestination is hier ook de fee-payer, dus de rauwe balans daalde
-    // netto door transactiekosten - de toename door hunt's rentsplitsing zit
-    // erin verwerkt, maar een exacte match zou de fee zelf moeten aftrekken.
-    // Simpeler, voldoende bewijs: rentDestination eindigt hoger dan wat
-    // alleen transactiekosten (~5000-10000 lamports) zouden verklaren - een
-    // duidelijk teken dat er daadwerkelijk substantiële rent (~1 miljoen
-    // lamports, de helft van een SPL-token-account-rent-exempt-drempel)
-    // is bijgeschreven.
-    assert.isAbove(
-      rentDestinationAfter,
-      rentDestinationBefore - 10_000,
-      "rentDestination had per saldo aanzienlijk MEER dan alleen transactiekosten moeten zien door de rentsplitsing"
+    // Verwachte splitsing, exact zoals instructions.rs::hunt die berekent:
+    // to_incinerator = reclaimed / 2 (floor), to_user = reclaimed - to_incinerator.
+    const reclaimed = tokenAccountRentExempt;
+    const expectedToIncinerator = Math.floor(reclaimed / 2);
+    const expectedToUser = reclaimed - expectedToIncinerator;
+
+    assert.equal(
+      incineratorTxDelta,
+      expectedToIncinerator,
+      "incinerator had exact de helft (afgerond naar beneden) van de teruggewonnen rent moeten ontvangen"
+    );
+
+    // Zelfde bron (transactie-meta) voor rentDestination - rentDestination
+    // is hier ook de fee-payer, dus een LOSSE balansquery zou ook de
+    // transactiekosten meetellen; de meta geeft de exacte, geïsoleerde
+    // delta van deze ene transactie, geen fudge-marge nodig.
+    const rentDestinationIndex = txAccountKeys.findIndex((k) => k.equals(rentDestination));
+    const rentDestinationTxDelta =
+      txInfo.meta.postBalances[rentDestinationIndex] - txInfo.meta.preBalances[rentDestinationIndex];
+    const fee = txInfo.meta.fee;
+    assert.equal(
+      rentDestinationTxDelta + fee,
+      expectedToUser,
+      "rentDestination had (na optellen van de betaalde fee) exact de andere helft van de teruggewonnen rent moeten ontvangen"
     );
   });
 
-  // --- FASE A4 (statische-audit-bevinding): hunt mist de recovery-freeze ---
+  // --- FASE A4/B4 (statische-audit-bevinding + fix): hunt miste de
+  // recovery-freeze, nu gedicht ---
   //
   // Elke andere passkey-gated instructie (Execute, TransferToken,
   // AddAllowedProgram, RemoveAllowedProgram, ExecuteAdvanced, AddPasskey,
   // AddSessionKey, RemoveSessionKey, CancelRecovery, ExecuteViaSession, ...)
   // heeft `constraint = wallet.recovery_state.is_none() @
-  // RecoveryAlreadyInProgress` op het wallet-account. Hunt (instructions.rs)
-  // is de ENIGE die dit mist - nagelezen, niet aangenomen. hunt is bovendien
-  // de meest onomkeerbare instructie in het hele programma: hij verbrandt de
-  // VOLLEDIGE balans van een token-account zonder enig on-chain
-  // spam-criterium (dat zit uitsluitend clientside, huntPreview.ts). Dit
-  // test bewijst dat hunt vandaag gewoon slaagt tijdens een lopende
-  // recovery, terwijl elke andere gevoelige actie op dat moment geweigerd
-  // wordt.
-  it("[FASE A4 - bevestigt lek] hunt slaagt tijdens een lopende recovery, ondanks dat elke andere gevoelige instructie dat weigert", async () => {
+  // RecoveryAlreadyInProgress` op het wallet-account. Hunt was de ENIGE die
+  // dit miste - hunt is bovendien de meest onomkeerbare instructie in het
+  // hele programma: hij verbrandt de VOLLEDIGE balans van een token-account
+  // zonder enig on-chain spam-criterium (dat zit uitsluitend clientside,
+  // huntPreview.ts). B4 voegt dezelfde constraint toe die elke andere
+  // instructie al had.
+  it("[B4] hunt weigert nu tijdens een lopende recovery (RecoveryAlreadyInProgress) - was voorheen het lek", async () => {
     const { passkey, backupAuthority, walletPda, vaultPda, passkeysPda } = await createWallet();
     const { mint, tokenAccount } = await setupSpamTokenAccount(vaultPda, 1000);
     const rentDestination = provider.wallet.publicKey;
 
     // Recovery starten - GEEN timelock afwachten, dat is precies het punt:
-    // hunt zou dit meteen moeten weigeren zoals elke andere passkey-gated
+    // hunt moet dit nu meteen weigeren zoals elke andere passkey-gated
     // instructie, niet pas ná een verstreken timelock.
     await program.methods
       .initiateRecovery(dummyNewOwnerPasskey())
@@ -343,23 +397,93 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     const walletDuringRecovery = await program.account.walletAccount.fetch(walletPda);
     assert.isNotNull(walletDuringRecovery.recoveryState, "recovery had moeten lopen");
 
-    // Kern van het bewijs: dit MAG niet slagen (elke andere instructie zou
-    // hier RecoveryAlreadyInProgress geven), maar hunt heeft die constraint
-    // niet.
-    await callHunt(
-      passkey,
-      walletPda,
-      vaultPda,
-      passkeysPda,
-      tokenAccount.publicKey,
-      mint.publicKey,
-      rentDestination
+    let threw = false;
+    let errorMessage = "";
+    try {
+      await callHunt(
+        passkey,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        tokenAccount.publicKey,
+        mint.publicKey,
+        rentDestination
+      );
+    } catch (err) {
+      threw = true;
+      errorMessage = err.toString();
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: hunt had moeten weigeren tijdens een lopende recovery"
+    );
+    assert.include(
+      errorMessage,
+      "RecoveryAlreadyInProgress",
+      "de weigering had specifiek RecoveryAlreadyInProgress moeten zijn, niet een andere fout"
     );
 
-    const closedAccountInfo = await provider.connection.getAccountInfo(tokenAccount.publicKey);
-    assert.isNull(
-      closedAccountInfo,
-      "LEK BEVESTIGD: hunt verbrandde en sloot het token-account gewoon tijdens een lopende recovery"
+    // De andere tak: het token-account is NIET aangeraakt - nog steeds
+    // intact, niet gesloten.
+    const accountInfo = await provider.connection.getAccountInfo(tokenAccount.publicKey);
+    assert.isNotNull(
+      accountInfo,
+      "target_token_account had onaangeraakt moeten blijven na de geweigerde hunt-poging"
+    );
+  });
+  // De andere tak - hunt slaagt gewoon WANNEER er geen recovery loopt - is
+  // al gedekt door de "hunt burnt het saldo..."-test hierboven (geen
+  // recovery_state daar), dus niet nogmaals herhaald.
+
+  // --- B5 (STATUS.md sectie 76): rent_destination nu gebonden in de
+  // challenge - een gewijzigde rent_destination na ondertekening moet de
+  // handtekeningverificatie laten falen ---
+  it("[B5] een afwijkende rent_destination t.o.v. wat ondertekend werd, maakt de handtekening ongeldig", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda } = await createWallet();
+    const { mint, tokenAccount } = await setupSpamTokenAccount(vaultPda, 1000);
+
+    const legitimateRentDestination = provider.wallet.publicKey;
+    const attackerChosenRentDestination = Keypair.generate().publicKey;
+
+    let threw = false;
+    let errorMessage = "";
+    try {
+      // Ondertekend alsof rent_destination = legitimateRentDestination,
+      // maar de daadwerkelijke instructie gebruikt
+      // attackerChosenRentDestination - simuleert een aanvaller die de
+      // transactie na ondertekening manipuleert (of een client die de
+      // bevestigingskaart iets anders toont dan wat hij daadwerkelijk
+      // verstuurt).
+      await callHunt(
+        passkey,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        tokenAccount.publicKey,
+        mint.publicKey,
+        attackerChosenRentDestination,
+        legitimateRentDestination
+      );
+    } catch (err) {
+      threw = true;
+      errorMessage = err.toString();
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: een gewijzigde rent_destination had de handtekening ongeldig moeten maken"
+    );
+    assert.include(
+      errorMessage,
+      "WebAuthnChallengeMismatch",
+      "de weigering had specifiek WebAuthnChallengeMismatch moeten zijn (challenge komt niet overeen)"
+    );
+
+    // Het token-account is niet aangeraakt - de aanval faalde volledig,
+    // geen gedeeltelijke uitvoering.
+    const accountInfo = await provider.connection.getAccountInfo(tokenAccount.publicKey);
+    assert.isNotNull(
+      accountInfo,
+      "target_token_account had onaangeraakt moeten blijven na de geweigerde manipulatiepoging"
     );
   });
 });

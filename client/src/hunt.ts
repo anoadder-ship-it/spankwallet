@@ -106,7 +106,16 @@ export async function buildHuntTransaction(
   rpId: string
 ): Promise<HuntResult> {
   const nonce = await readActionNonce(connection, walletPda);
-  const payload = concatBytes(actionNonceLeBytes(nonce), targetTokenAccount.toBytes());
+  // B5 (STATUS.md sectie 76): rent_destination nu gebonden - deze functie
+  // gebruikt `payer` altijd ook als rent_destination (zie de accounts-lijst
+  // hieronder), dus dat is exact wat hier mee ondertekend wordt. Moet in
+  // dezelfde volgorde als instructions.rs::hunt, anders faalt de
+  // handtekeningverificatie structureel (WebAuthnChallengeMismatch).
+  const payload = concatBytes(
+    actionNonceLeBytes(nonce),
+    targetTokenAccount.toBytes(),
+    payer.toBytes()
+  );
   const expectedChallenge = buildExpectedChallenge(walletPda, "hunt", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(

@@ -248,6 +248,8 @@ pub fn init_wallet(
     // op wallet hierboven faalt sowieso op een tweede aanroep met dezelfde
     // seed_key, het account bestaat dan al). Nonce start gewoon op 0.
     wallet.action_nonce = 0;
+    // B2 (STATUS.md sectie 76): start op 0, zelfde reden als action_nonce.
+    wallet.session_epoch = 0;
 
     let vault = &mut ctx.accounts.vault;
     vault.wallet = wallet.key();
@@ -748,11 +750,21 @@ pub fn transfer_token(
 ) -> Result<()> {
     let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
 
-    let mut payload = Vec::with_capacity(8 + 32 + 32 + 8);
+    // B6 (STATUS.md sectie 76, statische-audit-bevinding): vault_token_account
+    // was voorheen NIET gebonden - alleen owner==vault en mint==token_mint
+    // waren afgedwongen (zie de constraints op TransferToken hierboven), dus
+    // bij meerdere vault-eigen token-accounts van dezelfde mint was de bron
+    // niet volledig door de handtekening bepaald. Geen diefstalpad (alles is
+    // al van de eigenaar), maar wel een afwijking van "één handtekening
+    // autoriseert precies één volledig gespecificeerde actie". Voor de
+    // sessievariant (transfer_token_via_session) verandert niets - die heeft
+    // sowieso geen challenge, zie STATUS.md sectie 76 voor die afweging.
+    let mut payload = Vec::with_capacity(8 + 32 + 32 + 8 + 32);
     payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(ctx.accounts.recipient_token_account.key().as_ref());
     payload.extend_from_slice(ctx.accounts.token_mint.key().as_ref());
     payload.extend_from_slice(&amount.to_le_bytes());
+    payload.extend_from_slice(ctx.accounts.vault_token_account.key().as_ref());
 
     let expected_challenge =
         build_expected_challenge(&ctx.accounts.wallet.key(), b"transfer_token", &payload);
@@ -1147,10 +1159,19 @@ pub fn execute_advanced<'info>(
 // hunt
 #[derive(Accounts)]
 pub struct Hunt<'info> {
+    // B4 (STATUS.md sectie 76, statische-audit-bevinding A4): hunt was de
+    // ENIGE passkey-gated instructie zonder deze constraint - elke andere
+    // (Execute, TransferToken, AddAllowedProgram, RemoveAllowedProgram,
+    // ExecuteAdvanced, AddPasskey, AddSessionKey, RemoveSessionKey) heeft
+    // 'm al. hunt is bovendien de meest onomkeerbare instructie in het
+    // programma (verbrandt de VOLLEDIGE balans van een token-account, geen
+    // on-chain spam-criterium) - juist die instructie hoorde het niet te
+    // missen tijdens een lopend herstelverzoek.
     #[account(
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
     )]
     pub wallet: Account<'info, WalletAccount>,
     #[account(
@@ -1194,9 +1215,18 @@ pub fn hunt(
 ) -> Result<()> {
     let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
 
-    let mut payload = Vec::with_capacity(8 + 32);
+    // B5 (STATUS.md sectie 76, statische-audit-bevinding): rent_destination
+    // was voorheen NIET gebonden - de payload bevatte alleen nonce +
+    // target_token_account, dus wie de transactie samenstelde kon vrij
+    // kiezen waar de helft van de teruggewonnen rent heen ging, terwijl de
+    // bevestigingskaart de split wel expliciet toont. client/src/hunt.ts
+    // moet in lockstep dezelfde payload opbouwen (nonce || target ||
+    // rent_destination) - anders faalt de handtekeningverificatie
+    // structureel (WebAuthnChallengeMismatch).
+    let mut payload = Vec::with_capacity(8 + 32 + 32);
     payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(ctx.accounts.target_token_account.key().as_ref());
+    payload.extend_from_slice(ctx.accounts.rent_destination.key().as_ref());
 
     let expected_challenge = build_expected_challenge(&ctx.accounts.wallet.key(), b"hunt", &payload);
     verify_passkey_signature_multi(
@@ -1580,20 +1610,31 @@ pub struct FinalizeRecovery<'info> {
     )]
     pub wallet: Account<'info, WalletAccount>,
 
-    /// Optioneel: PasskeysAccount van deze wallet, ALLEEN meegeven als het
-    /// al bestaat (anders het programma-ID zelf als sentinel meegeven -
-    /// Anchors ingebouwde optionele-account-patroon). Een geslaagde recovery
-    /// is een volledige reset: als dit account bestaat, wordt het hier
-    /// volledig gewist (alle extra sleutels weg, owner_passkey_revoked terug
-    /// naar false) zodat de nieuwe owner_passkey na recovery de ENIGE
-    /// geldige sleutel is - geen stale, mogelijk-gecompromitteerde extra
-    /// sleutels overleven een recovery. Zie STATUS.md voor de motivatie.
+    /// CHECK: VERPLICHT, geen Option meer (STATUS.md sectie 76, B1 - fix
+    /// voor een statische-audit-bevinding, FASE A1 empirisch bevestigd).
+    /// Het vorige `Option<Account<'info, PasskeysAccount>>`-patroon liet de
+    /// AANROEPER beslissen of er iets te wissen viel: finalize_recovery is
+    /// permissionless, dus wie dan ook kon de wipe overslaan door bewust de
+    /// Anchor-sentinel (het programma-ID zelf) mee te geven terwijl er wél
+    /// een bestaand PasskeysAccount was. Door dit een verplicht
+    /// UncheckedAccount te maken, met dezelfde deterministische
+    /// seeds/bump-constraint als elders in dit bestand, beslist de KETEN of
+    /// er iets te wissen valt - het account moet nu altijd exact het
+    /// PasskeysAccount van DEZE wallet zijn, ongeacht of het al bestaat. Een
+    /// niet-bestaand account op dit adres meegeven blijft een volkomen
+    /// normale, geldige staat (een wallet die nooit add_passkey aanriep) -
+    /// opgevangen door de expliciete bestaanstest in de body hieronder
+    /// (owner == crate::ID && niet data_is_empty), niet door de Option weg
+    /// te laten. Bestaande call sites die voorheen bewust de sentinel
+    /// gebruikten (een wallet zonder PasskeysAccount) geven nu het AFGELEIDE
+    /// adres mee - dat is nog steeds correct, want het account hoeft niet te
+    /// bestaan om het juiste adres te zijn.
     #[account(
         mut,
         seeds = [b"passkeys", wallet.key().as_ref()],
         bump,
     )]
-    pub passkeys: Option<Account<'info, PasskeysAccount>>,
+    pub passkeys: UncheckedAccount<'info>,
 }
 
 pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
@@ -1614,11 +1655,33 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
 
     wallet.owner_passkey = recovery.new_owner_passkey;
     wallet.recovery_state = None;
+    // B2 (STATUS.md sectie 76): elke bestaande sessiesleutel wordt hier in
+    // één klap ongeldig - zie execute_via_session/transfer_token_via_session/
+    // execute_advanced_via_session voor de bijbehorende epoch-check.
+    wallet.session_epoch = wallet
+        .session_epoch
+        .checked_add(1)
+        .ok_or(SpankWalletError::SessionEpochOverflow)?;
 
-    if let Some(passkeys) = ctx.accounts.passkeys.as_mut() {
+    // Expliciete bestaanstest i.p.v. Anchors Option<Account<T>>-patroon (zie
+    // de CHECK-comment hierboven): owner == crate::ID is alleen waar voor
+    // een al geinitialiseerd account van dit programma - een nog nooit
+    // aangemaakt PDA-adres heeft owner == System Program (default) en
+    // data_is_empty() == true.
+    let passkeys_info = ctx.accounts.passkeys.to_account_info();
+    let exists = passkeys_info.owner == &crate::ID && !passkeys_info.data_is_empty();
+    if exists {
+        let mut passkeys: PasskeysAccount = {
+            let data = passkeys_info.try_borrow_data()?;
+            PasskeysAccount::try_deserialize(&mut &data[..])?
+        };
         passkeys.owner_passkey_revoked = false;
         passkeys.count = 0;
         passkeys.additional_passkeys = [[0u8; PASSKEY_PUBKEY_LEN]; MAX_ADDITIONAL_PASSKEYS];
+
+        let mut data = passkeys_info.try_borrow_mut_data()?;
+        let mut writer: &mut [u8] = &mut data;
+        passkeys.try_serialize(&mut writer)?;
     }
 
     Ok(())
@@ -1728,6 +1791,16 @@ pub fn add_session_key(
         expiry_slot > current_slot,
         SpankWalletError::SessionExpirySlotNotInFuture
     );
+    // B3 (STATUS.md sectie 76, statische-audit-bevinding A3): bovengrens
+    // naast de al bestaande ondergrens hierboven - checked_add zodat een
+    // absurd hoge expiry_slot niet om de grens heen kan overflowen.
+    let max_expiry_slot = current_slot
+        .checked_add(MAX_SESSION_DURATION_SLOTS)
+        .ok_or(SpankWalletError::SessionDurationTooLong)?;
+    require!(
+        expiry_slot <= max_expiry_slot,
+        SpankWalletError::SessionDurationTooLong
+    );
 
     // Spend-limits-ontwerpdocument §3: token_mint is verplicht zodra
     // can_transfer_token true is - zonder vastgepinde mint zou
@@ -1802,6 +1875,10 @@ pub fn add_session_key(
 
     let session = &mut ctx.accounts.session;
     session.wallet = ctx.accounts.wallet.key();
+    // B2 (STATUS.md sectie 76): stempelt de HUIDIGE wallet-epoch - komt van
+    // de keten zelf, niet van de client, dus geen challenge-binding nodig
+    // (zie het veldcommentaar in state.rs).
+    session.epoch = ctx.accounts.wallet.session_epoch;
     session.session_key = session_key;
     session.bump = ctx.bumps.session;
     session.expiry_slot = expiry_slot;
@@ -1995,11 +2072,18 @@ pub struct ExecuteViaSession<'info> {
 }
 
 pub fn execute_via_session(ctx: Context<ExecuteViaSession>, amount: u64) -> Result<()> {
+    // B2 (STATUS.md sectie 76): wallet-epoch EERST in een lokale variabele
+    // lezen, vóór de mutable borrow van ctx.accounts.session hieronder.
+    let wallet_session_epoch = ctx.accounts.wallet.session_epoch;
     let session = &mut ctx.accounts.session;
     let current_slot = Clock::get()?.slot;
     require!(
         current_slot <= session.expiry_slot,
         SpankWalletError::SessionExpired
+    );
+    require!(
+        session.epoch == wallet_session_epoch,
+        SpankWalletError::SessionRevokedByRecovery
     );
     require!(
         session.can_execute,
@@ -2100,11 +2184,18 @@ pub struct TransferTokenViaSession<'info> {
 }
 
 pub fn transfer_token_via_session(ctx: Context<TransferTokenViaSession>, amount: u64) -> Result<()> {
+    // B2 (STATUS.md sectie 76): zelfde borrow-volgorde-reden als
+    // execute_via_session hierboven.
+    let wallet_session_epoch = ctx.accounts.wallet.session_epoch;
     let session = &mut ctx.accounts.session;
     let current_slot = Clock::get()?.slot;
     require!(
         current_slot <= session.expiry_slot,
         SpankWalletError::SessionExpired
+    );
+    require!(
+        session.epoch == wallet_session_epoch,
+        SpankWalletError::SessionRevokedByRecovery
     );
     require!(
         session.can_transfer_token,
@@ -2228,6 +2319,15 @@ pub fn execute_advanced_via_session<'info>(
     require!(
         current_slot <= session.expiry_slot,
         SpankWalletError::SessionExpired
+    );
+    // B2 (STATUS.md sectie 76): dezelfde epoch-check als execute_via_session/
+    // transfer_token_via_session - hier expliciet apart genoemd omdat
+    // `session` hier handmatig via load_session_account wordt ingelezen
+    // i.p.v. door Anchors macro, precies het soort plek waar zo'n check per
+    // ongeluk overgeslagen wordt als hij niet los benoemd staat.
+    require!(
+        session.epoch == ctx.accounts.wallet.session_epoch,
+        SpankWalletError::SessionRevokedByRecovery
     );
     require!(
         session.can_execute_advanced,

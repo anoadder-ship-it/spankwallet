@@ -83,7 +83,22 @@ function encodeMintToIx(mint: PublicKey, destination: PublicKey, authority: Publ
   });
 }
 
-describe("M-2 FIX VERIFY: echte client/src/sessionKeys.ts-functies tegen de lokale validator", () => {
+// STATUS.md sectie 76 (aanvulling #2 op de audit-opdracht): describe.skip in
+// plaats van de twee permanent falende tests in de standaard-suite laten
+// staan. Ze faalden niet door een echte regressie, maar omdat dit bestand
+// client/src/programId.ts's PRODUCTIE-programma-ID (9ma6...) aanroept, dat
+// niet bestaat op de lokale validator - vereist een bewuste, tijdelijke
+// handmatige edit (zie de comment hierboven) die hier bewust niet
+// geautomatiseerd is. Overwogen alternatief: het programma-ID via een
+// env-var met een devnet-default laten lezen in client/src/programId.ts -
+// afgewezen, want dat voegt permanente indirectie toe aan ECHTE
+// productiecode (de browser-client zelf) puur om een incidentele lokale
+// testrun te faciliteren, wat een slechtere ruil is dan deze test bewust
+// over te slaan. Twee permanent falende tests trainen je om faalregels te
+// negeren - precies het moment waarop een echte regressie gemist wordt.
+// Handmatig draaien: zie de comment hierboven voor de vereiste, tijdelijke
+// programId.ts-edit, dan describe.skip -> describe hieronder terugzetten.
+describe.skip("M-2 FIX VERIFY: echte client/src/sessionKeys.ts-functies tegen de lokale validator (SKIP: vereist tijdelijke handmatige programId.ts-edit, zie comment hierboven)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.Spankwallet as Program<Spankwallet>;

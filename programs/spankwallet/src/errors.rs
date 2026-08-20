@@ -136,4 +136,13 @@ pub enum SpankWalletError {
 
     #[msg("Onverwachte overflow bij het verhogen van action_nonce")]
     ActionNonceOverflow,
+
+    #[msg("Deze sessiesleutel is ingetrokken door een recovery - maak een nieuwe sessie aan")]
+    SessionRevokedByRecovery,
+
+    #[msg("Onverwachte overflow bij het verhogen van session_epoch")]
+    SessionEpochOverflow,
+
+    #[msg("expiry_slot ligt te ver in de toekomst - een sessie mag maximaal MAX_SESSION_DURATION_SLOTS geldig zijn")]
+    SessionDurationTooLong,
 }

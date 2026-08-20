@@ -45,7 +45,11 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       [Buffer.from("vault"), walletPda.toBuffer()],
       program.programId
     );
-    return { walletPda, vaultPda, walletSeedHash: Array.from(seedHash) };
+    const [passkeysPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("passkeys"), walletPda.toBuffer()],
+      program.programId
+    );
+    return { walletPda, vaultPda, passkeysPda, walletSeedHash: Array.from(seedHash) };
   }
 
   // init_wallet vereist sinds STATUS.md sectie 22 een ECHTE secp256r1-
@@ -54,7 +58,9 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
   async function createWallet(timelockSeconds?: number) {
     const passkey = generateTestPasskey();
     const backupAuthority = Keypair.generate();
-    const { walletPda, vaultPda, walletSeedHash } = derivePdas(passkey.compressedPublicKey);
+    const { walletPda, vaultPda, passkeysPda, walletSeedHash } = derivePdas(
+      passkey.compressedPublicKey
+    );
     const recoveryTimelockSeconds = timelockSeconds != null ? new BN(timelockSeconds) : null;
 
     const payload = Buffer.concat([
@@ -100,6 +106,7 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       backupAuthority,
       walletPda,
       vaultPda,
+      passkeysPda,
     };
   }
 
@@ -181,7 +188,7 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
   });
 
   it("finalize_recovery faalt vóór het tijdslot is verstreken", async () => {
-    const { backupAuthority, walletPda } = await createWallet(10);
+    const { backupAuthority, walletPda, passkeysPda } = await createWallet(10);
     const newOwnerPasskey = dummyNewOwnerPasskey();
 
     await program.methods
@@ -192,9 +199,14 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
 
     let threw = false;
     try {
+      // B1 (STATUS.md sectie 76): passkeys is niet meer optioneel - het
+      // AFGELEIDE PDA-adres meegeven, ook al bestaat het nog niet (dit
+      // wallet heeft nooit add_passkey aangeroepen). De programma-ID-
+      // sentinel is sinds B1 geen geldige invoer meer (faalt op de
+      // seeds-constraint).
       await program.methods
         .finalizeRecovery()
-        .accounts({ wallet: walletPda, passkeys: program.programId })
+        .accounts({ wallet: walletPda, passkeys: passkeysPda })
         .rpc();
     } catch (err) {
       threw = true;
@@ -205,9 +217,11 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
     );
   });
 
-  it("finalize_recovery slaagt ná het tijdslot en wijzigt owner_passkey", async () => {
+  it("finalize_recovery slaagt ná het tijdslot en wijzigt owner_passkey (wallet zonder ooit add_passkey aangeroepen te hebben)", async () => {
     const timelockSeconds = 3;
-    const { seedKey, backupAuthority, walletPda } = await createWallet(timelockSeconds);
+    const { seedKey, backupAuthority, walletPda, passkeysPda } = await createWallet(
+      timelockSeconds
+    );
     const newOwnerPasskey = dummyNewOwnerPasskey();
 
     await program.methods
@@ -223,9 +237,16 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
     );
 
+    // B1 (STATUS.md sectie 76) - dit is exact de regressie waar de B1-fix
+    // het meeste risico op loopt: dit wallet heeft NOOIT add_passkey
+    // aangeroepen, dus PasskeysAccount bestaat niet op dit adres. Het
+    // AFGELEIDE (niet-bestaande) PDA meegeven moet nog steeds gewoon
+    // slagen - een niet-bestaand account op het juiste adres is een
+    // geldige, normale staat, opgevangen door de expliciete bestaanstest
+    // in de instructie-body, niet door de constraint zelf.
     await program.methods
       .finalizeRecovery()
-      .accounts({ wallet: walletPda, passkeys: program.programId })
+      .accounts({ wallet: walletPda, passkeys: passkeysPda })
       .rpc();
 
     const wallet = await program.account.walletAccount.fetch(walletPda);

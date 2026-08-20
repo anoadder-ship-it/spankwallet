@@ -1721,19 +1721,22 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
   });
 
-  // --- FASE A2 (statische-audit-bevinding): sessies overleven een recovery ---
+  // --- FASE A2/B2 (statische-audit-bevinding + fix): sessies overleefden
+  // een recovery, nu gedicht via een epoch-mechanisme ---
   //
-  // finalize_recovery (instructions.rs) raakt UITSLUITEND WalletAccount
-  // (owner_passkey, recovery_state) en optioneel PasskeysAccount - nergens
-  // wordt een SessionKeyAccount gelezen, aangeraakt of ongeldig gemaakt. De
-  // enige bestaande bescherming (`wallet.recovery_state.is_none()` op elke
-  // _via_session-instructie) blokkeert alleen TIJDENS het recovery-venster
-  // zelf - zodra finalize_recovery voltooid is, is recovery_state weer None,
-  // en een sessie die vóór de compromittering is aangemaakt blijft daarna
-  // gewoon volledig geldig. README.md regel 85 belooft het tegenovergestelde
-  // ("wist ook alle extra passkeys/sessies") - dit test bewijst dat het
-  // sessie-deel van die belofte niet klopt.
-  it("[FASE A2 - bevestigt lek] een sessiesleutel overleeft finalize_recovery en blijft daarna gewoon bruikbaar", async () => {
+  // Was: finalize_recovery raakte UITSLUITEND WalletAccount en optioneel
+  // PasskeysAccount - nergens werd een SessionKeyAccount gelezen,
+  // aangeraakt of ongeldig gemaakt. De enige bestaande bescherming
+  // (`wallet.recovery_state.is_none()` op elke _via_session-instructie)
+  // blokkeerde alleen TIJDENS het recovery-venster zelf.
+  //
+  // Nu (B2): WalletAccount.session_epoch hoogt bij elke finalize_recovery
+  // op; elke sessie draagt de epoch-waarde van het moment van aanmaak, en
+  // de drie _via_session-instructies eisen dat die nog gelijk is aan de
+  // HUIDIGE wallet-epoch. Een recovery maakt zo in één klap ELKE bestaande
+  // sessie ongeldig (SessionRevokedByRecovery), zonder individuele
+  // intrekking.
+  it("[B2] een sessiesleutel van vóór een recovery wordt geweigerd met SessionRevokedByRecovery ná de recovery", async () => {
     const timelockSeconds = 3;
     const { passkey, backupAuthority, walletPda, vaultPda, passkeysPda, policyPda } =
       await createWallet(timelockSeconds);
@@ -1783,22 +1786,126 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
 
     // Dit wallet heeft nooit add_passkey aangeroepen, dus er bestaat geen
-    // PasskeysAccount om te wipen - de sentinel meegeven, zelfde patroon als
-    // de bestaande tests/recovery.ts. FASE A1 (de wipe-skip zelf, MET een
-    // bestaand PasskeysAccount) is een apart, onafhankelijk lek - het punt
-    // van DEZE test is dat finalize_recovery de sessie sowieso nooit
-    // aanraakt, los van wat er met passkeys gebeurt.
+    // PasskeysAccount - sinds B1 moet het AFGELEIDE (niet-bestaande) PDA
+    // meegegeven worden, de sentinel is geen geldige invoer meer.
     await program.methods
       .finalizeRecovery()
-      .accounts({ wallet: walletPda, passkeys: program.programId })
+      .accounts({ wallet: walletPda, passkeys: passkeysPda })
       .rpc();
 
     const wallet = await program.account.walletAccount.fetch(walletPda);
     assert.deepEqual(Array.from(wallet.ownerPasskey), newOwnerPasskey);
+    assert.equal(
+      wallet.sessionEpoch.toNumber(),
+      1,
+      "session_epoch had precies 1 keer opgehoogd moeten zijn door deze ene finalize_recovery"
+    );
 
     // Kern van het bewijs: dezelfde, VOOR de recovery aangemaakte
-    // sessiesleutel kan NA de "geslaagde" recovery nog steeds zelfstandig
-    // ondertekenen, zonder enige nieuwe autorisatie door de nieuwe eigenaar.
+    // sessiesleutel wordt nu geweigerd - geen stille doorgang meer.
+    let threw = false;
+    let errorMessage = "";
+    try {
+      await program.methods
+        .executeViaSession(new BN(1_000_000))
+        .accounts({
+          wallet: walletPda,
+          vault: vaultPda,
+          recipient: Keypair.generate().publicKey,
+          session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+          sessionKey: sessionKeypair.publicKey,
+        })
+        .signers([sessionKeypair])
+        .rpc();
+    } catch (err) {
+      threw = true;
+      errorMessage = err.toString();
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: een sessie van vóór de recovery had geweigerd moeten worden"
+    );
+    assert.include(errorMessage, "SessionRevokedByRecovery");
+
+    const session = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypair.publicKey)
+    );
+    assert.equal(
+      session.spentLamports.toNumber(),
+      1_000_000,
+      "spent_lamports had NIET moeten stijgen - de geweigerde poging mag niets hebben uitgevoerd"
+    );
+  });
+
+  it("[B2] een sessiesleutel aangemaakt NA een recovery, door de NIEUWE eigenaar, werkt gewoon", async () => {
+    const timelockSeconds = 3;
+    const { backupAuthority, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet(
+      timelockSeconds
+    );
+    await fundVault(vaultPda, 10_000_000);
+
+    // Een ECHT bruikbaar testsleutelpaar als nieuwe eigenaar (in
+    // tegenstelling tot dummyNewOwnerPasskey() elders, dat bewust
+    // willekeurige, niet-ondertekenbare bytes is - initiate_recovery
+    // vereist geen passkey-handtekening voor new_owner_passkey zelf, dus
+    // dat volstond daar. Hier is een ECHT sleutelpaar nodig omdat deze test
+    // na de recovery daadwerkelijk MOET kunnen ondertekenen als de nieuwe
+    // eigenaar.
+    const newOwner = generateTestPasskey();
+
+    await program.methods
+      .initiateRecovery(Array.from(newOwner.compressedPublicKey))
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+
+    const afterInitiate = await program.account.walletAccount.fetch(walletPda);
+    await advanceOnChainClockPast(
+      provider.connection,
+      (provider.wallet as anchor.Wallet).payer,
+      afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
+    );
+
+    await program.methods
+      .finalizeRecovery()
+      .accounts({ wallet: walletPda, passkeys: passkeysPda })
+      .rpc();
+
+    const walletAfter = await program.account.walletAccount.fetch(walletPda);
+    assert.deepEqual(
+      Array.from(walletAfter.ownerPasskey),
+      Array.from(newOwner.compressedPublicKey)
+    );
+    assert.equal(walletAfter.sessionEpoch.toNumber(), 1);
+
+    // De NIEUWE eigenaar (post-recovery) maakt een verse sessie aan - dit
+    // moet gewoon slagen, en de sessie stempelt de NIEUWE (opgehoogde)
+    // wallet-epoch.
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      newOwner,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      true,
+      false,
+      false
+    );
+
+    const session = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypair.publicKey)
+    );
+    assert.equal(
+      session.epoch.toNumber(),
+      1,
+      "de nieuwe sessie had de NIEUWE (opgehoogde) wallet-epoch moeten stempelen"
+    );
+
+    // En de nieuwe sessie werkt daadwerkelijk - geen valse-positieve op
+    // enkel add_session_key zelf.
     await program.methods
       .executeViaSession(new BN(1_000_000))
       .accounts({
@@ -1811,37 +1918,32 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       .signers([sessionKeypair])
       .rpc();
 
-    const session = await program.account.sessionKeyAccount.fetch(
+    const sessionAfter = await program.account.sessionKeyAccount.fetch(
       deriveSessionPda(walletPda, sessionKeypair.publicKey)
     );
     assert.equal(
-      session.spentLamports.toNumber(),
-      2_000_000,
-      "LEK BEVESTIGD: de sessie kon na een 'geslaagde' recovery nog steeds zelfstandig spenden"
+      sessionAfter.spentLamports.toNumber(),
+      1_000_000,
+      "FIX GEVERIFIEERD: een sessie aangemaakt NA de recovery werkt gewoon door"
     );
   });
 
-  // --- FASE A3 (statische-audit-bevinding): geen maximum op sessieduur ---
-  //
-  // add_session_key controleert uitsluitend `expiry_slot > current_slot`
-  // (instructions.rs) - geen bovengrens. Een sessie met een absurd verre
-  // expiry_slot is dus vandaag al een geldige aanroep.
-  it("[FASE A3 - bevestigt lek] add_session_key accepteert een absurd verre expiry_slot zonder bovengrens", async () => {
-    const { passkey, walletPda, passkeysPda, policyPda } = await createWallet();
+  it("[B2] een sessie aangemaakt op de HUIDIGE wallet-epoch werkt gewoon door (epoch-check faalt alleen bij een mismatch)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await fundVault(vaultPda, 10_000_000);
+
+    const wallet = await program.account.walletAccount.fetch(walletPda);
+    assert.equal(wallet.sessionEpoch.toNumber(), 0, "een vers wallet begint op session_epoch 0");
+
     const sessionKeypair = Keypair.generate();
     const currentSlot = await provider.connection.getSlot();
-
-    // ~10 miljard slots verder (bij 400ms/slot ruim >100 jaar) - slaagt
-    // vandaag zonder enige klacht van het programma.
-    const absurdExpirySlot = currentSlot + 10_000_000_000;
-
     await callAddSessionKey(
       passkey,
       walletPda,
       passkeysPda,
       policyPda,
       sessionKeypair.publicKey,
-      absurdExpirySlot,
+      currentSlot + 1000,
       true,
       false,
       false
@@ -1851,9 +1953,228 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       deriveSessionPda(walletPda, sessionKeypair.publicKey)
     );
     assert.equal(
-      session.expirySlot.toString(),
-      absurdExpirySlot.toString(),
-      "LEK BEVESTIGD: add_session_key legde geen bovengrens op aan expiry_slot"
+      session.epoch.toNumber(),
+      0,
+      "de sessie had de HUIDIGE wallet-epoch (0) moeten stempelen bij aanmaak"
     );
+
+    // Zonder een recovery ertussen blijft de epoch gelijk - de sessie moet
+    // gewoon werken, de epoch-check is geen blanket-weigering.
+    await program.methods
+      .executeViaSession(new BN(1_000_000))
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        recipient: Keypair.generate().publicKey,
+        session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+        sessionKey: sessionKeypair.publicKey,
+      })
+      .signers([sessionKeypair])
+      .rpc();
+
+    const sessionAfter = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypair.publicKey)
+    );
+    assert.equal(sessionAfter.spentLamports.toNumber(), 1_000_000);
+  });
+
+  // B2, punt 5 (expliciete aanvulling): execute_advanced_via_session leest
+  // `session` handmatig via load_session_account i.p.v. door Anchors macro -
+  // precies het soort plek waar een check per ongeluk overgeslagen wordt als
+  // hij niet apart getest wordt. Dit bewijst dat de epoch-check ook daar
+  // daadwerkelijk zit, niet alleen in de twee "makkelijke" varianten
+  // hierboven.
+  it("[B2] execute_advanced_via_session weigert ook met SessionRevokedByRecovery na een recovery", async () => {
+    const timelockSeconds = 3;
+    const { passkey, backupAuthority, walletPda, vaultPda, passkeysPda, policyPda } =
+      await createWallet(timelockSeconds);
+
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 100_000,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+
+    const newOwnerPasskey = dummyNewOwnerPasskey();
+    await program.methods
+      .initiateRecovery(newOwnerPasskey)
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+
+    const afterInitiate = await program.account.walletAccount.fetch(walletPda);
+    await advanceOnChainClockPast(
+      provider.connection,
+      (provider.wallet as anchor.Wallet).payer,
+      afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
+    );
+
+    await program.methods
+      .finalizeRecovery()
+      .accounts({ wallet: walletPda, passkeys: passkeysPda })
+      .rpc();
+
+    const target = Keypair.generate();
+    const rentExemptMinimum = await provider.connection.getMinimumBalanceForRentExemption(0);
+    await provider.sendAndConfirm(
+      new anchor.web3.Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: provider.wallet.publicKey,
+          toPubkey: target.publicKey,
+          lamports: rentExemptMinimum,
+        })
+      )
+    );
+    const assignIx = SystemProgram.assign({
+      accountPubkey: target.publicKey,
+      programId: program.programId,
+    });
+
+    let threw = false;
+    let errorMessage = "";
+    try {
+      await program.methods
+        .executeAdvancedViaSession(assignIx.data)
+        .accounts({
+          wallet: walletPda,
+          vault: vaultPda,
+          policy: policyPda,
+          cpiProgram: SystemProgram.programId,
+          session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+          sessionKey: sessionKeypair.publicKey,
+        })
+        .remainingAccounts([{ pubkey: target.publicKey, isWritable: true, isSigner: true }])
+        .signers([sessionKeypair, target])
+        .rpc();
+    } catch (err) {
+      threw = true;
+      errorMessage = err.toString();
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: execute_advanced_via_session had ook moeten weigeren na een recovery"
+    );
+    assert.include(
+      errorMessage,
+      "SessionRevokedByRecovery",
+      "de epoch-check in execute_advanced_via_session (handmatig ingelezen via load_session_account) had niet overgeslagen mogen worden"
+    );
+  });
+
+  // --- FASE A3/B3 (statische-audit-bevinding + fix): geen maximum op
+  // sessieduur, nu begrensd ---
+  //
+  // Was: add_session_key controleerde uitsluitend `expiry_slot >
+  // current_slot` - geen bovengrens. Nu (B3): state.rs::MAX_SESSION_
+  // DURATION_SLOTS = 1_512_000 (~7 dagen bij 400ms/slot) legt een harde
+  // bovengrens op. Beide grenzen hieronder scherp getest: de ondergrens is
+  // al gedekt door de bestaande "add_session_key faalt als expiry_slot niet
+  // in de toekomst ligt (SessionExpirySlotNotInFuture)"-test hierboven
+  // (ongewijzigd door B3), dus hier uitsluitend de NIEUWE bovengrens.
+  //
+  // Kruiscontrole met de FASE-A-testmarge-fix (STATUS.md sectie 76): de
+  // expiry-margen die elders in dit bestand van +1 naar +10 slots verhoogd
+  // zijn (om RPC-/transactietiming-races te vermijden) zitten ruim
+  // 1_500x onder deze bovengrens - geen interactie mogelijk.
+  const MAX_SESSION_DURATION_SLOTS = 1_512_000; // moet exact overeenkomen met state.rs
+
+  it("[B3] add_session_key weigert een expiry_slot voorbij MAX_SESSION_DURATION_SLOTS (SessionDurationTooLong)", async () => {
+    const { passkey, walletPda, passkeysPda, policyPda } = await createWallet();
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+
+    // ~10 miljard slots verder (bij 400ms/slot ruim >100 jaar) - vóór B3
+    // slaagde dit zonder klacht, nu moet dit hard falen.
+    const absurdExpirySlot = currentSlot + 10_000_000_000;
+
+    let threw = false;
+    let errorMessage = "";
+    try {
+      await callAddSessionKey(
+        passkey,
+        walletPda,
+        passkeysPda,
+        policyPda,
+        sessionKeypair.publicKey,
+        absurdExpirySlot,
+        true,
+        false,
+        false
+      );
+    } catch (err) {
+      threw = true;
+      errorMessage = err.toString();
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: een absurd verre expiry_slot had geweigerd moeten worden"
+    );
+    assert.include(errorMessage, "SessionDurationTooLong");
+  });
+
+  it("[B3] add_session_key accepteert een expiry_slot exact op de MAX_SESSION_DURATION_SLOTS-grens, en weigert precies 1 slot erover", async () => {
+    const { passkey, walletPda, passkeysPda, policyPda } = await createWallet();
+
+    // Exact op de grens: current_slot + MAX moet nog slagen (`<=` in de
+    // Rust-check, geen `<`).
+    const currentSlotForOk = await provider.connection.getSlot();
+    const sessionKeypairOk = Keypair.generate();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypairOk.publicKey,
+      currentSlotForOk + MAX_SESSION_DURATION_SLOTS,
+      true,
+      false,
+      false
+    );
+    const sessionOk = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypairOk.publicKey)
+    );
+    assert.isNotNull(sessionOk, "een expiry_slot exact op de grens had moeten slagen");
+
+    // Ruim over de grens (+50, niet +1): de check op de keten gebruikt de
+    // slot OP HET MOMENT VAN UITVOEREN, niet het moment waarop currentSlot
+    // hier gelezen wordt - de RPC-round-trip van add_session_key (nonce
+    // ophalen, ondertekenen, versturen, bevestigen) kost zelf al enkele
+    // slots. Een marge van exact +1 zou dus race-gevoelig zijn (de
+    // grensoverschrijding zou door slot-drift tijdens de round-trip
+    // toevallig binnen de grens kunnen vallen). +50 blijft een scherpe,
+    // betekenisvolle grensoverschrijding zonder die race.
+    const currentSlotForFail = await provider.connection.getSlot();
+    const sessionKeypairFail = Keypair.generate();
+    let threw = false;
+    let errorMessage = "";
+    try {
+      await callAddSessionKey(
+        passkey,
+        walletPda,
+        passkeysPda,
+        policyPda,
+        sessionKeypairFail.publicKey,
+        currentSlotForFail + MAX_SESSION_DURATION_SLOTS + 50,
+        true,
+        false,
+        false
+      );
+    } catch (err) {
+      threw = true;
+      errorMessage = err.toString();
+    }
+    assert.isTrue(threw, "één slot voorbij de grens had moeten weigeren");
+    assert.include(errorMessage, "SessionDurationTooLong");
   });
 });

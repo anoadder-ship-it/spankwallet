@@ -69,13 +69,30 @@ pub struct WalletAccount {
     /// giswaarde ingelezen te worden. Geen migratie-instructie gebouwd - zie
     /// STATUS.md sectie 69 voor de expliciete, empirisch onderbouwde afweging.
     pub action_nonce: u64,
+
+    /// B2 (STATUS.md sectie 76, statische-audit-bevinding A2): monotoon
+    /// verhogende teller, opgehoogd door finalize_recovery bij elke
+    /// geslaagde recovery. Elke SessionKeyAccount draagt de epoch-waarde
+    /// die gold op het moment van add_session_key - de _via_session-
+    /// instructies eisen dat die nog exact gelijk is aan de HUIDIGE
+    /// wallet.session_epoch, dus een recovery maakt in één klap ELKE
+    /// bestaande sessiesleutel ongeldig (SessionRevokedByRecovery), zonder
+    /// dat elke sessie individueel opgezocht/ingetrokken hoeft te worden.
+    /// Bewust ACHTERAAN toegevoegd, nooit ertussenin - exact hetzelfde
+    /// offset-strikte fail-closed-argument als action_nonce hierboven: een
+    /// bestaand, kortere-layout-account (247 bytes, van vóór deze fix)
+    /// faalt hierdoor SCHOON op deserialisatie i.p.v. een giswaarde voor
+    /// session_epoch aan te nemen. Geen migratie-instructie - zie STATUS.md
+    /// sectie 76 voor de expliciete, praktische impact (bestaande devnet-
+    /// wallets/sessies falen na deploy schoon op deserialisatie).
+    pub session_epoch: u64,
 }
 
 impl WalletAccount {
     // discriminator (8) + seed_key (33) + wallet_seed_hash (32) + owner_passkey (33) + bump (1)
     // + vault_bump (1) + created_at (8) + backup_authority (32)
     // + recovery_state option (1 + RecoveryState::LEN) + recovery_timelock_seconds (8)
-    // + deposit_authority option (1 + 32) + action_nonce (8)
+    // + deposit_authority option (1 + 32) + action_nonce (8) + session_epoch (8)
     pub const LEN: usize = 8
         + PASSKEY_PUBKEY_LEN
         + 32
@@ -87,6 +104,7 @@ impl WalletAccount {
         + (1 + RecoveryState::LEN)
         + 8
         + (1 + 32)
+        + 8
         + 8;
 }
 
@@ -261,6 +279,21 @@ pub struct SessionKeyAccount {
     /// Reeds verplaatste tokens via transfer_token_via_session, zelfde
     /// atomische checked_add-patroon als spent_lamports.
     pub spent_token_amount: u64,
+
+    /// B2 (STATUS.md sectie 76): stempel van wallet.session_epoch op het
+    /// moment van add_session_key. De drie _via_session-instructies eisen
+    /// dat dit nog exact gelijk is aan de HUIDIGE wallet.session_epoch -
+    /// finalize_recovery hoogt die op, dus elke sessie die vóór een
+    /// recovery is aangemaakt wordt daardoor in één klap ongeldig
+    /// (SessionRevokedByRecovery), zonder individuele intrekking. Hoort NIET
+    /// in de challenge-payload: de waarde komt van de keten zelf (de op dat
+    /// moment geldende wallet.session_epoch), niet van de client, dus
+    /// cryptografisch binden voegt niets toe. Bewust ACHTERAAN toegevoegd,
+    /// nooit ertussenin - zelfde offset-strikte fail-closed-argument als
+    /// elders in dit bestand: een bestaand, kortere-layout-account (421
+    /// bytes, van vóór deze fix) faalt hierdoor SCHOON op deserialisatie
+    /// i.p.v. een giswaarde voor epoch aan te nemen.
+    pub epoch: u64,
 }
 
 impl SessionKeyAccount {
@@ -269,7 +302,7 @@ impl SessionKeyAccount {
     // + allowed_programs(32 * MAX_SESSION_PROGRAMS)
     // + max_lamports_per_tx(8) + max_lamports_total(8) + spent_lamports(8)
     // + token_mint(32) + max_token_amount_per_tx(8) + max_token_amount_total(8)
-    // + spent_token_amount(8)
+    // + spent_token_amount(8) + epoch(8)
     pub const LEN: usize = 8
         + 32
         + 32
@@ -286,29 +319,35 @@ impl SessionKeyAccount {
         + 32
         + 8
         + 8
+        + 8
         + 8;
 }
+
+/// B3 (STATUS.md sectie 76, statische-audit-bevinding A3): maximale duur
+/// (in slots) tussen `add_session_key`'s huidige slot en de gevraagde
+/// expiry_slot. ~7 dagen bij Solana's nominale 400ms-slottijd
+/// (1_512_000 * 0.4s = 604_800s = 7 dagen). Zonder deze grens zou B2's
+/// epoch-mechanisme het enige verschil zijn tussen "een gecompromitteerde
+/// sessiesleutel is achteraf intrekbaar" (via finalize_recovery of
+/// remove_session_key) en "een sessiesleutel kan structureel niet meer
+/// worden dichtgeplant" (een sessie die tientallen jaren geldig blijft,
+/// buiten elk redelijk hersteltraject om, als de eigenaar de recovery-
+/// route nooit gebruikt of pas laat ontdekt dat er een gecompromitteerde
+/// sessie actief is). Een harde bovengrens dwingt af dat elke sessie
+/// vroeg of laat vanzelf verloopt, ongeacht of iemand ooit ingrijpt.
+pub const MAX_SESSION_DURATION_SLOTS: u64 = 1_512_000;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use anchor_lang::{AccountDeserialize, AccountSerialize};
 
-    /// C-1-fix (STATUS.md sectie 69) - fail-closed migratieclaim, direct op
-    /// Anchor/Borsh's eigen (de)serialisatie getest i.p.v. via een volledige
-    /// on-chain-integratietest: een oude, 231-byte WalletAccount (van vóór
-    /// action_nonce toegevoegd werd) moet SCHOON falen tegen de nieuwe,
-    /// 239-byte structuurdefinitie - geen giswaarde voor action_nonce, een
-    /// echte deserialisatiefout. Native `cargo test` volstaat hiervoor (geen
-    /// SBF-target/live validator nodig, puur Borsh-lengte-/offsetlogica).
-    #[test]
-    fn old_231_byte_wallet_account_fails_closed_against_new_239_byte_layout() {
+    fn sample_wallet_for_layout_tests() -> WalletAccount {
         // recovery_state/deposit_authority bewust Some(...), niet None: Borsh
         // codeert Option::None altijd als 1 byte ongeacht T, dus alleen de
         // Some-tak geeft de volledige, WalletAccount::LEN-brede serialisatie
-        // die deze test nodig heeft om de oude-vs-nieuwe-layout-grens exact
-        // op byte 231 te simuleren.
-        let wallet = WalletAccount {
+        // die deze tests nodig hebben om de layout-grenzen exact te simuleren.
+        WalletAccount {
             seed_key: [2u8; PASSKEY_PUBKEY_LEN],
             wallet_seed_hash: [0u8; 32],
             owner_passkey: [2u8; PASSKEY_PUBKEY_LEN],
@@ -323,24 +362,110 @@ mod tests {
             recovery_timelock_seconds: DEFAULT_RECOVERY_TIMELOCK_SECONDS,
             deposit_authority: Some(Pubkey::default()),
             action_nonce: 0,
-        };
+            session_epoch: 0,
+        }
+    }
+
+    /// C-1-fix (STATUS.md sectie 69) - fail-closed migratieclaim, direct op
+    /// Anchor/Borsh's eigen (de)serialisatie getest i.p.v. via een volledige
+    /// on-chain-integratietest: een oude, 231-byte WalletAccount (van vóór
+    /// zowel action_nonce als session_epoch toegevoegd werden) moet SCHOON
+    /// falen tegen de HUIDIGE structuurdefinitie - geen giswaarde voor die
+    /// velden, een echte deserialisatiefout. Native `cargo test` volstaat
+    /// hiervoor (geen SBF-target/live validator nodig, puur Borsh-lengte-/
+    /// offsetlogica). Slice-lengte bewust hardcoded op LEN - 16 (niet
+    /// dynamisch tegen een lopend veldenaantal) zodat deze test dezelfde,
+    /// oorspronkelijke 231-byte-grens blijft bewaken ongeacht hoeveel velden
+    /// er later nog bijkomen - zie de aparte test hieronder voor de nieuwste
+    /// (239-vs-247) grens specifiek.
+    #[test]
+    fn old_231_byte_wallet_account_fails_closed_against_current_layout() {
+        let wallet = sample_wallet_for_layout_tests();
 
         let mut current_layout_bytes = Vec::new();
         wallet.try_serialize(&mut current_layout_bytes).unwrap();
         assert_eq!(current_layout_bytes.len(), WalletAccount::LEN);
 
-        // De oude layout is exact de nieuwe MINUS de 8 achteraan toegevoegde
-        // action_nonce-bytes (nooit ertussenin, zie het veld-commentaar
-        // hierboven) - dus gewoon de eerste (LEN - 8) bytes van een geldig,
-        // huidig account simuleren een echt, bestaand vóór-de-fix account.
-        let old_layout_bytes = &current_layout_bytes[..WalletAccount::LEN - 8];
+        // De oorspronkelijke, vóór-C-1-fix layout is de huidige MINUS de 16
+        // achteraan toegevoegde bytes van action_nonce (8) + session_epoch
+        // (8), nooit ertussenin (zie beide veldcommentaren) - dus gewoon de
+        // eerste (LEN - 16) bytes van een geldig, huidig account simuleren
+        // een echt, bestaand, oorspronkelijk account.
+        let old_layout_bytes = &current_layout_bytes[..WalletAccount::LEN - 16];
         assert_eq!(old_layout_bytes.len(), 231);
 
         let mut slice: &[u8] = old_layout_bytes;
         let result = WalletAccount::try_deserialize(&mut slice);
         assert!(
             result.is_err(),
-            "een oude 231-byte WalletAccount had schoon moeten falen (fail-closed) tegen de nieuwe 239-byte layout, niet stilzwijgend een giswaarde voor action_nonce moeten aannemen"
+            "een oude 231-byte WalletAccount had schoon moeten falen (fail-closed) tegen de huidige layout, niet stilzwijgend giswaarden moeten aannemen"
+        );
+    }
+
+    /// B2 (STATUS.md sectie 76) - dezelfde fail-closed-garantie, nu specifiek
+    /// voor de session_epoch-grens: een 239-byte WalletAccount (mét
+    /// action_nonce, van vóór session_epoch) moet SCHOON falen tegen de
+    /// huidige 247-byte layout.
+    #[test]
+    fn old_239_byte_wallet_account_fails_closed_against_current_layout() {
+        let wallet = sample_wallet_for_layout_tests();
+
+        let mut current_layout_bytes = Vec::new();
+        wallet.try_serialize(&mut current_layout_bytes).unwrap();
+        assert_eq!(current_layout_bytes.len(), WalletAccount::LEN);
+
+        let old_layout_bytes = &current_layout_bytes[..WalletAccount::LEN - 8];
+        assert_eq!(old_layout_bytes.len(), 239);
+
+        let mut slice: &[u8] = old_layout_bytes;
+        let result = WalletAccount::try_deserialize(&mut slice);
+        assert!(
+            result.is_err(),
+            "een 239-byte WalletAccount (mét action_nonce, zonder session_epoch) had schoon moeten falen tegen de huidige 247-byte layout"
+        );
+    }
+
+    fn sample_session_for_layout_tests() -> SessionKeyAccount {
+        SessionKeyAccount {
+            wallet: Pubkey::default(),
+            session_key: Pubkey::default(),
+            bump: 255,
+            expiry_slot: 0,
+            can_execute: true,
+            can_transfer_token: false,
+            can_execute_advanced: false,
+            count: 0,
+            allowed_programs: [Pubkey::default(); MAX_SESSION_PROGRAMS],
+            max_lamports_per_tx: 0,
+            max_lamports_total: 0,
+            spent_lamports: 0,
+            token_mint: Pubkey::default(),
+            max_token_amount_per_tx: 0,
+            max_token_amount_total: 0,
+            spent_token_amount: 0,
+            epoch: 0,
+        }
+    }
+
+    /// B2 (STATUS.md sectie 76) - zelfde fail-closed-garantie als hierboven,
+    /// nu voor SessionKeyAccount: een 421-byte account (van vóór epoch)
+    /// moet SCHOON falen tegen de huidige 429-byte layout.
+    #[test]
+    fn old_421_byte_session_key_account_fails_closed_against_current_layout() {
+        let session = sample_session_for_layout_tests();
+
+        let mut current_layout_bytes = Vec::new();
+        session.try_serialize(&mut current_layout_bytes).unwrap();
+        assert_eq!(current_layout_bytes.len(), SessionKeyAccount::LEN);
+
+        let old_layout_bytes = &current_layout_bytes[..SessionKeyAccount::LEN - 8];
+        assert_eq!(old_layout_bytes.len(), 421);
+
+        let mut slice: &[u8] = old_layout_bytes;
+        let result = SessionKeyAccount::try_deserialize(&mut slice);
+        assert!(
+            result.is_err(),
+            "een oude 421-byte SessionKeyAccount had schoon moeten falen (fail-closed) tegen de huidige 429-byte layout, niet stilzwijgend een giswaarde voor epoch moeten aannemen"
         );
     }
 }

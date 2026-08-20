@@ -469,23 +469,68 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
     );
   });
 
-  // --- FASE A1 (statische-audit-bevinding): finalize_recovery-wipe is
-  // overslaanbaar ---
+  // --- FASE A1/B1 (statische-audit-bevinding + fix): finalize_recovery-wipe
+  // was overslaanbaar, nu structureel gedicht ---
   //
-  // FinalizeRecovery::passkeys is Option<Account<'info, PasskeysAccount>> -
-  // Anchors ingebouwde optionele-account-patroon, waarbij de AANROEPER (niet
-  // de keten) bepaalt of het account "bestaat": de client-side sentinel voor
-  // "geef geen account" is simpelweg het programma-ID zelf meegeven (zie de
-  // bestaande tests/recovery.ts-tests hierboven in dit project, die dat
-  // patroon al gebruiken voor wallets ZONDER PasskeysAccount). finalize_
-  // recovery is permissionless (geen signer-check in FinalizeRecovery's
-  // Accounts-struct) - dus kan LETTERLIJK IEDEREEN, niet alleen de eigenaar,
-  // de wipe overslaan door bewust de sentinel te sturen terwijl er wél een
-  // bestaand PasskeysAccount is. Dit test bewijst dat empirisch: de extra
-  // sleutel van vóór de recovery behoudt zijn volledige zeggenschap NA een
-  // "geslaagde" recovery, in directe tegenspraak met README.md/STATUS.md's
-  // belofte dat finalize_recovery "ook alle extra passkeys" wist.
-  it("[FASE A1 - bevestigt lek] finalize_recovery met de programma-ID-sentinel slaat de passkeys-wipe over", async () => {
+  // Was: FinalizeRecovery::passkeys was Option<Account<'info,
+  // PasskeysAccount>> - Anchors ingebouwde optionele-account-patroon, waarbij
+  // de AANROEPER (niet de keten) bepaalde of het account "bestond": de
+  // client-side sentinel voor "geef geen account" was simpelweg het
+  // programma-ID zelf meegeven. finalize_recovery is permissionless (geen
+  // signer-check) - dus kon LETTERLIJK IEDEREEN de wipe overslaan door bewust
+  // de sentinel te sturen terwijl er wél een bestaand PasskeysAccount was.
+  //
+  // Nu (B1): passkeys is een verplicht UncheckedAccount op het
+  // deterministische seeds/bump-adres - de sentinel is geen geldige invoer
+  // meer (ketst af op de seeds-constraint), en met het echte, afgeleide PDA
+  // gebeurt de wipe altijd als het account bestaat. Beide takken hieronder
+  // vastgelegd, zoals gevraagd.
+  it("[B1] finalize_recovery met de programma-ID-sentinel ketst nu af op de seeds-constraint", async () => {
+    const timelockSeconds = 3;
+    const { passkey, backupAuthority, walletPda, passkeysPda } = await createWallet(
+      timelockSeconds
+    );
+    const extra = generateTestPasskey();
+    await callAddPasskey(passkey, walletPda, passkeysPda, extra.compressedPublicKey);
+
+    const newOwnerPasskey = dummyNewOwnerPasskey();
+    await program.methods
+      .initiateRecovery(newOwnerPasskey)
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+
+    const afterInitiate = await program.account.walletAccount.fetch(walletPda);
+    await advanceOnChainClockPast(
+      provider.connection,
+      (provider.wallet as anchor.Wallet).payer,
+      afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
+    );
+
+    // De VOORMALIGE aanval: bewust de sentinel sturen terwijl het echte
+    // PasskeysAccount bestaat. Dit moet nu hard falen (seeds-constraint),
+    // niet stilzwijgend de wipe overslaan.
+    let threw = false;
+    try {
+      await program.methods
+        .finalizeRecovery()
+        .accounts({ wallet: walletPda, passkeys: program.programId })
+        .rpc();
+    } catch (err) {
+      threw = true;
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: de sentinel had moeten afketsen op de seeds-constraint, niet de wipe stilzwijgend overslaan"
+    );
+
+    // Bijkomend bewijs dat de aanval echt gefaald is (geen halve uitvoering):
+    // recovery_state staat nog steeds open, owner_passkey is niet gemuteerd.
+    const wallet = await program.account.walletAccount.fetch(walletPda);
+    assert.isNotNull(wallet.recoveryState, "een mislukte finalize_recovery mag geen state gemuteerd hebben");
+  });
+
+  it("[B1] finalize_recovery met het echte PDA wist de volledige passkey-set altijd - geen manier meer om dit over te slaan", async () => {
     const timelockSeconds = 3;
     const { passkey, backupAuthority, walletPda, passkeysPda } = await createWallet(
       timelockSeconds
@@ -510,46 +555,35 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
       afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
     );
 
-    // De AANVAL: het echte, bestaande PasskeysAccount-PDA bestaat, maar we
-    // sturen bewust de "bestaat niet"-sentinel (het programma-ID zelf) mee -
-    // niets in FinalizeRecovery's Accounts-struct dwingt af dat het echte
-    // PDA gebruikt wordt, en er is geen signer-check die dit tot alleen de
-    // eigenaar beperkt.
+    // Het enige geldige adres: het afgeleide PDA. Geen keuze meer voor de
+    // aanroeper.
     await program.methods
       .finalizeRecovery()
-      .accounts({ wallet: walletPda, passkeys: program.programId })
+      .accounts({ wallet: walletPda, passkeys: passkeysPda })
       .rpc();
 
     const wallet = await program.account.walletAccount.fetch(walletPda);
-    assert.deepEqual(
-      Array.from(wallet.ownerPasskey),
-      newOwnerPasskey,
-      "owner_passkey had wel gewoon moeten muteren - dat deel van finalize_recovery gebruikt geen optioneel account"
-    );
+    assert.deepEqual(Array.from(wallet.ownerPasskey), newOwnerPasskey);
 
-    // Kern van het bewijs: de wipe is NIET gebeurd - count staat nog op 1.
     const passkeysAfter = await program.account.passkeysAccount.fetch(passkeysPda);
     assert.equal(
       passkeysAfter.count,
-      1,
-      "LEK BEVESTIGD: de passkeys-wipe werd overgeslagen - count had 0 moeten zijn"
+      0,
+      "FIX GEVERIFIEERD: de wipe gebeurde - count is nu 0"
     );
     assert.isFalse(passkeysAfter.ownerPasskeyRevoked);
 
-    // Kern van het bewijs, deel 2: de oude extra sleutel (van vóór de
-    // "geslaagde" recovery) kan nog steeds een willekeurige andere
-    // passkey-gated instructie ondertekenen - géén stale/gecompromitteerde
-    // sleutel zou dit meer mogen kunnen na een voltooide recovery.
-    await callAddAllowedProgramAs(extra, walletPda, SystemProgram.programId);
-    const [policyPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("policy"), walletPda.toBuffer()],
-      program.programId
-    );
-    const policy = await program.account.policyAccount.fetch(policyPda);
-    assert.equal(
-      policy.count,
-      1,
-      "LEK BEVESTIGD: de sleutel van vóór de recovery kon nog steeds een instructie ondertekenen ná de 'geslaagde' recovery"
+    // De oude extra sleutel (van vóór de recovery) heeft nu écht geen
+    // zeggenschap meer.
+    let threw = false;
+    try {
+      await callAddAllowedProgramAs(extra, walletPda, SystemProgram.programId);
+    } catch (err) {
+      threw = true;
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: de sleutel van vóór de recovery heeft na de wipe geen zeggenschap meer"
     );
   });
 });

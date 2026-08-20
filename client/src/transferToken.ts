@@ -48,11 +48,15 @@ export async function buildTransferTokenTransaction(
   const nonce = await readActionNonce(connection, walletPda);
   const amountBytes = new Uint8Array(8);
   new DataView(amountBytes.buffer).setBigUint64(0, amount, true);
+  // B6 (STATUS.md sectie 76): vault_token_account nu gebonden - moet exact
+  // in dezelfde volgorde als instructions.rs::transfer_token, anders faalt
+  // de handtekeningverificatie structureel (WebAuthnChallengeMismatch).
   const payload = concatBytes(
     actionNonceLeBytes(nonce),
     recipientTokenAccount.toBytes(),
     tokenMint.toBytes(),
-    amountBytes
+    amountBytes,
+    vaultTokenAccount.toBytes()
   );
 
   const expectedChallenge = buildExpectedChallenge(walletPda, "transfer_token", payload);

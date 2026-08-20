@@ -1,5 +1,5 @@
 [workspace]
-members = ["programs/spankwallet"]
+members = ["programs/spankwallet", "programs/active-defense"]
 resolver = "2"
 
 [profile.release]

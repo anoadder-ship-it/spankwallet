@@ -30,6 +30,15 @@ Neem in de melding op:
 **Geef alsjeblieft geen details over de kwetsbaarheid in een publiek issue of pull
 request.**
 
+## Eigen beveiligingsfixes: lokaal tot de upgrade live staat
+
+Deze repository is publiek. Wanneer een kwetsbaarheid in het on-chain programma hier wordt
+gefixt, blijven de fix zelf, de bijbehorende bewijs-tests (die precies laten zien hoe de
+kwetsbaarheid te misbruiken is) en de beschrijving ervan lokaal gecommit maar **ongepusht**
+totdat de bijbehorende upgrade daadwerkelijk is uitgevoerd en onafhankelijk geverifieerd -
+pushen vóór dat moment zou de exploit-details publiceren terwijl het kwetsbare programma nog
+live staat.
+
 ## Wat te verwachten
 
 Dit is een klein, actief project - er is geen formeel SLA, maar meldingen worden serieus

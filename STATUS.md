@@ -5997,3 +5997,68 @@ ver vóór dit hele FASE-A/B/C-traject. Bijgewerkt naar "80 passing, 2 pending, 
 zie STATUS.md sectie 78" (het exacte, zojuist geverifieerde resultaat, zie PUNT 2 hierboven).
 D3 (de Tauri-CSP-notitie) blijft bewust in FASE D staan, zoals afgesproken - dat is een
 vooruitblik, geen onjuistheid.
+
+### VOORAF A (vóór FASE C): `admin/wallet-signer.html` schoongemaakt vóór de live voorstel-#10-executie
+
+Tijdgevoelig, apart van PUNT 1-4: het gereedschap waarmee vandaag (2026-08-20) voorstel #10
+daadwerkelijk uitgevoerd zou worden stond ongecommit in de working tree, met een niet-triviale
+diff (nieuwe "1c. Voorstel #8 annuleren"-knop + bijbehorende functies, naast een
+buffer-adres-update). Op verzoek eerst de volledige diff getoond en per blok uitgelegd, daarna
+een oordeel gevraagd i.p.v. stilzwijgend behouden of teruggedraaid.
+
+**Oordeel, empirisch onderbouwd i.p.v. aangenomen:** on-chain gecontroleerd tegen de echte
+Squads-multisig (`A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp`, via een tijdelijk
+Node-scriptje met `@sqds/multisig`, niet via de browser-pagina zelf): voorstel #8 staat al op
+status `Cancelled` (beide signers), voorstel #10 op `Approved`. De cancel-#8-flow had dus al
+zijn werk gedaan - de code moet ooit (ongecommit) daadwerkelijk gebruikt zijn om die twee
+annuleer-stemmen uit te brengen. Bovendien was het sowieso geen generiek annuleer-gereedschap:
+`OLD_PROPOSAL_TO_CANCEL_INDEX = 8n` is hardgecodeerd, de knoptekst en logregels noemen letterlijk
+"#8", en het hergebruikt bewust NIET `findCanonicalProposal()` (dat filtert op de HUIDIGE
+`BUFFER`-constante, zou #8 dus toch nooit vinden) - een toekomstig vergelijkbaar
+opruimtraject zou dit sowieso moeten herschrijven, niet hergebruiken.
+
+**Actie: chirurgisch behouden wat vandaag nodig is, de rest verwijderd** - geen blinde
+`git checkout` (die had ook de broodnodige buffer-update teruggedraaid, die IS nodig om
+voorstel #10 als canoniek te herkennen). Verwijderd: de knop, `OLD_PROPOSAL_TO_CANCEL_INDEX`,
+`buildCancelOldProposalTx()`, `finishCancelOldProposal()`, de click-handler, de
+deeplink-return-dispatch-case, en de nu-achterhaalde "Opruimtraject"-alinea in de pagina-tekst
+zelf (present tense, zou vandaag misleidend zijn). Behouden: de bijgewerkte `BUFFER`-constante
+en omschrijvingstekst (voorstel #10's daadwerkelijke buffer). `PAGE_BUILD` bijgewerkt.
+Syntax-gecontroleerd (`node --check` op de geëxtraheerde inline `<script>`-inhoud): geen
+fouten. Gecommit als `22265d6` - de working tree is nu schoon en is exact wat vanmiddag
+gebruikt wordt.
+
+### VOORAF B (vóór FASE C): lokale git-bundle-backup - wat hij wel en niet dekt
+
+Alle lokale, nog-ongepushte commits (`origin/main..HEAD`) gebundeld:
+`/home/michel/spankwallet-backups/spankwallet-main-2026-08-20.bundle`
+(sha256: `53d48f60c2fb269e5bb9b93d790cdbe3c289a8e8e34ccfb23d05a25860f0bcb2`), geverifieerd met
+`git bundle verify`. Een dunne/incrementele bundle (`origin/main..HEAD`, niet de volledige
+geschiedenis) - alles vóór het fork-punt (`b6793f7`) staat al veilig op de publieke
+GitHub-remote, dat opnieuw meenemen zou de bundle nodeloos groter maken zonder extra dekking.
+**Bevat 9 commits, niet de 8 die genoemd werden** - VOORAF A's opruimcommit (`22265d6`) landde
+ná dat verzoek, dus telt logischerwijs mee in "alle nog-ongepushte lokale commits"; expliciet
+genoemd i.p.v. stilzwijgend op 8 gehouden.
+
+**Wat deze bundle wél dekt:** git-niveau-ongelukken op deze machine - exact het scenario uit
+sectie 69 ("een `git checkout -- programs/...` veegde per ongeluk de hele map schoon, niets
+was gecommit dus niets permanent verloren, maar wel een volledige herbouw nodig"). Met deze
+bundle is dat type ongeluk voortaan zonder de herbouw-stap herstelbaar: `git fetch
+/home/michel/spankwallet-backups/spankwallet-main-2026-08-20.bundle main` in een verse checkout
+(bovenop een kloon van de publieke remote voor het fork-punt) herstelt alle 9 commits exact.
+
+**Wat deze bundle NIET dekt, expliciet genoemd i.p.v. verzwegen:** verlies van de machine
+zelf - de bundle staat op dezelfde schijf als de repo. Schijf-/machinefalen, diefstal, of
+een volledige-disk-encryptie-sleutel die met de machine verdwijnt raakt de bundle net zo hard
+als de repo zelf. Dit is dus GEEN offsite-backup en GEEN bescherming tegen machineverlies -
+alleen tegen git-niveau-ongelukken terwijl de machine zelf nog werkt.
+
+**Bewust geen versleuteling toegevoegd, met reden:** het eerder voorgestelde `age`/`gpg`-plan
+ging uit van een kopie die van de machine af gaat (externe drager, offline opslag) - daar is
+versleuteling zinvol, want dan is fysiek bezit van het medium niet meer voldoende. Zolang het
+bestand op dezelfde, al-beveiligde schijf blijft staan als de repo die het beveiligt, voegt een
+extra versleutelingslaag weinig toe: wie toegang heeft tot de schijf om de bundle te lezen,
+heeft al toegang tot de repo zelf (en de lokale, ongepushte exploit-details erin) rechtstreeks.
+Versleuteling wordt pas een echte extra beveiligingslaag zodra er daadwerkelijk een kopie
+van deze machine af gaat - dat is een aparte, nog niet genomen beslissing, geen onderdeel van
+deze same-disk-bundle.

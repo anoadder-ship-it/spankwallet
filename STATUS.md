@@ -5955,3 +5955,45 @@ gebeurd.
   aan de eerder geregistreerde hash uit sectie 77): `248922eb78f820d742e7739fe6f0139602f4eeba6c0e3115aea00296d93ecafd`.
 - `cd client && npx tsc --noEmit`: exitcode 0, geen nieuwe fouten - de twee nieuwe
   `export`s en de nieuwe `assertByteIdentical`-aanroepen breken de EIS 2-garantie niet.
+
+### PUNT 3: README.md gecorrigeerd - "ongeldig" vs "opgeruimd" is geen woordspel
+
+Regel 85 (instructietabel) beweerde dat `finalize_recovery` "ook alle extra
+passkeys/sessies" wist. Tegen de code (`instructions.rs:1640-1688`) geverifieerd, niet
+aangenomen: de PASSKEY-helft van die claim klopt gewoon - `passkeys.count = 0` en
+`additional_passkeys` volledig op nul, een echte wipe. De SESSIE-helft klopt niet meer
+sinds B2: er wordt niets gewist of gesloten, `wallet.session_epoch` wordt met 1 verhoogd,
+en elke bestaande `SessionKeyAccount` (met de oude epoch) faalt vanaf dat moment zijn
+epoch-check in de drie `_via_session`-instructies met `SessionRevokedByRecovery` - het
+account zelf blijft gewoon op de chain staan, met rent en al, tot iemand het actief opruimt
+via `remove_session_key`, `close_session` of (na expiry) `close_expired_session`. Voor een
+project waarin PDA-levensduur/rent-boekhouding er al op meerdere andere plekken toe doet
+(o.a. de 50/50-rentsplitsing in `hunt`) is dat een reeel, geen cosmetisch onderscheid.
+
+Gecorrigeerd:
+- Regel 85 (instructietabel): "wist alle extra passkeys, maakt bestaande sessiesleutels
+  ongeldig (epoch-verhoging, sluit ze niet)".
+- Regel 240-242 ("Veiligheidsprincipes"): dezelfde precisie toegevoegd - de
+  passkey-wipe-zin ongewijzigd gelaten (die klopte al), een nieuwe zin toegevoegd die het
+  session-epoch-mechanisme correct beschrijft, inclusief WELKE drie instructies opgeruimd
+  moeten worden om een oude sessie daadwerkelijk van de chain te krijgen.
+
+**Rest van README.md nagelopen op vergelijkbare FASE-B-schade (expliciet gevraagde scope:
+instructietabel + alles over sessieduur/recovery), niets anders gevonden:**
+- Sessieduur-claims (regel 6, 27, 86, 89, 237: "slot-gebonden expiry") blijven waar na B3 -
+  B3 voegde een BOVENGRENS toe aan hoe ver `expiry_slot` in de toekomst mag liggen
+  (`MAX_SESSION_DURATION_SLOTS`), maar verandert niets aan het feit dat het mechanisme
+  slot-gebonden is. Geen tegenspraak, geen wijziging nodig.
+- De overige recovery-claims (72u-timelock, owner-veto via `cancel_recovery`,
+  backup-authority-ondertekening) zijn door B1-B7 niet geraakt - ongewijzigd correct.
+- De "Elke gevoelige actie bindt zijn volledige, relevante parameters"-veiligheidsprincipe
+  (regel 248-250) is door B4-B6 juist STERKER waar geworden (die fixes losten precies
+  gevallen op waar dat nog niet zo was: `rent_destination` in `hunt`, `vault_token_account`
+  in `transfer_token`, `payer` in `remove_session_key`) - geen aanpassing nodig.
+
+**Buiten de gevraagde scope, wel gevonden en meteen gefixt omdat het triviaal en puur
+feitelijk is:** regel 117 ("Anchor-tests (49/49 groen)") was een sterk verouderd getal van
+ver vóór dit hele FASE-A/B/C-traject. Bijgewerkt naar "80 passing, 2 pending, 0 failing -
+zie STATUS.md sectie 78" (het exacte, zojuist geverifieerde resultaat, zie PUNT 2 hierboven).
+D3 (de Tauri-CSP-notitie) blijft bewust in FASE D staan, zoals afgesproken - dat is een
+vooruitblik, geen onjuistheid.

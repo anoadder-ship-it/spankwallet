@@ -82,7 +82,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | remove_passkey                  | Een van de al geldige passkeys        | Passkey intrekken (lockout-beschermd: nooit de laatste verwijderen) |
 | initiate_recovery                | Backup authority                     | Recovery starten                                                    |
 | cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren                                                   |
-| finalize_recovery                | Permissionless (na timelock)          | Recovery afronden, wist ook alle extra passkeys/sessies              |
+| finalize_recovery                | Permissionless (na timelock)          | Recovery afronden: wist alle extra passkeys, maakt bestaande sessiesleutels ongeldig (epoch-verhoging, sluit ze niet) |
 | add_session_key                  | Een van de al geldige passkeys        | Tijdelijke session key registreren (scope + slot-gebonden expiry)   |
 | remove_session_key               | Een van de al geldige passkeys        | Session key vroegtijdig intrekken                                    |
 | close_session                    | De session key zelf                   | Eigen sessie zelf sluiten, rent terug (enige zelfstandige actie)     |
@@ -114,7 +114,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (49/49 groen)
+tests/                        - Anchor-tests (80 passing, 2 pending, 0 failing - zie STATUS.md sectie 78)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -238,8 +238,13 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
   zichzelf nooit verlengen of nieuwe bevoegdheid creeren - alleen aanmaken/intrekken via een
   echte passkey.
 - Recovery heeft een 72u-timelock + owner-veto (cancel_recovery), en wist bij succes de
-  volledige extra-passkey-set - geen stale, mogelijk-gecompromitteerde sleutels overleven
-  een recovery.
+  volledige extra-passkey-set - geen stale, mogelijk-gecompromitteerde passkeys overleven
+  een recovery. Bestaande sessiesleutels worden bij diezelfde finalize_recovery NIET
+  gewist of gesloten, maar wel meteen ongeldig: een wallet-brede session_epoch-teller
+  verhoogt, en elke `_via_session`-instructie tegen een sessie met een oudere epoch faalt
+  vanaf dat moment met `SessionRevokedByRecovery` - de accounts zelf blijven bestaan tot
+  ze via `remove_session_key`, `close_session` of `close_expired_session` daadwerkelijk
+  opgeruimd worden.
 - Elke gevoelige actie bindt zijn volledige, relevante parameters in de ondertekende
   challenge (nooit alleen een deel) - voorkomt dat een geldige handtekening voor iets anders
   hergebruikt kan worden dan waarvoor hij bedoeld was.

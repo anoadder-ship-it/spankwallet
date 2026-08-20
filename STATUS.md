@@ -5730,14 +5730,38 @@ risico in `scripts/build-and-deploy.sh`'s eigen waarschuwing, hier voor het eers
 daadwerkelijk tegengekomen). Opgelost met een geforceerde `touch` + rebuild, empirisch
 bevestigd via het `.so`-bestand's mtime.
 
-**Structureel gemaakt (niet alleen het incident beschreven, ook wat er veranderd is om het
-onmogelijk te maken):** `tests/verifyBinaryFresh.ts` (nieuw bestand) draait op
-module-niveau - dus synchroon, bij import, VOOR er ook maar één test start - en wordt
-geïmporteerd door `tests/webauthnTestHelper.ts`, dat elk testbestand in de suite al
-importeerde. Dat maakt de check onvermijdelijk voor elke testrun via `tests/**/*.ts`,
-ongeacht het exacte aanroepcommando (rechtstreeks `ts-mocha`, `yarn test`, `anchor test`) -
-een losse pre-test-npm-script zou overgeslagen kunnen worden door mocha rechtstreeks aan te
-roepen; dit niet. De check vergelijkt de mtime van `target/deploy/spankwallet.so` tegen de
+**Eerste versie, en waarom die niet structureel genoeg was.** `tests/verifyBinaryFresh.ts`
+(nieuw bestand) draaide aanvankelijk op module-niveau bij import, geïmporteerd door
+`tests/webauthnTestHelper.ts` - vandaag importeert ELK bestaand testbestand die module
+(gecontroleerd, niet aangenomen: `tests/actionNonce.ts`, `tests/hunt.ts`,
+`tests/m2_fix_verify.ts`, `tests/passkeys.ts`, `tests/policy.ts`, `tests/recovery.ts`,
+`tests/replay_execute.ts`, `tests/sessionKeys.ts`, `tests/spankwallet.ts`,
+`tests/transferToken.ts`, `tests/writability_check.ts` - alle elf), dus voor de HUIDIGE suite
+werkte dit. Maar dat is een eigenschap van de huidige bestanden, geen garantie: een toekomstig
+testbestand dat de helper niet nodig heeft (bijv. een pure state-/serialisatietest zonder
+WebAuthn) zou de controle stilzwijgend omzeild hebben - precies dezelfde soort
+gewoonte-afhankelijkheid als het handmatige `touch`-en-rebuild dat EIS 1 in de eerste plaats
+noodzakelijk maakte.
+
+**Verplaatst naar `.mocharc.yml`'s `require`** (nieuw bestand op de repo-root): laadt
+`tests/verifyBinaryFresh.ts` ALTIJD vóór mocha ook maar één testbestand laadt, onafhankelijk
+van welke bestanden de suite bevat of wat ze zelf importeren - de import in
+`webauthnTestHelper.ts` is verwijderd, dit is nu de enige, autoritatieve plek.
+
+**Empirisch bevestigd dat dit standhoudt voor een bestand dat de helper niet importeert:**
+een tijdelijk testbestand `tests/_puntt4TempProbe.ts` aangemaakt dat UITSLUITEND `chai`
+importeert (geen `webauthnTestHelper`, geen enkele WebAuthn-gerelateerde import), daarna:
+(1) de binary bewust verouderd (`touch programs/spankwallet/src/lib.rs`, daarna GEEN
+rebuild), (2) `ts-mocha` uitsluitend tegen dit ene bestand gedraaid - reële procesexitcode
+1, harde `BINARY-VERSHEIDSCONTROLE FAALDE`-fout, de triviale test in het bestand kwam nooit
+aan bod; (3) daarna een echte rebuild + deploy, hetzelfde bestand opnieuw gedraaid -
+exitcode 0, de triviale test slaagde gewoon. Bestand na het experiment weer verwijderd (nooit
+gecommit). Volledige suite (`tests/**/*.ts`, alle bestaande bestanden) daarna herhaald ter
+controle dat niets anders brak: nog steeds 75 passing/0 failing/2 pending, de check-melding
+verschijnt nu precies éénmaal (voorheen soms tweemaal, een bijwerking van de eerdere
+import-gebaseerde opzet onder mocha's CJS/ESM-detectie).
+
+De check zelf vergelijkt de mtime van `target/deploy/spankwallet.so` tegen de
 nieuwste mtime onder `programs/spankwallet/src/` (recursief) en gooit een harde fout met
 concrete rebuild-instructies zodra de binary ouder is. Bij een geslaagde check print hij de
 sha256 van de binary naar stderr. Beide richtingen empirisch bevestigd tijdens het bouwen:

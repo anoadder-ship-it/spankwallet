@@ -1,7 +1,10 @@
-// EIS 1 (STATUS.md sectie 76/77): loopt bij import mee, VOOR elke test -
-// zie verifyBinaryFresh.ts voor de volledige onderbouwing. Alle testbestanden
-// importeren van deze module, dus dit geldt universeel voor de hele suite.
-import "./verifyBinaryFresh";
+// EIS 1 (STATUS.md sectie 76/77): de binary-versheidscontrole hing hier
+// eerder als side-effect-import - werkte zolang elk testbestand deze module
+// toevallig importeerde, maar een toekomstig testbestand dat dat niet doet
+// (bijv. een pure state-/serialisatietest) zou de controle stilzwijgend
+// hebben omzeild. Verplaatst naar .mocharc.yml's `require` (laadt
+// tests/verifyBinaryFresh.ts ALTIJD vóór elk testbestand, ongeacht wat de
+// suite bevat) - zie STATUS.md sectie 76/77 voor het empirische bewijs.
 
 import { p256 } from "@noble/curves/p256";
 import { keccak_256 } from "@noble/hashes/sha3";

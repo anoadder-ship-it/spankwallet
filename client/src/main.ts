@@ -1646,21 +1646,26 @@ async function runStep16(): Promise<void> {
     log("vereist ALTIJD een echte passkey-handtekening (het wijzigt WIE toegang");
     log("heeft), zelfs al is de sessiesleutel zelf geen passkey.");
 
+    // PUNT C1 (STATUS.md sectie 78): scope komt rechtstreeks van
+    // sessionChoice (teruggegeven door showAddSessionKeyPreview, dezelfde
+    // scope waarop de kaart zijn risicoklasse baseerde) - GEEN losse,
+    // opnieuw getypte true/false/[]-literals meer, die konden stilzwijgend
+    // uit de pas lopen met wat de kaart daadwerkelijk toonde.
     const { transaction, sessionPda } = await buildAddSessionKeyTransaction(
       connection,
       lastWallet.publicKey,
       lastPdas.walletPda,
       sessionKeypair.publicKey,
       expirySlot,
-      true,
-      false,
-      false,
-      [],
+      sessionChoice.canExecute,
+      sessionChoice.canTransferToken,
+      sessionChoice.canExecuteAdvanced,
+      sessionChoice.sessionAllowedPrograms,
       sessionChoice.maxLamportsPerTx,
       sessionChoice.maxLamportsTotal,
-      PublicKey.default,
-      0n,
-      0n,
+      sessionChoice.tokenMint,
+      sessionChoice.maxTokenAmountPerTx,
+      sessionChoice.maxTokenAmountTotal,
       lastPasskeyPublicKey,
       lastCredentialId,
       window.location.hostname

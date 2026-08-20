@@ -27,16 +27,40 @@ export interface AddSessionKeyPreviewChoice {
   maxLamportsTotal: bigint;
   maxTokenAmountPerTx: bigint;
   maxTokenAmountTotal: bigint;
+  // PUNT C1 (STATUS.md sectie 78): de exacte scope waarmee DEZE kaart is
+  // opgebouwd en waarop de getoonde risicoklasse is gebaseerd, teruggegeven
+  // zodat de aanroeper deze rechtstreeks kan doorgeven aan
+  // buildAddSessionKeyTransaction() i.p.v. de scope een tweede keer als
+  // losse literals te herhalen. Twee onafhankelijke, met de hand
+  // gesynchroniseerde kopieen van dezelfde scope zijn precies het gat
+  // waardoor de kaart iets anders kan tonen dan wat uiteindelijk
+  // ondertekend wordt - zie de aanroep in main.ts vóór deze fix.
+  canExecute: boolean;
+  canTransferToken: boolean;
+  canExecuteAdvanced: boolean;
+  sessionAllowedPrograms: PublicKey[];
+  tokenMint: PublicKey;
 }
 
 /**
  * Menselijk-leesbare bevestigingskaart voor add_session_key - STATUS.md
- * sectie 58/59/64, laatste MIDDEN-risicoklasse-kaart. Het risico van deze
- * instructie is BEGRENSD door de caps die hier zelf ingesteld worden
- * (spend-limits-ontwerpdocument, sectie 53) - vandaar dat de caps de
- * headline zijn, niet een detail, en waarom dit MIDDEN blijft (geen
- * hold-to-confirm) i.p.v. HOOG: een sessie kan nooit meer doen dan wat hier
- * expliciet wordt toegestaan.
+ * sectie 58/59/64/78. Risicoklasse volgt uit canExecuteAdvanced: HOOG met
+ * hold-to-confirm zodra de sessie CPI naar een toegestaan extern programma
+ * mag doen, anders MIDDEN met een gewone klik.
+ *
+ * BELANGRIJKE BEPERKING, niet langer verzwegen (was eerder hier als
+ * garantie geframed - klopte niet meer zodra canExecuteAdvanced true is):
+ * de caps die deze kaart toont (max_lamports_per_tx/total,
+ * max_token_amount_per_tx/total) begrenzen UITSLUITEND execute_via_session
+ * en transfer_token_via_session. execute_advanced_via_session kent GEEN
+ * spend-cap - CPI-instructiedata is ondoorzichtig, er is geen generiek
+ * "bedrag" om te begrenzen, een bewuste, vastgelegde beperking (STATUS.md
+ * sectie 53, "execute_advanced_via_session blijft bewust ONVERANDERD").
+ * Zodra canExecuteAdvanced true is, gelden de getoonde maxima dus NIET voor
+ * waarde die via een toegestaan programma wordt bewogen - vandaar de
+ * expliciete waarschuwingsregel in het scope-blok hieronder én de
+ * HOOG-risicoklasse met hold-to-confirm, in plaats van de MIDDEN-klasse die
+ * de caps als volledige begrenzing suggereert.
  *
  * Scope (canExecute/canTransferToken/canExecuteAdvanced + de execute_
  * advanced-sub-allowlist) is een VASTE, door de aanroepende code
@@ -91,8 +115,17 @@ export async function showAddSessionKeyPreview(
     );
   }
 
+  // PUNT C1 (STATUS.md sectie 78): risicoklasse volgt uit de daadwerkelijke
+  // scope, niet uit een los besliste vlag - canExecuteAdvanced is hetzelfde
+  // veld dat hierboven in scopeLines getoond wordt en dat hieronder in
+  // AddSessionKeyPreviewChoice teruggegeven wordt aan de aanroeper.
+  const isHighRisk = canExecuteAdvanced;
+
   const result = await showConfirmationCard({
     eyebrow: "Voorstel om te ondertekenen",
+    tone: isHighRisk ? "danger" : "default",
+    friction: isHighRisk ? "hold" : "click",
+    confirmLabel: isHighRisk ? "Ingedrukt houden om te registreren" : undefined,
     headline: (v) => {
       const durationSlots = /^\d+$/.test(v.durationSlots.trim()) ? BigInt(v.durationSlots.trim()) : null;
       const durationLine =
@@ -123,6 +156,7 @@ export async function showAddSessionKeyPreview(
           Token versturen: <strong>${canTransferToken ? "JA" : "NEE"}</strong><br />
           execute_advanced (extern programma aanroepen): <strong>${canExecuteAdvanced ? "JA" : "NEE"}</strong>
           ${canExecuteAdvanced ? "<br />Toegestane programma's: " + escapeHtml(sessionAllowedPrograms.map((p) => p.toBase58()).join(", ") || "(geen)") : ""}
+          ${canExecuteAdvanced ? '<br /><strong>Let op: de maxima hierboven gelden NIET voor execute_advanced_via_session - een CPI naar een toegestaan programma kent geen spend-cap (STATUS.md sectie 53).</strong>' : ""}
         </div>`;
 
       return `
@@ -178,5 +212,14 @@ export async function showAddSessionKeyPreview(
     maxLamportsTotal: canExecute ? BigInt(result.maxLamportsTotal) : 0n,
     maxTokenAmountPerTx: canTransferToken ? BigInt(result.maxTokenAmountPerTx) : 0n,
     maxTokenAmountTotal: canTransferToken ? BigInt(result.maxTokenAmountTotal) : 0n,
+    // PUNT C1: exact de scope waarmee deze kaart is opgebouwd - de
+    // aanroeper geeft dit door aan buildAddSessionKeyTransaction() i.p.v.
+    // canExecute/canTransferToken/canExecuteAdvanced/sessionAllowedPrograms
+    // een tweede keer te herhalen.
+    canExecute,
+    canTransferToken,
+    canExecuteAdvanced,
+    sessionAllowedPrograms,
+    tokenMint,
   };
 }

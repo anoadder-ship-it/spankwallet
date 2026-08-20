@@ -6,9 +6,7 @@ mod state;
 
 use instructions::*;
 
-// Vervang deze ID door je eigen program-keypair bij eerste deploy.
-// Genereren: solana-keygen new --out active-defense-keypair.json
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+declare_id!("9W3CGKhd7hgywf3xfP8snNmB2AgmzwQ3rdDFDV3hUurK");
 
 #[program]
 pub mod active_defense {

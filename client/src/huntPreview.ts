@@ -11,12 +11,24 @@ export type HuntPreviewResult =
 
 /**
  * Menselijk-leesbare bevestigingskaart voor hunt - STATUS.md sectie 73, de
- * laatste LAAG-risicoklasse-kaart (sluit UI-fase 1 af). Anders dan de meeste
- * LAAG-kaarten IS dit een instructie die on-chain zelf geen
- * `recovery_state.is_none()`-constraint heeft (instructions.rs::Hunt,
- * nagelezen, niet aangenomen) - de kaart voegt daarom bewust GEEN
- * kunstmatige recovery-in-progress-weigering toe die het echte on-chain
- * gedrag niet weerspiegelt.
+ * laatste LAAG-risicoklasse-kaart (sluit UI-fase 1 af).
+ *
+ * CORRECTIE (PUNT C2, STATUS.md sectie 78): deze kaart claimde eerder dat
+ * `Hunt` on-chain GEEN `recovery_state.is_none()`-constraint heeft, als
+ * verklaring waarom hier bewust geen pre-flight recovery-in-progress-check
+ * zit. Dat klopte tot en met FASE A, maar B4 (statische-audit-bevinding A4)
+ * heeft die constraint sindsdien juist TOEGEVOEGD - hunt was destijds de
+ * ENIGE passkey-gated instructie die hem miste, en juist de meest
+ * onomkeerbare (verbrandt de volledige balans, geen spam-criterium). Deze
+ * kaart geeft dus nu geen vroege waarschuwing voor een geval dat on-chain
+ * wél wordt geweigerd (`RecoveryAlreadyInProgress`) - functioneel onschadelijk
+ * (de aanroep faalt alsnog, gewoon pas on-chain in plaats van hier), maar
+ * een inconsistentie t.o.v. removeSessionKeyPreview.ts/
+ * removeAllowedProgramPreview.ts die dit wel pre-flight controleren. Niet
+ * stilzwijgend hersteld naar "wel een pre-flight check" - dat is een
+ * gedragswijziging (nieuwe `would-fail`-tak + main.ts-aanpassing), hier
+ * bewust alleen de foutieve claim gecorrigeerd; zie STATUS.md sectie 78 voor
+ * de open-punt-status.
  *
  * `rent_destination` is on-chain een kale, niet-vastgepinde SystemAccount,
  * maar de bestaande `buildHuntTransaction` (hunt.ts) gebruikt daar altijd

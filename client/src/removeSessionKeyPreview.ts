@@ -99,6 +99,7 @@ export async function showRemoveSessionKeyPreview(
       Token versturen: <strong>${session.canTransferToken ? "JA" : "NEE"}</strong><br />
       execute_advanced (extern programma aanroepen): <strong>${session.canExecuteAdvanced ? "JA" : "NEE"}</strong>
       ${session.canExecuteAdvanced ? "<br />Toegestane programma's: " + escapeHtml(session.allowedPrograms.map((p) => p.toBase58()).join(", ") || "(geen)") : ""}
+      ${session.canExecuteAdvanced ? '<br /><strong>Let op: het getoonde resterende budget hierboven gold NOOIT voor execute_advanced_via_session - een CPI naar een toegestaan programma kent geen spend-cap (STATUS.md sectie 53). Deze sessie kon dus meer dan de caps alleen suggereren.</strong>' : ""}
     </div>`;
 
   const result = await showConfirmationCard({

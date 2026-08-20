@@ -290,7 +290,11 @@ export async function buildRemoveSessionKeyTransaction(
   const sessionPda = deriveSessionPda(walletPda, sessionKey);
 
   const nonce = await readActionNonce(connection, walletPda);
-  const payload = concatBytes(actionNonceLeBytes(nonce), sessionKey.toBytes());
+  // B7 (STATUS.md sectie 76/77): payer (ontvanger van de teruggewonnen
+  // session-rent via close = payer) nu gebonden - moet exact in dezelfde
+  // volgorde als instructions.rs::remove_session_key, anders faalt de
+  // handtekeningverificatie structureel (WebAuthnChallengeMismatch).
+  const payload = concatBytes(actionNonceLeBytes(nonce), sessionKey.toBytes(), payer.toBytes());
   const expectedChallenge = buildExpectedChallenge(walletPda, "remove_session_key", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(

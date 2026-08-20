@@ -14,7 +14,10 @@ function base64urlEncode(bytes: Uint8Array): string {
 }
 
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
-  const digest = await crypto.subtle.digest("SHA-256", data);
+  // EIS 2 (STATUS.md sectie 76/77) - zelfde reden als initWallet.ts::sha256:
+  // een echte kopie naar een gegarandeerd vers ArrayBuffer, geen
+  // type-only-onderdrukking.
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(data));
   return new Uint8Array(digest);
 }
 
@@ -25,13 +28,17 @@ export async function signWithPasskey(
 ): Promise<WebAuthnSignResult> {
   const challengeBase64url = base64urlEncode(expectedChallenge);
 
+  // EIS 2 (STATUS.md sectie 76/77) - zelfde reden als sha256() hierboven:
+  // navigator.credentials.get()'s BufferSource-velden (challenge, elke
+  // allowCredentials[].id) krijgen hier echte kopieën, geen type-only-
+  // onderdrukking.
   const assertion = (await navigator.credentials.get({
     publicKey: {
-      challenge: expectedChallenge,
+      challenge: new Uint8Array(expectedChallenge),
       rpId,
       allowCredentials: [
         {
-          id: credentialId,
+          id: new Uint8Array(credentialId),
           type: "public-key",
         },
       ],

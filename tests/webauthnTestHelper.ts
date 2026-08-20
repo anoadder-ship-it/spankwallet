@@ -1,3 +1,8 @@
+// EIS 1 (STATUS.md sectie 76/77): loopt bij import mee, VOOR elke test -
+// zie verifyBinaryFresh.ts voor de volledige onderbouwing. Alle testbestanden
+// importeren van deze module, dus dit geldt universeel voor de hele suite.
+import "./verifyBinaryFresh";
+
 import { p256 } from "@noble/curves/p256";
 import { keccak_256 } from "@noble/hashes/sha3";
 import { createHash, randomBytes } from "crypto";

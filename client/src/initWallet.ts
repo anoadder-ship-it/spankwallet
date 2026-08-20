@@ -18,7 +18,15 @@ const INIT_WALLET_DISCRIMINATOR = Uint8Array.from([
 ]);
 
 async function sha256(data: Uint8Array): Promise<Uint8Array> {
-  const digest = await crypto.subtle.digest("SHA-256", data);
+  // EIS 2 (STATUS.md sectie 76/77): SubtleCrypto.digest()'s BufferSource-
+  // type sluit sinds een recentere TS-lib-versie SharedArrayBuffer-
+  // ondersteunde views uit (Uint8Array is generiek geworden over zijn
+  // buffer-type). `data` komt hier altijd van een vers, gewoon
+  // ArrayBuffer-backed Uint8Array (nooit SharedArrayBuffer, nergens in dit
+  // project), maar de PARAMETERTYPE zelf is dat niet gegarandeerd. `new
+  // Uint8Array(data)` kopieert naar een gegarandeerd vers ArrayBuffer -
+  // een echte fix (correcte runtime-garantie), geen type-only-onderdrukking.
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(data));
   return new Uint8Array(digest);
 }
 

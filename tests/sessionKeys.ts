@@ -465,14 +465,24 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       .rpc();
   }
 
+  // B7 (STATUS.md sectie 76/77): payer nu gebonden in de payload.
+  // `signAsPayer` laat toe om een AFWIJKENDE payer te ondertekenen dan wat
+  // daadwerkelijk in de instructie terechtkomt - alleen gebruikt door de
+  // manipulatietest.
   async function callRemoveSessionKey(
     signingPasskey: TestPasskey,
     walletPda: PublicKey,
     passkeysPda: PublicKey,
-    sessionKey: PublicKey
+    sessionKey: PublicKey,
+    payer: PublicKey = provider.wallet.publicKey,
+    signAsPayer?: PublicKey
   ) {
     const nonce = await fetchActionNonce(provider.connection, walletPda);
-    const payload = Buffer.concat([nonceLeBytes(nonce), sessionKey.toBuffer()]);
+    const payload = Buffer.concat([
+      nonceLeBytes(nonce),
+      sessionKey.toBuffer(),
+      (signAsPayer ?? payer).toBuffer(),
+    ]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
@@ -494,7 +504,7 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       .accounts({
         wallet: walletPda,
         session: deriveSessionPda(walletPda, sessionKey),
-        payer: provider.wallet.publicKey,
+        payer,
         passkeys: passkeysPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
@@ -1492,6 +1502,96 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       threw = true;
     }
     assert.isTrue(threw, "execute_via_session na remove_session_key had moeten falen");
+  });
+
+  it("[B7] een afwijkende payer t.o.v. wat ondertekend werd, maakt de handtekening ongeldig (WebAuthnChallengeMismatch)", async () => {
+    const { passkey, walletPda, passkeysPda, policyPda } = await createWallet();
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      true,
+      false,
+      false
+    );
+
+    // Een TWEEDE, echt gefunde keypair die ook daadwerkelijk mede-
+    // ondertekent (payer MOET signer zijn - dit is geen "vrije, niet-
+    // consenterende derde"-scenario, maar simuleert wel dat de
+    // daadwerkelijke ontvanger van de rent afwijkt van wat de passkey-
+    // handtekening beweerde te autoriseren).
+    const actualPayer = Keypair.generate();
+    await provider.sendAndConfirm(
+      new anchor.web3.Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: provider.wallet.publicKey,
+          toPubkey: actualPayer.publicKey,
+          lamports: 10_000_000,
+        })
+      )
+    );
+
+    let threw = false;
+    let errorMessage = "";
+    try {
+      const nonce = await fetchActionNonce(provider.connection, walletPda);
+      const payload = Buffer.concat([
+        nonceLeBytes(nonce),
+        sessionKeypair.publicKey.toBuffer(),
+        provider.wallet.publicKey.toBuffer(), // ondertekend alsof payer = provider.wallet
+      ]);
+      const expectedChallenge = buildExpectedChallenge(
+        program.programId,
+        walletPda,
+        "remove_session_key",
+        payload
+      );
+      const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
+        passkey,
+        expectedChallenge
+      );
+      const secp256r1Ix = buildSecp256r1Instruction(
+        passkey.compressedPublicKey,
+        signedMessage,
+        rawSignature
+      );
+
+      // Daadwerkelijke instructie gebruikt actualPayer (die WEL mede-
+      // ondertekent), niet provider.wallet.publicKey waarmee de challenge
+      // hierboven is opgebouwd.
+      await program.methods
+        .removeSessionKey(sessionKeypair.publicKey, new BN(nonce.toString()), clientDataJSON)
+        .accounts({
+          wallet: walletPda,
+          session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+          payer: actualPayer.publicKey,
+          passkeys: passkeysPda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .signers([actualPayer])
+        .preInstructions([secp256r1Ix])
+        .rpc();
+    } catch (err) {
+      threw = true;
+      errorMessage = err.toString();
+    }
+    assert.isTrue(
+      threw,
+      "FIX GEVERIFIEERD: een afwijkende payer had de handtekening ongeldig moeten maken"
+    );
+    assert.include(errorMessage, "WebAuthnChallengeMismatch");
+
+    // De sessie is niet aangeraakt - de aanval faalde volledig.
+    const sessionInfo = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypair.publicKey)
+    );
+    assert.isNotNull(sessionInfo, "de sessie had onaangeraakt moeten blijven");
   });
 
   it("close_session: de sessiesleutel zelf sluit haar eigen account en claimt de rent, zonder passkey", async () => {

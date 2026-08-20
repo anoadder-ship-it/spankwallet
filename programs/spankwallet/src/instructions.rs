@@ -1948,9 +1948,23 @@ pub fn remove_session_key(
 ) -> Result<()> {
     let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
 
-    let mut payload = Vec::with_capacity(8 + 32);
+    // B7 (STATUS.md sectie 76/77, uitgeschreven vóór besluit): payer
+    // (ontvanger van de teruggewonnen session-rent via `close = payer`) was
+    // niet gebonden. payer moet al mede-ondertekenen (geen vrije keuze voor
+    // een niet-consenterende derde), maar bindt "ik keur remove_session_key
+    // goed" niet aan "en deze specifieke rekening krijgt de rent" - dezelfde
+    // categorie afwijking van "één handtekening = één volledig
+    // gespecificeerde actie" als B5/B6. Kosten van binden bleken bij nader
+    // uitschrijven laag: de enige bestaande client (client/src/sessionKeys.ts)
+    // gebruikt payer altijd óók als feePayer - geen sponsor-/relay-patroon
+    // bestaat vandaag, en een toekomstig sponsor-patroon zou zijn eigen
+    // adres sowieso al moeten kennen vóór de handtekening gevraagd wordt, dus
+    // binden blokkeert dat niet. Conclusie omgeslagen van "bewust
+    // geaccepteerd" naar "alsnog gebonden".
+    let mut payload = Vec::with_capacity(8 + 32 + 32);
     payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(session_key.as_ref());
+    payload.extend_from_slice(ctx.accounts.payer.key().as_ref());
 
     let expected_challenge =
         build_expected_challenge(&ctx.accounts.wallet.key(), b"remove_session_key", &payload);

@@ -6068,3 +6068,173 @@ heeft al toegang tot de repo zelf (en de lokale, ongepushte exploit-details erin
 Versleuteling wordt pas een echte extra beveiligingslaag zodra er daadwerkelijk een kopie
 van deze machine af gaat - dat is een aparte, nog niet genomen beslissing, geen onderdeel van
 deze same-disk-bundle.
+
+## 79. FASE C: client-side risicoclassificatie + D3 (Tauri-CSP, gedocumenteerd) + eindoverzicht
+
+Nog steeds: geen programmawijziging, geen deploy, geen buffer, geen nieuw Squads-voorstel,
+voorstel #10 onaangeraakt, geen push.
+
+### C1: `add_session_key`-kaart - risicoklasse volgt nu uit `canExecuteAdvanced`
+
+De kaart motiveerde MIDDEN-risico (gewone klik, geen hold-to-confirm) met de claim dat een
+sessie "nooit meer kan doen dan wat hier expliciet wordt toegestaan" - de caps als headline.
+Die claim faalt zodra `canExecuteAdvanced` true is: `execute_advanced_via_session` kent GEEN
+spend-cap (bewuste beperking, sectie 53: "CPI-instructiedata is ondoorzichtig, er is geen
+generiek bedrag om te begrenzen"). De getoonde maxima begrenzen dan alleen
+`execute_via_session`/`transfer_token_via_session`, niet de CPI-bevoegdheid van dezelfde
+sessie.
+
+**Gefixt:** risicoklasse volgt nu uit `canExecuteAdvanced` - HOOG met hold-to-confirm
+(hergebruik van het bestaande `confirmationCard.ts`-primitief, `friction: "hold"`/
+`tone: "danger"`, geen tweede implementatie gebouwd) zodra true, MIDDEN/klik zoals voorheen
+zodra false. Expliciete waarschuwingsregel toegevoegd in het scope-blok bij
+`canExecuteAdvanced`. Doc-commentaar herschreven zodat het geen garantie meer claimt die
+niet bestaat, met verwijzing naar sectie 53.
+
+**Het punt waar dit makkelijk misgaat, expliciet geborgd:** risicoklasse moet volgen uit de
+daadwerkelijke, ondertekende scope - niet uit een los meegegeven vlag die uit de pas kan
+lopen. Bij nazoeken bleek dit GEEN hypothetisch risico: `main.ts`'s stap-16-aanroep gaf
+`canExecute`/`canTransferToken`/`canExecuteAdvanced`/`sessionAllowedPrograms` als LOSSE
+literals aan zowel `showAddSessionKeyPreview()` (voor de kaart) als, een paar regels verderop,
+aan `buildAddSessionKeyTransaction()` (voor de handtekening) - twee onafhankelijke, met de
+hand gesynchroniseerde kopieën van dezelfde scope. Gefixt door de scope niet meer te
+herhalen: `AddSessionKeyPreviewChoice` geeft nu de exacte scope terug waarop de kaart zijn
+risicoklasse baseerde, en `main.ts` geeft die teruggegeven waarden door aan
+`buildAddSessionKeyTransaction()` in plaats van een tweede keer te typen. Structureel
+geborgd (dezelfde waarde stroomt door), niet alleen visueel gecontroleerd.
+
+`tsc --noEmit` (client): exitcode 0. Gecommit als `8855093`.
+
+### C2: audit van alle 11 bevestigingskaarten tegen `instructions.rs` ná FASE B
+
+Elke kaart getoetst tegen de instructie zoals die NU in `instructions.rs` staat, niet tegen
+hoe de kaart bedoeld was - inclusief zowel zichtbare kaarttekst als doc-commentaar.
+Gecontroleerd: `addAllowedProgramPreview.ts`, `addPasskeyPreview.ts`,
+`addSessionKeyPreview.ts` (al gefixt in C1), `cancelRecoveryPreview.ts`,
+`executeAdvancedPreview.ts`, `executePreview.ts`, `huntPreview.ts`,
+`removeAllowedProgramPreview.ts`, `removePasskeyPreview.ts`, `removeSessionKeyPreview.ts`,
+`transferTokenPreview.ts` - alle 11.
+
+**Twee bevindingen, dezelfde soort fout als C1, beide gefixt:**
+
+1. **`huntPreview.ts`'s doc-commentaar** claimde dat `Hunt` on-chain GEEN
+   `recovery_state.is_none()`-constraint heeft, als expliciete verklaring waarom de kaart
+   bewust geen pre-flight recovery-in-progress-check bouwt. Tegen `instructions.rs::Hunt`
+   gecontroleerd: dat klopte tot en met FASE A, maar B4 (STATUS.md sectie 76/77) heeft die
+   constraint sindsdien juist TOEGEVOEGD - `hunt` was destijds de enige passkey-gated
+   instructie die hem miste, en de meest onomkeerbare (verbrandt de volledige balans, geen
+   spam-criterium). De comment beweerde dus het tegenovergestelde van wat de code sinds B4
+   doet. Gecorrigeerd. De ONTBREKENDE pre-flight-check zelf (geen `"recovery-in-progress"`-
+   tak in `HuntPreviewResult`, in tegenstelling tot `RemoveSessionKeyPreviewResult`) is
+   functioneel onschadelijk - de aanroep wordt nog steeds on-chain geweigerd, alleen zonder
+   vroege melding - maar bewust NIET stilzwijgend als gedragswijziging meegenomen (een nieuwe
+   `would-fail`-tak + een `main.ts`-aanpassing is meer dan een doc-fix); genoteerd als open
+   punt hieronder.
+2. **`removeSessionKeyPreview.ts`** toonde "resterend budget" (max_lamports/token-caps) voor
+   een sessie met `canExecuteAdvanced=true` zonder te vermelden dat dat budget nooit gold
+   voor CPI via `execute_advanced_via_session` - exact dezelfde onderliggende fout als C1,
+   hier in de kaart die een sessie toont vóór intrekking i.p.v. de kaart die hem aanmaakt.
+   Zelfde waarschuwingsregel toegevoegd als in C1.
+
+**Negen andere kaarten gecontroleerd, geen bevindingen** (zodat dit een controleerbare
+uitspraak is, geen indruk):
+- `addAllowedProgramPreview.ts`/`removeAllowedProgramPreview.ts`: de geclaimde
+  on-chain-gegarandeerde afwijzingen (`SelfCpiNotAllowed`, `ProgramAlreadyAllowed`,
+  `AllowlistFull`, `ProgramNotAllowed`) stuk voor stuk tegen de exacte `require!`-regels in
+  `instructions.rs` gelegd - kloppen. `MAX_ALLOWED_PROGRAMS`-constante client (32) vs.
+  on-chain (`state.rs`, 32) - gelijk. `addAllowedProgramPreview.ts`'s eigen kaarttekst
+  waarschuwt bovendien al expliciet en correct dat toevoegen `execute_advanced` "met welke
+  accounts en instructiedata dan ook" toegang geeft - een goed bestaand voorbeeld van precies
+  de soort eerlijkheid die C1 elders miste.
+- `addPasskeyPreview.ts`/`removePasskeyPreview.ts`: lockout-bescherming
+  (`CannotRemoveLastPasskey`) en bestaanscontrole (`PasskeyNotRegistered`) exact tegen
+  `instructions.rs::remove_passkey`'s `total_before`/`owner_active_now`-logica gelegd -
+  klopt. `addPasskeyPreview.ts`'s "VOLLEDIGE, gelijkwaardige toegang"-claim geverifieerd
+  tegen `verify_passkey_signature_multi`: owner- en additional-passkeys zijn daadwerkelijk
+  gelijkwaardig voor elke passkey-gated instructie - klopt, door B1-B7 niet geraakt.
+- `cancelRecoveryPreview.ts`: puur timing-wiskunde (`initiated_at`+`recovery_timelock_seconds`),
+  geen handhavingsclaim die kan verouderen.
+- `executeAdvancedPreview.ts`: claimt bewust GEEN vertaling van CPI-data ("SpankWallet kan de
+  onderstaande ruwe data NIET naar mensentaal vertalen") - de allowlist-pre-check
+  (`ProgramNotAllowed`) klopt tegen `instructions.rs::ExecuteAdvanced`.
+- `executePreview.ts`/`transferTokenPreview.ts`: geen garantieclaims voorbij het getoonde
+  bedrag/de ontvanger zelf - door B1-B7 niet geraakt.
+
+`tsc --noEmit` (client): exitcode 0. Gecommit als `7f8d572`.
+
+### D3: Tauri-CSP - `window.__TAURI__` open voor alle frontend-JS (gedocumenteerd, NIET gebouwd)
+
+Alleen vastleggen, zoals afgesproken - geen fix, geen scope-aanpassing.
+
+Geverifieerd tegen de daadwerkelijke config (`desktop/src-tauri/tauri.conf.json`,
+`desktop/src-tauri/capabilities/default.json`, `desktop/src-tauri/src/lib.rs`), niet
+aangenomen:
+```json
+"app": {
+  "withGlobalTauri": true,
+  "security": { "csp": null }
+}
+```
+`capabilities/default.json` bevat alleen `core:default`/`opener:default` - GEEN
+per-commando-scoping (het HOOG/MIDDEN/LAAG-capability-ontwerp uit het oorspronkelijke
+Tauri-migratieplan, `capabilities/hoog.json` etc., is nog niet gebouwd). Tauri v2's
+ACL/capabilities-systeem beperkt vooral PLUGIN-commando's - eigen `#[tauri::command]`-
+functies die via `invoke_handler(tauri::generate_handler![...])` geregistreerd zijn (in
+`desktop/src-tauri/src/lib.rs`: `setup_fee_payer`, `unlock_fee_payer`,
+`request_fee_payer_airdrop`, `prepare_execute_challenge`, `execute_action`,
+`register_passkey`, `sign_with_passkey`) zijn met deze configuratie aanroepbaar door ELKE
+JavaScript die in de webview draait, via `window.__TAURI__.core.invoke(...)`.
+
+**Risico:** `csp: null` + `withGlobalTauri: true` betekent dat een gecompromitteerde
+frontend-afhankelijkheid (supply-chain) of een injectie in de webview niet alleen de UI zou
+kunnen vervalsen (al gemitigeerd door de challenge-herberekening in Rust, hoofdplan punt 1),
+maar rechtstreeks `unlock_fee_payer`/`execute_action` zelf zou kunnen aanroepen - zonder de
+gebruiker langs de bevestigingskaart te hoeven leiden. Voor fase 0 (één instructie, klein
+zichtoppervlak, geen echte fondsen op devnet-schaal) bewust geaccepteerd, maar een
+structurele opening die vóór fase 1 (de overige 18 instructies) dicht moet: een strikte CSP
++ het al ontworpen per-commando-capability-model (hoog/midden/laag.json).
+
+Vastgelegd als expliciet openstaand punt vóór Tauri-fase 1 - geen code hier veranderd.
+
+### Eindoverzicht
+
+**Gefixt (deze sessie, FASE A t/m FASE C + VOORAF A/B + D3-documentatie):**
+- FASE A: 4 statische-audit-bevindingen empirisch bevestigd (`33e2876`).
+- FASE B: B1-B7 geïmplementeerd en getest, inclusief de blokkade/3 eisen uit de review
+  (`47d23b8`, `95a4dcc`, `1f11b35`).
+- PUNT 4: binary-versheidscontrole structureel gemaakt via `.mocharc.yml` (`70065db`).
+- PUNT 1: disclosure-beleid in SECURITY.md (`236252c`).
+- PUNT 2: 4 Uint8Array-kopieerplekken per-site bewezen veilig + regressiebewaking (`fe4f05f`).
+- PUNT 3: README.md's `finalize_recovery`-claim gecorrigeerd (`4c914f2`).
+- VOORAF A: `admin/wallet-signer.html` schoongemaakt vóór de live #10-executie (`22265d6`).
+- VOORAF B: lokale git-bundle-backup, eerlijk afgebakend (`bedcd1e`, `423934e`).
+- C1: `add_session_key`-kaart, risicoklasse + structurele scope-borging (`8855093`).
+- C2: twee kaart-bevindingen gefixt, negen gecontroleerd zonder bevinding (`7f8d572`).
+
+**Bewust NIET gefixt, met reden (geen aanname, geen understatement):**
+- `huntPreview.ts` mist nog steeds een pre-flight recovery-in-progress-`would-fail`-tak
+  (alleen de foutieve claim daarover is gecorrigeerd) - functioneel onschadelijk (on-chain al
+  geweigerd), een gedragswijziging, geen doc-fix; open punt voor een volgende ronde.
+- D3 (Tauri-CSP/`window.__TAURI__`): bewust alleen gedocumenteerd, geen strikte CSP of
+  per-commando-capabilities gebouwd - expliciet vóór Tauri-fase 1 vereist, niet vóór fase 0's
+  enige instructie (`execute`).
+- PUNT 1's voorgestelde encrypted-bundle-backup (bij het daadwerkelijk van de machine af
+  laten gaan van een kopie): niet gebouwd, ligt bij de gebruiker.
+
+**Lokale commits (nog NIET gepusht, per SECURITY.md's nieuwe disclosure-beleid):**
+`33e2876` t/m `7f8d572` - 13 commits vanaf het laatste gepushte punt (`b6793f7`, geverifieerd
+via `git log --oneline origin/main..HEAD`). Bundel in
+`/home/michel/spankwallet-backups/` dekt commits t/m `423934e` (10 stuks) - nog niet
+geregenereerd na C1/C2, zie de aanbeveling in PUNT 1/VOORAF B om dit periodiek te doen.
+
+**Openstaand vóór een deploy:**
+- Voorstel #10 (spend-limits + C-1/action_nonce-fix) staat los van al het werk in deze sessie
+  - dat is een AL goedgekeurde, aparte upgrade, uitvoerbaar sinds 2026-08-20T15:08:23 UTC,
+  bewust onaangeraakt gelaten.
+- B1-B7 (FASE A/B/C's eigen fixes) zijn NOG NIET gedeployed - vereisen een eigen, toekomstig
+  Squads-voorstel + 72u-timelock, pas na expliciete toestemming (nog niet gegeven).
+- Bij die toekomstige deploy: de volledige migratie-impact van B2/B3 (LEN-wijzigingen,
+  sectie 77) blijft van toepassing - geen nieuwe impact deze ronde (C1/C2/D3 zijn puur
+  client-side/documentatie, D3 raakt zelfs geen gebouwde code).
+- Pushen naar de publieke remote blijft uit tot de gebruiker expliciet bevestigt dat de
+  bijbehorende upgrade live en geverifieerd is (SECURITY.md).

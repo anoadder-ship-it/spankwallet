@@ -5384,3 +5384,441 @@ deze wijziging).
 
 **Nog niet bewezen: de echte hardware-key-ceremonie met de nieuwe backend** - vereist de
 fysieke sleutel, alleen door de gebruiker uit te voeren.
+
+## 76. Statische audit (extern, ongecompileerd): 4 bevindingen, elk eerst empirisch bevestigd
+
+Een statische audit van de repo kwam binnen - niet gecompileerd, niet tegen een validator
+gedraaid. Elke bevinding is behandeld als een hypothese, niet als een feit: eerst een
+bewijs-test geschreven die de HUIDIGE, ongewijzigde code moest laten falen op precies de
+gestelde manier, pas daarna (FASE B) een fix. Aanleiding voor deze discipline: een
+ongecompileerde audit kan een reëel patroon correct herkennen maar de context verkeerd
+inschatten (bijv. een bewust gebruikt patroon aanzien voor de fout zelf, zie de nuance
+onder A1 hieronder) - alleen draaiende code tegen een echte validator telt als bewijs.
+
+**Werkwijze, per bevinding:** hypothese uitschrijven -> test die op de huidige code moet
+slagen als de hypothese klopt -> pas bij een geslaagde test (het lek is dan empirisch
+aangetoond, niet aangenomen) doorgaan naar de fix. Alle vier de tests zijn geschreven en
+gedraaid VOORDAT er ook maar één regel programmacode is aangepast (commit `33e2876`).
+
+### A1: `finalize_recovery`-wipe overslaanbaar
+
+**Hypothese:** `FinalizeRecovery::passkeys` is `Option<Account<'info, PasskeysAccount>>` -
+Anchors ingebouwde optionele-account-patroon, waarbij de AANROEPER (niet de keten) bepaalt
+of het account "bestaat" (de client-side sentinel voor "geef geen account" is het
+programma-ID zelf meegeven). `finalize_recovery` is permissionless (geen signer-check in de
+Accounts-struct) - dus zou wie dan ook de wipe kunnen overslaan door bewust de sentinel te
+sturen terwijl er wél een bestaand `PasskeysAccount` is.
+
+**Test** (`tests/passkeys.ts`): wallet aangemaakt, één extra passkey toegevoegd, recovery
+gestart en de timelock voorbij gespoeld, `finalizeRecovery()` aangeroepen met
+`passkeys: program.programId` (de sentinel) terwijl het echte `PasskeysAccount`-PDA
+daadwerkelijk bestond.
+
+**Wat de test aantoonde:** de test slaagde - `owner_passkey` muteerde wel (dat deel gebruikt
+geen optioneel account), maar `PasskeysAccount.count` bleef op 1 en de oude extra passkey
+kon na de "geslaagde" recovery gewoon `add_allowed_program` blijven ondertekenen. Het lek was
+empirisch bevestigd: de belofte in README.md/eerdere STATUS.md-secties dat `finalize_recovery`
+"ook alle extra passkeys" wist, klopte niet zodra de aanroeper er bewust voor koos dat niet
+te laten gebeuren.
+
+**Nuance, zelf gevonden tijdens het schrijven van de test:** de bestaande
+`tests/recovery.ts`-tests gebruikten de programma-ID-sentinel AL, voor wallets die nooit
+`add_passkey` hadden aangeroepen (waar geen `PasskeysAccount` bestaat om te wipen) - en dat
+gebruik was volkomen legitiem, precies waar het patroon voor bedoeld is. De bug zat niet in
+het bestaan van de sentinel als geldige invoer voor dat geval, maar in het volledig ontbreken
+van elk mechanisme dat de sentinel verbiedt zodra er WÉL iets te wissen valt. Dat onderscheid
+bepaalde de vorm van de B1-fix (sectie 77): niet de sentinel simpelweg verbieden (dat had ook
+de legitieme, bestaande gevallen gebroken), maar de keuze zelf van de aanroeper naar de keten
+verplaatsen.
+
+### A2: sessies overleven een recovery volledig
+
+**Hypothese:** `finalize_recovery` raakte uitsluitend `WalletAccount` (`owner_passkey`,
+`recovery_state`) en optioneel `PasskeysAccount` - nergens werd een `SessionKeyAccount`
+gelezen, aangeraakt of ongeldig gemaakt. De enige bestaande bescherming
+(`wallet.recovery_state.is_none()` op elke `_via_session`-instructie) blokkeert alleen
+TIJDENS het recovery-venster zelf - zodra `finalize_recovery` voltooid is, is
+`recovery_state` weer `None`, en een sessie van vóór de compromittering zou daarna gewoon
+weer geldig moeten zijn.
+
+**Test** (`tests/sessionKeys.ts`): wallet aangemaakt, sessiesleutel met `can_execute` en een
+ruime `expiry_slot`, één geslaagde `execute_via_session` VOOR de recovery (bewijst dat de
+sessie echt werkte, niet enkel dat `add_session_key` slaagde), recovery gestart en
+afgerond, daarna opnieuw `execute_via_session` met DEZELFDE sessiesleutel.
+
+**Wat de test aantoonde:** de tweede `execute_via_session`-aanroep slaagde gewoon - dezelfde
+sessiesleutel kon na een volledig afgeronde recovery, zonder enige nieuwe autorisatie door de
+nieuwe eigenaar, gewoon opnieuw geld verplaatsen (`spent_lamports` liep op naar 2.000.000).
+README.md's belofte over `finalize_recovery` was voor het sessiedeel dus ronduit onjuist,
+niet slechts onvolledig.
+
+### A3: geen maximum op sessieduur
+
+**Hypothese:** `add_session_key` controleerde uitsluitend `expiry_slot > current_slot` - geen
+bovengrens.
+
+**Test** (`tests/sessionKeys.ts`): `add_session_key` met `expiry_slot = current_slot +
+10_000_000_000` (bij Solana's nominale 400ms-slottijd ruim >100 jaar vooruit).
+
+**Wat de test aantoonde:** de aanroep slaagde zonder enige klacht, en het opgeslagen
+`session.expiry_slot` kwam exact overeen met de absurde waarde - vandaag al een geldige
+sessie die praktisch nooit vanzelf verloopt.
+
+### A4: `hunt` mist de recovery-freeze
+
+**Hypothese:** elke andere passkey-gated instructie (`Execute`, `TransferToken`,
+`AddAllowedProgram`, `RemoveAllowedProgram`, `ExecuteAdvanced`, `AddPasskey`,
+`AddSessionKey`, `RemoveSessionKey`, `CancelRecovery`) heeft `constraint =
+wallet.recovery_state.is_none() @ RecoveryAlreadyInProgress` op het wallet-account. `Hunt`
+was, nagelezen in `instructions.rs`, de enige die dit miste.
+
+**Belangrijk methodologisch punt: `hunt` had tot deze ronde GEEN lokale testdekking.** De
+enige bevestiging dat `hunt` uberhaupt werkte, kwam uit sectie 17 - een handmatige,
+live-devnet-test met een echte hardware-passkey, nooit herhaald in `anchor test`. Geen enkel
+bestaand testbestand riep `.hunt(...)` aan. `tests/hunt.ts` is in deze ronde vanaf nul
+opgebouwd, precies om deze bevinding empirisch te kunnen testen - en is daarna (FASE B, zie
+sectie 77) verder uitgebouwd tot volwaardige dekking, niet alleen het bewijs van dit ene lek.
+
+**Test** (`tests/hunt.ts`, nieuw bestand): wallet met een vault-token-account met een echt
+saldo (via een handmatig opgezette SPL-mint, zelfde patroon als `tests/policy.ts`/
+`tests/sessionKeys.ts` - geen `@solana/spl-token`-dependency op root-niveau), recovery
+gestart ZONDER de timelock af te wachten, `hunt` daarna aangeroepen op dat token-account.
+
+**Wat de test aantoonde:** `hunt` slaagde gewoon, verbrandde het token-saldo en sloot het
+account, terwijl elke andere passkey-gated instructie op dat moment `RecoveryAlreadyInProgress`
+zou hebben gegeven. `hunt` is de meest onomkeerbare instructie in het programma (verbrandt de
+VOLLEDIGE balans van een token-account, geen on-chain spam-criterium) - juist die instructie
+miste de bescherming die elke andere al had.
+
+## 77. FASE B: de fixes (B1-B7), inclusief de blokkade en drie eisen uit de review
+
+Elke fix hieronder is pas gebouwd nadat de bijbehorende FASE-A-test het lek empirisch had
+aangetoond (sectie 76). Na elke deelstap is de volledige testsuite gedraaid. Commits:
+`33e2876` (FASE A, bewijstests), `47d23b8` (FASE B, B1-B7 eerste versie), `95a4dcc`
+(blokkade + drie eisen op de review van die eerste versie - zie onder).
+
+### B1: `finalize_recovery`-wipe verplicht, niet meer overslaanbaar
+
+**Ontwerp:** `passkeys` is niet langer `Option<Account<'info, PasskeysAccount>>` maar een
+verplicht `UncheckedAccount<'info>` op hetzelfde deterministische `seeds`/`bump`-adres. De
+body vervangt het `if let Some(passkeys) = ...`-blok door een expliciete bestaanstest op de
+`AccountInfo` zelf (`owner == crate::ID && !data_is_empty()`) en wist bij bestaan handmatig
+(`owner_passkey_revoked = false`, `count = 0`, `additional_passkeys` genuld), gevolgd door
+`try_serialize` over een mutable slice van de accountdata.
+
+**Waarom deze vorm en niet een andere:** de kern van het lek (sectie 76) was dat de
+AANROEPER besliste of er iets te wissen viel. Een `seeds`/`bump`-constraint op een verplicht
+account verplaatst die beslissing structureel naar de keten - het account moet nu altijd
+exact het `PasskeysAccount` van DEZE wallet zijn, ongeacht of het al bestaat. Een
+niet-bestaand account op het juiste, afgeleide adres meegeven blijft een volkomen normale,
+geldige staat (een wallet die nooit `add_passkey` aanriep) - dat is precies waarom de
+seeds-constraint NIET verzwakt is om de bestaande tests groen te krijgen (dat zou het lek
+hebben teruggezet); in plaats daarvan zijn de call sites aangepast om het afgeleide adres
+mee te geven in plaats van de sentinel.
+
+**Verworpen alternatief:** de `Option`-vorm behouden maar er een expliciete
+signer-/eigenaarscontrole aan toevoegen (bijv. alleen de nieuwe `owner_passkey` mag de
+sentinel gebruiken). Afgewezen: `finalize_recovery` is bewust permissionless (timelock-gated,
+niet handtekening-gated) - een signer-eis toevoegen zou een tweede, apart mechanisme naast de
+timelock introduceren en het permissionless-karakter van de instructie doorbreken, voor een
+probleem dat de seeds-constraint al volledig en eenvoudiger oplost.
+
+**Bewijs:** twee tests in `tests/passkeys.ts` leggen beide takken vast - de sentinel ketst nu
+af op de seeds-constraint (`ConstraintSeeds`), en met het echte, afgeleide PDA gebeurt de
+wipe altijd. `tests/recovery.ts`'s twee bestaande call sites (wallets zonder
+`PasskeysAccount`) zijn aangepast om het afgeleide adres mee te geven; de test "finalize_recovery
+slaagt ná het tijdslot" is hernoemd tot expliciete regressietest voor "een wallet die nooit
+add_passkey heeft aangeroepen" - precies het scenario met het meeste risico op deze fix,
+en die test slaagt.
+
+### B2: sessie-epoch voor massa-intrekking bij recovery
+
+**Ontwerp:** `WalletAccount.session_epoch: u64` (opgehoogd door `finalize_recovery` met
+`checked_add`, nieuwe foutcode `SessionEpochOverflow` bij overflow) en
+`SessionKeyAccount.epoch: u64` (gestempeld door `add_session_key` met de op dat moment
+geldende `wallet.session_epoch`). Alle drie de `_via_session`-instructies
+(`execute_via_session`, `transfer_token_via_session`, `execute_advanced_via_session`) eisen
+direct na hun bestaande expiry-check dat `session.epoch == wallet.session_epoch`, met een
+nieuwe foutcode `SessionRevokedByRecovery`. Niet in de challenge-payload gebonden: de waarde
+komt van de keten zelf op het moment van `add_session_key`, niet van de client, dus
+cryptografisch binden voegt niets toe.
+
+**Waarom deze vorm en niet een andere:** het alternatief - elke bestaande `SessionKeyAccount`
+individueel opzoeken en sluiten tijdens `finalize_recovery` - is op deze account-layout
+(eigen PDA per sessie, sectie 40's ontwerppunt 1, juist gekozen voor O(1)-lookup per sessie
+en onbeperkt aantal gelijktijdige sessies) niet mogelijk zonder alle sessie-adressen als
+`remaining_accounts` mee te geven aan `finalize_recovery` - een permissionless,
+timelock-gated instructie zou dan afhankelijk worden van wie de instructie aanroept om de
+volledige, juiste lijst aan te leveren, wat het probleem van sectie 76 (aanroeper bepaalt wat
+er gebeurt in plaats van de keten) in een nieuwe vorm zou terugbrengen. Eén teller die alle
+sessies in één klap ongeldig maakt, zonder dat de keten ooit hoeft te weten hoeveel sessies
+er zijn of waar ze staan, is goedkoper en structureel sluitend.
+
+**Borrow-volgorde:** in `execute_via_session`/`transfer_token_via_session` wordt
+`wallet.session_epoch` in een lokale variabele gelezen VOORDAT `session` als mutabele
+referentie wordt genomen (`let session = &mut ctx.accounts.session`) - anders zou de latere
+`ctx.accounts.wallet`-lezing tegen een al actieve mutabele borrow van een ander veld
+aanlopen. `execute_advanced_via_session` leest `session` handmatig via
+`load_session_account()` (een eigen, niet-geleende waarde) - de epoch-check staat daar met
+een aparte code-comment die expliciet benoemt waarom dat precies de plek is waar zo'n check
+per ongeluk overgeslagen wordt als hij niet los getest wordt.
+
+**Migratie-impact (verplicht op te nemen, zie de reviewinstructie):**
+`WalletAccount::LEN` gaat van **239 naar 247 bytes** (+8, `session_epoch`, achteraan
+toegevoegd, nooit ertussenin, zelfde offset-strikte fail-closed-argument als
+`action_nonce`, sectie 69). `SessionKeyAccount::LEN` gaat van **421 naar 429 bytes** (+8,
+`epoch`, zelfde argument). Beide nieuwe native `cargo test`-tests
+(`old_239_byte_wallet_account_fails_closed_against_current_layout`,
+`old_421_byte_session_key_account_fails_closed_against_current_layout`) bevestigen direct op
+Anchor/Borsh's eigen (de)serialisatie dat een account met de OUDE layout schoon faalt
+(`AccountDidNotDeserialize`) tegen de nieuwe structuurdefinitie, niet met een giswaarde wordt
+ingelezen. **Praktisch gevolg na een toekomstige deploy:** elke bestaande devnet-`WalletAccount`
+en elke bestaande devnet-`SessionKeyAccount` faalt daarna schoon op deserialisatie - exact
+hetzelfde patroon als de C-1/action_nonce-fix (sectie 69). Er is geen migratie-instructie
+gebouwd (zelfde afweging als sectie 53/69: een aparte her-autorisatie-instructie voor een
+kleine, bekende hoeveelheid testwallets weegt niet op tegen de toegevoegde complexiteit).
+**Wat de gebruiker na een deploy moet doen:** een NIEUWE wallet aanmaken (`init_wallet`) voor
+elke wallet die na deze deploy weer gebruikt moet worden - de bestaande devnet-`WalletAccount`s
+(zie sectie 69's laatste empirische telling: 12 stuks, triviale rent-exempt-minimumbalansen)
+zijn daarna niet meer leesbaar door het programma en dus effectief verlaten; eventuele
+bestaande sessiesleutels zijn sowieso al irrelevant zodra hun wallet niet meer leesbaar is.
+
+**Bewijs:** vier tests in `tests/sessionKeys.ts` - een sessie van vóór een recovery wordt na
+de recovery geweigerd met `SessionRevokedByRecovery` (en `spent_lamports` bewijsbaar
+NIET opgehoogd door de geweigerde poging); een sessie aangemaakt NA de recovery, door de
+nieuwe eigenaar (een echt, bruikbaar testsleutelpaar als `newOwnerPasskey`, niet de
+willekeurige-bytes-placeholder die elders voor `initiate_recovery` volstaat), werkt gewoon
+door; een sessie zonder tussenliggende recovery blijft werken (de epoch-check is geen
+blanket-weigering); en specifiek `execute_advanced_via_session` weigert ook met
+`SessionRevokedByRecovery` - de expliciete aanvulling uit de review, omdat dat precies de
+plek is met de handmatige `load_session_account`-inlezing.
+
+### B3: maximum sessieduur
+
+**Ontwerp:** nieuwe constante `MAX_SESSION_DURATION_SLOTS = 1_512_000` (~7 dagen bij
+Solana's nominale 400ms-slottijd). `add_session_key` eist nu, naast de al bestaande
+ondergrens (`expiry_slot > current_slot`), ook `expiry_slot <= current_slot.checked_add(
+MAX_SESSION_DURATION_SLOTS)` (met `checked_add` zodat een absurd hoge waarde niet om de
+grens heen kan overflowen), nieuwe foutcode `SessionDurationTooLong`.
+
+**Waarom deze vorm:** B2's epoch-mechanisme maakt een gecompromitteerde sessie intrekbaar
+(via een recovery, of losstaand via `remove_session_key`) - maar "intrekbaar" vereist dat
+iemand daadwerkelijk ingrijpt. Zonder een bovengrens zou een sessie die nooit wordt ingetrokken
+tientallen jaren geldig kunnen blijven, ver buiten elk redelijk hersteltraject om. Een harde
+bovengrens dwingt af dat elke sessie vroeg of laat vanzelf verloopt, ongeacht of iemand ooit
+ingrijpt - het verschil tussen "achteraf intrekbaar" en "structureel niet dichtplantbaar".
+7 dagen is een arbitraire maar ruime keuze (geen enkele bestaande sessie-aanmaak in dit
+project vraagt om iets in die orde van grootte langer).
+
+**Kruiscontrole met de testmarge-fix (zie hieronder):** de `add_session_key`-expiry-marge in
+twee bestaande tests ging tijdens FASE A van `currentSlot + 1` naar `currentSlot + 10`
+(RPC-round-trip-race, losstaand van deze audit). 10 slots zit ruim 150.000x onder
+`MAX_SESSION_DURATION_SLOTS` (1.512.000) - geen enkele interactie mogelijk tussen die
+testmarge en deze nieuwe bovengrens.
+
+**Bewijs:** twee tests - een absurd verre `expiry_slot` (10 miljard slots) wordt nu geweigerd
+met `SessionDurationTooLong`; en een grenswaardetest die BEIDE kanten van de grens scherp
+raakt (exact op `current_slot + MAX_SESSION_DURATION_SLOTS` slaagt, `+ 50` erover weigert -
++50 in plaats van +1 om dezelfde RPC-round-trip-race te vermijden als de testmarge-fix
+hierboven, niet omdat de grens zelf minder scherp getest zou zijn).
+
+### B4: `hunt`-recovery-freeze
+
+**Ontwerp:** dezelfde `constraint = wallet.recovery_state.is_none() @
+RecoveryAlreadyInProgress` toegevoegd aan `Hunt`'s wallet-account die elke andere
+passkey-gated instructie al had. Geen alternatieve vorm overwogen - dit is letterlijk het
+patroon dat al overal elders in het programma staat, geen nieuw ontwerp nodig.
+
+**Bewijs:** de FASE-A-test omgedraaid - `hunt` weigert nu tijdens een lopende recovery met
+specifiek `RecoveryAlreadyInProgress` (niet een andere/generieke fout), en het
+token-account blijft aantoonbaar onaangeraakt (nog steeds bestaand, niet gesloten) na de
+geweigerde poging.
+
+### B5: `hunt` bindt `rent_destination`
+
+**Ontwerp:** de `hunt`-challenge-payload bindt nu, na `target_token_account`, ook
+`rent_destination` (`nonce || target_token_account || rent_destination`).
+`client/src/hunt.ts::buildHuntTransaction` in dezelfde commit aangepast - die functie
+gebruikt `payer` altijd ook als `rent_destination` (zie de accounts-lijst in dat bestand),
+dus dat is exact wat nu mee ondertekend wordt.
+
+**Waarom:** de payload bevatte voorheen alleen nonce en `target_token_account`, terwijl de
+bevestigingskaart (`huntPreview.ts`) de 50/50-split expliciet toont - wie de transactie
+samenstelde kon de bestemming van de helft van de teruggewonnen rent vrij kiezen, ongeacht
+wat de kaart beweerde te tonen. Geen diefstalpad op zich (de andere helft gaat sowieso naar
+de vaste incinerator, en de rent zelf is klein), maar wel een afwijking van "één handtekening
+autoriseert precies één volledig gespecificeerde actie".
+
+**Bewijs:** naast de bestaande happy-path-test (zie B6/hunt-testuitbreiding hieronder) een
+expliciete manipulatietest - ondertekend met de legitieme `rent_destination`, maar de
+daadwerkelijke instructie gebruikt een andere, ontvangt `WebAuthnChallengeMismatch`, en het
+token-account blijft onaangeraakt.
+
+### B6: `transfer_token` bindt `vault_token_account`
+
+**Ontwerp:** zelfde patroon als B5, nu voor `transfer_token`: de payload bindt na `amount`
+ook `vault_token_account`. `client/src/transferToken.ts` in dezelfde commit aangepast.
+
+**Waarom:** bij meerdere vault-eigen token-accounts van dezelfde mint was de bron niet
+volledig door de handtekening bepaald (alleen `owner == vault` en `mint == token_mint` waren
+afgedwongen, geen identiteitsbinding). Geen diefstalpad (alles was al van de eigenaar), wel
+dezelfde principeafwijking als B5. Voor de sessievariant (`transfer_token_via_session`)
+verandert niets - die heeft sowieso geen challenge (sectie 40, ontwerppunt 5: een
+sessiesleutel is een gewone Ed25519-Solana-signer, Solana's eigen transactie-ondertekening
+bindt de accounts al).
+
+**Blokkade uit de review, nu opgelost: `tests/transferToken.ts` (nieuw bestand).**
+`transfer_token` had, net als `hunt` vóór deze ronde, geen enkele lokale testdekking, en B6
+wijzigde precies zijn challenge-payload op een live, fondsen-rakende instructie - de
+reviewer wees dit terecht aan als het enige onbewezen stuk van de hele ronde. Zelfde
+diepgang als `tests/hunt.ts`: een happy-path-test (SPL-transfer van 400 van 1000, saldi
+geverifieerd zowel via de rauwe token-accountdata als via de transactie-meta) en een
+manipulatietest (een TWEEDE, eveneens geldig vault-eigen token-account van DEZELFDE mint -
+niet een andere mint, want dat zou al op de bestaande mint-constraint stranden vóór de
+signature-verificatie ooit bereikt wordt, zie de zelf-gevonden fout hieronder) die bewijst
+dat een afwijkend `vault_token_account` `WebAuthnChallengeMismatch` geeft.
+
+### B7: `remove_session_key`'s payer - argument uitgeschreven, conclusie omgeslagen
+
+De review eiste dat dit argument geschreven wordt vóórdat het als voldongen feit in
+STATUS.md terechtkomt. Hier het argument, met de uitkomst.
+
+**Dreigingsmodel:** `RemoveSessionKey::session` heeft `close = payer` - de teruggewonnen
+`SessionKeyAccount`-rent gaat naar wie ook als `payer` wordt meegegeven. `payer:
+Signer<'info>` MOET de transactie mede-ondertekenen - dit is dus geen "vrije keuze voor een
+niet-consenterende derde"-scenario zoals bij een puur informatief veld; wie de rent
+ontvangt, moet sowieso al actief meewerken aan de transactie. De passkey-handtekening
+autoriseert "trek deze sessiesleutel in", maar zegt niets over WIE de rent krijgt - een
+client (of een gecompromitteerde/malafide versie daarvan) zou een andere, mede-ondertekenende
+`payer` kunnen kiezen dan wat de gebruiker in de bevestigingskaart zag, zonder dat de
+passkey-handtekening dat detecteert.
+
+**Kosten van binden:** onderzocht tegen de daadwerkelijke, enige bestaande client
+(`client/src/sessionKeys.ts::buildRemoveSessionKeyTransaction`) - die zet `payer` altijd óók
+als `transaction.feePayer`, dezelfde ene rekening voor beide rollen, in elke bestaande
+aanroep. Er bestaat vandaag geen sponsor-/relay-patroon (een aparte partij die alleen de
+transactiekosten betaalt terwijl de gebruiker zelf de rent terugkrijgt) waar dan ook in deze
+codebase, voor geen enkele instructie. Een hypothetisch toekomstig sponsor-patroon zou zijn
+eigen adres sowieso al moeten kennen VOORDAT het de passkey-handtekening aanvraagt (de
+sponsor moet immers zelf mede-ondertekenen) - binden zou zo'n patroon dus niet blokkeren,
+hooguit verplichten dat het adres iets eerder in de flow bekend is dan nu toevallig het geval
+is.
+
+**Waarom de eerder gerapporteerde "bewust geaccepteerd"-conclusie niet standhield:** de
+oorspronkelijke afweging noemde "het openhouden van een sponsor-/relay-patroon" als reden om
+niet te binden. Bij het daadwerkelijk uitschrijven bleek die reden niet te kloppen: er is geen
+bestaand patroon om open te houden, en een toekomstig patroon wordt door binden niet
+geblokkeerd. Tegenover die (ontkrachte) kostenpost stond een reële, kleine maar structurele
+inconsistentie met het project's eigen, expliciet uitgesproken principe ("één handtekening
+autoriseert precies één volledig gespecificeerde actie", dezelfde formulering die de B6-fix
+motiveerde) en met B5/B6's precedent voor precies deze klasse velden (wie ontvangt
+teruggewonnen waarde). Conclusie: alsnog gebonden.
+
+**Fix:** de `remove_session_key`-payload bindt nu, na `session_key`, ook `payer`.
+`client/src/sessionKeys.ts` in dezelfde commit aangepast. Bewijs: een manipulatietest in
+`tests/sessionKeys.ts` - een TWEEDE, echt gefunde en mede-ondertekenende keypair als
+daadwerkelijke `payer`, terwijl de challenge ondertekend is alsof de oorspronkelijke
+`payer` gebruikt zou worden, geeft `WebAuthnChallengeMismatch`; de sessie blijft
+onaangeraakt.
+
+### Eis 1: binary-versheid nu een harde, geautomatiseerde garantie
+
+Tijdens het bouwen van B4-B6 bleek `cargo-build-sbf --arch v3`'s toolchain-switching een
+bronwijziging niet altijd te detecteren - een build die "Finished in 0.10s" rapporteerde
+bleek bij controle een verouderde binary te hebben opgeleverd (al gedocumenteerd als bekend
+risico in `scripts/build-and-deploy.sh`'s eigen waarschuwing, hier voor het eerst
+daadwerkelijk tegengekomen). Opgelost met een geforceerde `touch` + rebuild, empirisch
+bevestigd via het `.so`-bestand's mtime.
+
+**Structureel gemaakt (niet alleen het incident beschreven, ook wat er veranderd is om het
+onmogelijk te maken):** `tests/verifyBinaryFresh.ts` (nieuw bestand) draait op
+module-niveau - dus synchroon, bij import, VOOR er ook maar één test start - en wordt
+geïmporteerd door `tests/webauthnTestHelper.ts`, dat elk testbestand in de suite al
+importeerde. Dat maakt de check onvermijdelijk voor elke testrun via `tests/**/*.ts`,
+ongeacht het exacte aanroepcommando (rechtstreeks `ts-mocha`, `yarn test`, `anchor test`) -
+een losse pre-test-npm-script zou overgeslagen kunnen worden door mocha rechtstreeks aan te
+roepen; dit niet. De check vergelijkt de mtime van `target/deploy/spankwallet.so` tegen de
+nieuwste mtime onder `programs/spankwallet/src/` (recursief) en gooit een harde fout met
+concrete rebuild-instructies zodra de binary ouder is. Bij een geslaagde check print hij de
+sha256 van de binary naar stderr. Beide richtingen empirisch bevestigd tijdens het bouwen:
+een bewust verouderde binary (via `touch` op een bronbestand) liet de check hard falen met
+de verwachte foutmelding; een echte rebuild erna liet 'm slagen.
+
+**Sha256 van de binary waartegen de in deze sectie gerapporteerde testresultaten daadwerkelijk
+gedraaid zijn:** `248922eb78f820d742e7739fe6f0139602f4eeba6c0e3115aea00296d93ecafd`
+(bevestigd, niet alleen door `verifyBinaryFresh.ts` zelf, ook onafhankelijk met `sha256sum`
+tegen hetzelfde bestand).
+
+### Eis 2: de 4 pre-existing TS-fouten (sectie 45) - opgelost, niet gequarantineerd
+
+Gekozen om op te lossen in plaats van formeel te quarantineren (beide waren toegestaan). De
+vier fouten (`client/src/initWallet.ts` regel 21, `client/src/webauthnSign.ts` regels 17/30/34)
+kwamen allemaal uit dezelfde oorzaak: een recentere TypeScript-lib-versie maakte
+`Uint8Array` generiek over zijn buffer-type, en `BufferSource` (gebruikt door
+`SubtleCrypto.digest()` en `navigator.credentials.get()`'s WebAuthn-opties) sluit sindsdien
+expliciet `SharedArrayBuffer`-backed views uit. De daadwerkelijke Uint8Array's op deze vier
+plekken zijn in dit project altijd gewone, verse `ArrayBuffer`-backed buffers (nergens wordt
+`SharedArrayBuffer` gebruikt) - het was een type-only-mismatch, geen echte runtime-onzekerheid.
+Opgelost met `new Uint8Array(data)` op elke grensovergang: een ECHTE kopie naar een
+gegarandeerd vers `ArrayBuffer`, geen `as`-type-assertie en geen `@ts-ignore` - dit is dus
+tegelijk een correctheidsgarantie en een typefix, geen onderdrukking. Globale strictness is
+niet aangeraakt. `client`'s `tsc --noEmit` geeft nu exitcode 0.
+
+### `tests/m2_fix_verify.ts`: `describe.skip`, env-var-alternatief overwogen en afgewezen
+
+De review vroeg om "groen betekent groen" ook op deze twee permanent falende tests toe te
+passen. `describe.skip` toegepast met een uitgeschreven reden in de code zelf. Het
+env-var-alternatief (het programma-ID in `client/src/programId.ts` uit een env-var laten
+lezen, met de huidige devnet-waarde als default) is serieus overwogen en afgewezen: dat zou
+permanente indirectie toevoegen aan ECHTE productiecode - `client/src/programId.ts` wordt
+door de daadwerkelijke browser-client gebruikt, niet alleen door tests - puur om een
+incidentele lokale testrun te faciliteren. Die ruil (blijvende complexiteit in productiecode
+voor een testgemak dat maar af en toe nodig is) woog niet op tegen bewust skippen met een
+duidelijke reden.
+
+### Verificatie-eerlijkheid: twee dingen die onderweg zelf gecorrigeerd zijn
+
+**De indexeringsfout in de hunt-50/50-split-test.** Bij het bouwen van de exacte
+lamportverificatie (transactie-meta i.p.v. losse balansqueries) las de test aanvankelijk
+`preBalances`/`postBalances` op de index uit de LOKAAL opgebouwde `huntIx.keys`-array. Dat
+gaf ten onrechte "incinerator ontving 0" - de eerste reactie was even overwegen of dit een
+echte programmabug kon zijn. Nagegaan via `solana balance` en (na een korte poll-toevoeging
+voor RPC-lees-propagatie) rechtstreeks via `getTransaction()`'s eigen meta VOORDAT die
+conclusie getrokken werd: de daadwerkelijke oorzaak was dat `preBalances`/`postBalances`
+geïndexeerd zijn volgens de SAMENGEVOEGDE `accountKeys`-lijst van de HELE transactie (inclusief
+de secp256r1-instructie's eigen accounts, in Solana's eigen signer-/writable-sorteervolgorde),
+niet de lokale key-volgorde van de `hunt`-instructie alleen. Gefixt door de index uit
+`txInfo.transaction.message.getAccountKeys().staticAccountKeys` te halen in plaats van uit de
+zelf opgebouwde instructie - eigen testcodefout, geen programmabug. Dezelfde fout maakte de
+gelijkaardige `transfer_token`-verificatie in `tests/transferToken.ts` bij het schrijven meteen
+correct.
+
+**De SBF-buildcache die een bronwijziging niet detecteerde** - zie Eis 1 hierboven voor het
+volledige verhaal EN wat er structureel is veranderd om dit onmogelijk te maken
+(`tests/verifyBinaryFresh.ts`): dit is niet langer een incident dat stilzwijgend kan
+terugkomen, elke testrun controleert het nu zelf.
+
+### Geverifieerd - harde cijfers
+
+- **Testsuite:** 75 passing, 0 failing, 2 pending (`tests/m2_fix_verify.ts`, bewust
+  geskipt). Native `cargo test --manifest-path programs/spankwallet/Cargo.toml`: 4/4 groen
+  (`test_id` + de drie fail-closed-layouttests uit B2's migratie-impact hierboven).
+- **Binary:** sha256 `248922eb78f820d742e7739fe6f0139602f4eeba6c0e3115aea00296d93ecafd`,
+  bevestigd vers t.o.v. `programs/spankwallet/src/` door `tests/verifyBinaryFresh.ts` én
+  onafhankelijk met `sha256sum`.
+- **TypeScript:** `client`'s `tsc --noEmit` exitcode 0 (voorheen 4 bekende fouten, nu
+  opgelost - zie Eis 2 hierboven). `desktop`'s `tsc`/`vite build` niet in deze ronde
+  opnieuw gedraaid (geen bestand in `desktop/` aangeraakt door FASE A/B).
+- **Commits:** `33e2876` (FASE A - vier bewijstests, `tests/passkeys.ts`/
+  `tests/sessionKeys.ts`/`tests/hunt.ts` nieuw/uitgebreid, plus de
+  `fetchActionNonce`-stabiele-read-poll-fix in `tests/webauthnTestHelper.ts` en de
+  race-gevoelige testmarge-fix `+1`->`+10` in twee bestaande `tests/sessionKeys.ts`-tests);
+  `47d23b8` (FASE B eerste versie - B1 t/m B7 in `programs/spankwallet/src/`, client-lockstep
+  in `client/src/hunt.ts`/`client/src/transferToken.ts`, `tests/m2_fix_verify.ts` nog
+  ongewijzigd); `95a4dcc` (blokkade - `tests/transferToken.ts` nieuw; Eis 1 -
+  `tests/verifyBinaryFresh.ts` nieuw; Eis 2 - de vier TS-fouten opgelost; Eis 3/B7 -
+  `payer` alsnog gebonden in zowel het programma als `client/src/sessionKeys.ts`, plus de
+  bijbehorende manipulatietest; `tests/m2_fix_verify.ts` op `describe.skip`).
+- **Niet in deze ronde gedaan, bewust genoteerd, geen aanname:** geen deploy, geen nieuwe
+  program-buffer, geen nieuw Squads-voorstel - alles blijft in git tot expliciete
+  toestemming. Voorstel #10 (uitvoerbaar 2026-08-20T15:08:23 UTC) niet aangeraakt.

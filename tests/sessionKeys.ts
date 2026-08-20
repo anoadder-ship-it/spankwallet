@@ -19,6 +19,7 @@ import {
   buildSecp256r1Instruction,
   encodeOptionalI64,
   advanceSlotPast,
+  advanceOnChainClockPast,
   fetchActionNonce,
   nonceLeBytes,
   TestPasskey,
@@ -133,14 +134,23 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     return sessionPda;
   }
 
-  async function createWallet() {
+  // timelockSeconds optioneel, zelfde patroon als tests/passkeys.ts/
+  // tests/recovery.ts: undefined/null houdt het bestaande gedrag (72u-
+  // default) voor alle bestaande call-sites hieronder ongewijzigd - alleen
+  // de nieuwe FASE-A2-recovery-test geeft een korte, echt-wachtbare waarde
+  // mee.
+  async function createWallet(timelockSeconds?: number) {
     const passkey = generateTestPasskey();
     const backupAuthority = Keypair.generate();
     const { walletPda, vaultPda, passkeysPda, policyPda, walletSeedHash } = derivePdas(
       passkey.compressedPublicKey
     );
+    const recoveryTimelockSeconds = timelockSeconds != null ? new BN(timelockSeconds) : null;
 
-    const payload = Buffer.concat([backupAuthority.publicKey.toBuffer(), encodeOptionalI64(null)]);
+    const payload = Buffer.concat([
+      backupAuthority.publicKey.toBuffer(),
+      encodeOptionalI64(recoveryTimelockSeconds ? recoveryTimelockSeconds.toNumber() : null),
+    ]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
@@ -162,7 +172,7 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
         Array.from(passkey.compressedPublicKey),
         walletSeedHash,
         backupAuthority.publicKey,
-        null,
+        recoveryTimelockSeconds,
         clientDataJSON
       )
       .accounts({
@@ -765,7 +775,13 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
 
     const sessionKeypair = Keypair.generate();
     const currentSlot = await provider.connection.getSlot();
-    const expirySlot = currentSlot + 1;
+    // +1 is een inherent race-gevoelige marge (dezelfde categorie probleem
+    // als STATUS.md sectie 40 al documenteert en oploste met een grotere
+    // marge elders) - add_session_key zelf moet nog landen vóórdat de
+    // expiry_slot-check op de keten evalueert, en een enkele slot-marge
+    // laat geen ruimte voor normale RPC-round-trip-tijd. +10 blijft ruim
+    // krap genoeg om binnen deze test snel te laten verlopen.
+    const expirySlot = currentSlot + 10;
     await callAddSessionKey(
       passkey,
       walletPda,
@@ -1582,7 +1598,8 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     const { passkey, walletPda, passkeysPda, policyPda } = await createWallet();
     const sessionKeypair = Keypair.generate();
     const currentSlot = await provider.connection.getSlot();
-    const expirySlot = currentSlot + 1;
+    // +10, zelfde reden als de expiry-test hierboven (race-gevoelige marge).
+    const expirySlot = currentSlot + 10;
     await callAddSessionKey(
       passkey,
       walletPda,
@@ -1701,6 +1718,142 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     assert.isTrue(
       threw,
       "execute_via_session tijdens een lopende recovery had moeten falen"
+    );
+  });
+
+  // --- FASE A2 (statische-audit-bevinding): sessies overleven een recovery ---
+  //
+  // finalize_recovery (instructions.rs) raakt UITSLUITEND WalletAccount
+  // (owner_passkey, recovery_state) en optioneel PasskeysAccount - nergens
+  // wordt een SessionKeyAccount gelezen, aangeraakt of ongeldig gemaakt. De
+  // enige bestaande bescherming (`wallet.recovery_state.is_none()` op elke
+  // _via_session-instructie) blokkeert alleen TIJDENS het recovery-venster
+  // zelf - zodra finalize_recovery voltooid is, is recovery_state weer None,
+  // en een sessie die vóór de compromittering is aangemaakt blijft daarna
+  // gewoon volledig geldig. README.md regel 85 belooft het tegenovergestelde
+  // ("wist ook alle extra passkeys/sessies") - dit test bewijst dat het
+  // sessie-deel van die belofte niet klopt.
+  it("[FASE A2 - bevestigt lek] een sessiesleutel overleeft finalize_recovery en blijft daarna gewoon bruikbaar", async () => {
+    const timelockSeconds = 3;
+    const { passkey, backupAuthority, walletPda, vaultPda, passkeysPda, policyPda } =
+      await createWallet(timelockSeconds);
+    await fundVault(vaultPda, 10_000_000);
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 100_000,
+      true,
+      false,
+      false
+    );
+
+    // Eén geslaagde execute_via_session VOOR de recovery - bewijst dat de
+    // sessie echt werkte, niet enkel dat add_session_key slaagde.
+    await program.methods
+      .executeViaSession(new BN(1_000_000))
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        recipient: Keypair.generate().publicKey,
+        session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+        sessionKey: sessionKeypair.publicKey,
+      })
+      .signers([sessionKeypair])
+      .rpc();
+
+    // De eigenaar verliest (hypothetisch) al zijn passkeys en start recovery.
+    const newOwnerPasskey = dummyNewOwnerPasskey();
+    await program.methods
+      .initiateRecovery(newOwnerPasskey)
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+
+    const afterInitiate = await program.account.walletAccount.fetch(walletPda);
+    await advanceOnChainClockPast(
+      provider.connection,
+      (provider.wallet as anchor.Wallet).payer,
+      afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
+    );
+
+    // Dit wallet heeft nooit add_passkey aangeroepen, dus er bestaat geen
+    // PasskeysAccount om te wipen - de sentinel meegeven, zelfde patroon als
+    // de bestaande tests/recovery.ts. FASE A1 (de wipe-skip zelf, MET een
+    // bestaand PasskeysAccount) is een apart, onafhankelijk lek - het punt
+    // van DEZE test is dat finalize_recovery de sessie sowieso nooit
+    // aanraakt, los van wat er met passkeys gebeurt.
+    await program.methods
+      .finalizeRecovery()
+      .accounts({ wallet: walletPda, passkeys: program.programId })
+      .rpc();
+
+    const wallet = await program.account.walletAccount.fetch(walletPda);
+    assert.deepEqual(Array.from(wallet.ownerPasskey), newOwnerPasskey);
+
+    // Kern van het bewijs: dezelfde, VOOR de recovery aangemaakte
+    // sessiesleutel kan NA de "geslaagde" recovery nog steeds zelfstandig
+    // ondertekenen, zonder enige nieuwe autorisatie door de nieuwe eigenaar.
+    await program.methods
+      .executeViaSession(new BN(1_000_000))
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        recipient: Keypair.generate().publicKey,
+        session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+        sessionKey: sessionKeypair.publicKey,
+      })
+      .signers([sessionKeypair])
+      .rpc();
+
+    const session = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypair.publicKey)
+    );
+    assert.equal(
+      session.spentLamports.toNumber(),
+      2_000_000,
+      "LEK BEVESTIGD: de sessie kon na een 'geslaagde' recovery nog steeds zelfstandig spenden"
+    );
+  });
+
+  // --- FASE A3 (statische-audit-bevinding): geen maximum op sessieduur ---
+  //
+  // add_session_key controleert uitsluitend `expiry_slot > current_slot`
+  // (instructions.rs) - geen bovengrens. Een sessie met een absurd verre
+  // expiry_slot is dus vandaag al een geldige aanroep.
+  it("[FASE A3 - bevestigt lek] add_session_key accepteert een absurd verre expiry_slot zonder bovengrens", async () => {
+    const { passkey, walletPda, passkeysPda, policyPda } = await createWallet();
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+
+    // ~10 miljard slots verder (bij 400ms/slot ruim >100 jaar) - slaagt
+    // vandaag zonder enige klacht van het programma.
+    const absurdExpirySlot = currentSlot + 10_000_000_000;
+
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      absurdExpirySlot,
+      true,
+      false,
+      false
+    );
+
+    const session = await program.account.sessionKeyAccount.fetch(
+      deriveSessionPda(walletPda, sessionKeypair.publicKey)
+    );
+    assert.equal(
+      session.expirySlot.toString(),
+      absurdExpirySlot.toString(),
+      "LEK BEVESTIGD: add_session_key legde geen bovengrens op aan expiry_slot"
     );
   });
 });

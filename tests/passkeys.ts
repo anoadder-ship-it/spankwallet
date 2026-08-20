@@ -468,4 +468,88 @@ describe("spankwallet: multi-passkey (add_passkey / remove_passkey) + finalize_r
       "een sleutel van vóór de recovery had na de recovery geen zeggenschap meer moeten hebben"
     );
   });
+
+  // --- FASE A1 (statische-audit-bevinding): finalize_recovery-wipe is
+  // overslaanbaar ---
+  //
+  // FinalizeRecovery::passkeys is Option<Account<'info, PasskeysAccount>> -
+  // Anchors ingebouwde optionele-account-patroon, waarbij de AANROEPER (niet
+  // de keten) bepaalt of het account "bestaat": de client-side sentinel voor
+  // "geef geen account" is simpelweg het programma-ID zelf meegeven (zie de
+  // bestaande tests/recovery.ts-tests hierboven in dit project, die dat
+  // patroon al gebruiken voor wallets ZONDER PasskeysAccount). finalize_
+  // recovery is permissionless (geen signer-check in FinalizeRecovery's
+  // Accounts-struct) - dus kan LETTERLIJK IEDEREEN, niet alleen de eigenaar,
+  // de wipe overslaan door bewust de sentinel te sturen terwijl er wél een
+  // bestaand PasskeysAccount is. Dit test bewijst dat empirisch: de extra
+  // sleutel van vóór de recovery behoudt zijn volledige zeggenschap NA een
+  // "geslaagde" recovery, in directe tegenspraak met README.md/STATUS.md's
+  // belofte dat finalize_recovery "ook alle extra passkeys" wist.
+  it("[FASE A1 - bevestigt lek] finalize_recovery met de programma-ID-sentinel slaat de passkeys-wipe over", async () => {
+    const timelockSeconds = 3;
+    const { passkey, backupAuthority, walletPda, passkeysPda } = await createWallet(
+      timelockSeconds
+    );
+    const extra = generateTestPasskey();
+    await callAddPasskey(passkey, walletPda, passkeysPda, extra.compressedPublicKey);
+
+    let passkeysBefore = await program.account.passkeysAccount.fetch(passkeysPda);
+    assert.equal(passkeysBefore.count, 1);
+
+    const newOwnerPasskey = dummyNewOwnerPasskey();
+    await program.methods
+      .initiateRecovery(newOwnerPasskey)
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+
+    const afterInitiate = await program.account.walletAccount.fetch(walletPda);
+    await advanceOnChainClockPast(
+      provider.connection,
+      (provider.wallet as anchor.Wallet).payer,
+      afterInitiate.recoveryState.initiatedAt.toNumber() + timelockSeconds
+    );
+
+    // De AANVAL: het echte, bestaande PasskeysAccount-PDA bestaat, maar we
+    // sturen bewust de "bestaat niet"-sentinel (het programma-ID zelf) mee -
+    // niets in FinalizeRecovery's Accounts-struct dwingt af dat het echte
+    // PDA gebruikt wordt, en er is geen signer-check die dit tot alleen de
+    // eigenaar beperkt.
+    await program.methods
+      .finalizeRecovery()
+      .accounts({ wallet: walletPda, passkeys: program.programId })
+      .rpc();
+
+    const wallet = await program.account.walletAccount.fetch(walletPda);
+    assert.deepEqual(
+      Array.from(wallet.ownerPasskey),
+      newOwnerPasskey,
+      "owner_passkey had wel gewoon moeten muteren - dat deel van finalize_recovery gebruikt geen optioneel account"
+    );
+
+    // Kern van het bewijs: de wipe is NIET gebeurd - count staat nog op 1.
+    const passkeysAfter = await program.account.passkeysAccount.fetch(passkeysPda);
+    assert.equal(
+      passkeysAfter.count,
+      1,
+      "LEK BEVESTIGD: de passkeys-wipe werd overgeslagen - count had 0 moeten zijn"
+    );
+    assert.isFalse(passkeysAfter.ownerPasskeyRevoked);
+
+    // Kern van het bewijs, deel 2: de oude extra sleutel (van vóór de
+    // "geslaagde" recovery) kan nog steeds een willekeurige andere
+    // passkey-gated instructie ondertekenen - géén stale/gecompromitteerde
+    // sleutel zou dit meer mogen kunnen na een voltooide recovery.
+    await callAddAllowedProgramAs(extra, walletPda, SystemProgram.programId);
+    const [policyPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("policy"), walletPda.toBuffer()],
+      program.programId
+    );
+    const policy = await program.account.policyAccount.fetch(policyPda);
+    assert.equal(
+      policy.count,
+      1,
+      "LEK BEVESTIGD: de sleutel van vóór de recovery kon nog steeds een instructie ondertekenen ná de 'geslaagde' recovery"
+    );
+  });
 });

@@ -48,7 +48,26 @@ export async function fetchActionNonce(
   connection: Connection,
   walletPda: PublicKey
 ): Promise<bigint> {
-  const info = await connection.getAccountInfo(walletPda, "confirmed");
+  // Poll tot twee opeenvolgende reads IDENTIEKE bytes teruggeven, i.p.v. te
+  // stoppen zodra het account uberhaupt bestaat: een lokale validator onder
+  // belasting (veel testtransacties kort na elkaar, gedeelde machine) bleek
+  // soms een NIET-lege maar nog VEROUDERDE snapshot terug te geven vlak na
+  // een net bevestigde transactie (RPC-lees-propagatie-gat, geen echte
+  // account-afwezigheid) - een enkele niet-null-check ving dat niet, een
+  // eenmalig stale nonce leidde verderop tot StaleActionNonce. Twee
+  // stabiele, gelijke reads na elkaar is een goedkope, generieke garantie
+  // dat de data niet meer aan het verschuiven is - zelfde categorie
+  // RPC-consistentie-fenomeen als STATUS.md sectie 17/38 al documenteren.
+  let previous: Buffer | null = null;
+  let info = await connection.getAccountInfo(walletPda, "confirmed");
+  for (let i = 0; i < 30; i++) {
+    if (info !== null && previous !== null && info.data.equals(previous)) {
+      break;
+    }
+    previous = info?.data ?? null;
+    await new Promise((r) => setTimeout(r, 100));
+    info = await connection.getAccountInfo(walletPda, "confirmed");
+  }
   if (!info) {
     throw new Error("fetchActionNonce: WalletAccount bestaat niet: " + walletPda.toBase58());
   }

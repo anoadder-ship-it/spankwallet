@@ -443,9 +443,8 @@ pub fn poison_transfer_hook(ctx: Context<PoisonTransferHook>) -> Result<()> {
 
     require!(!pt.triggered, ActiveDefenseError::PoisonTokenAlreadyTriggered);
 
-    // destination.owner is een Pubkey (niet een reference) in Anchor.
-    let dest_owner: Pubkey = ctx.accounts.destination.owner;
-
+    // Directe vergelijking: destination.owner is een Pubkey in Anchor.
+    let dest_owner = ctx.accounts.destination.owner;
     let is_authorized = pt.authorized_recipients[..pt.count as usize]
         .iter()
         .any(|r| *r == dest_owner);

@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program::invoke_signed;
 use solana_instructions_sysvar::{
     load_current_index_checked, load_instruction_at_checked, ID as IX_SYSVAR_ID,
 };

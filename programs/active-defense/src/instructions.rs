@@ -231,8 +231,6 @@ fn verify_passkey_for_wallet(
     expected_challenge: &[u8],
     client_data_json: &[u8],
 ) -> Result<()> {
-    // Lees owner_passkey uit het spankwallet WalletAccount.
-    // Layout: discriminator(8) + seed_key(33) + wallet_seed_hash(32) + owner_passkey(33) + ...
     let data = wallet_account_info.try_borrow_data()?;
     require!(data.len() >= 8 + 33 + 32 + 33, ActiveDefenseError::InvalidPasskeySignature);
     let mut owner_passkey = [0u8; PASSKEY_PUBKEY_LEN];
@@ -443,11 +441,11 @@ pub fn poison_transfer_hook(ctx: Context<PoisonTransferHook>) -> Result<()> {
 
     require!(!pt.triggered, ActiveDefenseError::PoisonTokenAlreadyTriggered);
 
-    // Directe vergelijking: destination.owner is een Pubkey in Anchor.
-    let dest_owner = ctx.accounts.destination.owner;
+    // Gebruik to_bytes() voor type-onafhankelijke vergelijking.
+    let dest_owner_bytes = ctx.accounts.destination.owner.to_bytes();
     let is_authorized = pt.authorized_recipients[..pt.count as usize]
         .iter()
-        .any(|r| *r == dest_owner);
+        .any(|r| r.to_bytes() == dest_owner_bytes);
 
     if !is_authorized {
         let clock = Clock::get()?;

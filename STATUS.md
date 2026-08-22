@@ -6844,11 +6844,10 @@ checkWorstCaseAccountSafety.ts` (nieuw, bewaard voor hergebruik), tegen alle 14
   bewust-aanvaarde-kosten-pad ook nu weer volstaat, MITS bij het daadwerkelijke voorstel
   opnieuw (niet aangenomen) bevestigd wordt dat er dan nul actieve sessies bestaan.
 
-**Resterende, verplichte actie vóór een echt voorstel (niet vóór stap 1 hieronder, die mag
-gewoon doorgaan):** vlak vóór het indienen van een echt B1-B7-voorstel, `scripts/
-checkWorstCaseAccountSafety.ts`'s SessionKeyAccount-deel opnieuw draaien EN de `expiry_slot`
-van elk resultaat tegen de dan-actuele slot controleren - niet op de meting van vandaag
-(sectie 85) vertrouwen, die is een momentopname.
+**GECORRIGEERD (sectie 86): niet vóór het INDIENEN, vlak vóór het UITVOEREN** - zie de
+uitvoeringschecklist bij stap 3 hieronder voor de volledige redenering (het 72u-
+timelockvenster, en dat `MAX_SESSION_DURATION_SLOTS`/B3 zelf pas live is NA deze upgrade).
+Niet vóór stap 1 hieronder - die mag gewoon doorgaan (wegwerp-programma-ID).
 
 ### Stap 3 - pas ná stap 1 én 2: de reeds-geformaliseerde bufferroute
 
@@ -6859,6 +6858,36 @@ tooling die sectie 82 vandaag formaliseerde. Dit script schrijft zelf nog steeds
 en doet geen on-chain-aanroep; het daadwerkelijk schrijven van de buffer en het indienen van
 het multisig-voorstel blijven, zoals overal in dit project, een bewuste, handmatige stap na
 expliciete bevestiging - niet iets wat deze of een volgende ronde automatisch doet.
+
+### Uitvoeringschecklist - de nul-actieve-sessies-controle hoort bij UITVOEREN, niet bij INDIENEN
+
+**GECORRIGEERD (sectie 86):** "controleer dit bij het indienen van het voorstel" is NIET
+hetzelfde als "controleer dit vlak vóór het uitvoeren", en het verschil is hier
+betekenisvol, niet formeel. Tussen indienen en uitvoeren zit de volle 72u-timelock (sectie
+42) - in dat venster kan een nieuwe `SessionKeyAccount` ontstaan. Erger nog:
+`MAX_SESSION_DURATION_SLOTS` is zelf onderdeel van B3 en is dus PAS live ZODRA deze upgrade
+zelf uitgevoerd is - een sessie die tijdens het 72u-venster wordt aangemaakt (tegen het dan
+nog actieve, oude programma) heeft op dat moment nog GEEN bovengrens op zijn `expiry_slot`.
+Een controle bij het indienen zegt dus niets betrouwbaars over de staat op het moment van
+uitvoeren.
+
+**Daarom, als harde stap in de uitvoeringschecklist (naast de vijf verificaties die bij
+voorstel #10 zijn gedraaid, sectie 80) - VLAK VÓÓR het klikken op "uitvoeren", niet eerder:**
+1. `scripts/checkWorstCaseAccountSafety.ts`'s `SessionKeyAccount`-deel opnieuw draaien.
+2. Voor elk resultaat: `expiry_slot` tegen de dan-actuele slot controleren.
+3. Bestaat er ook maar één niet-verlopen `SessionKeyAccount`, dan NIET uitvoeren - eerst
+   wachten tot hij vanzelf verloopt (er is vandaag geen bovengrens om op te wachten totdat
+   B3 zelf live is, dus dit kan in het slechtste geval een keer expliciet worden afgewacht)
+   of alsnog een migratiepad bouwen, niet de deploy toch doorzetten.
+
+### Expliciete afspraak: geen nieuwe sessies op het ECHTE programma tot de upgrade
+
+Vastgelegd, niet aan het geheugen overgelaten: **tot deze upgrade live staat, wordt er geen
+enkele nieuwe `SessionKeyAccount` aangemaakt tegen het echte, gedeployde programma
+(`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`).** Stap 1 hieronder gebruikt bewust een
+WEGWERP-programma-ID voor al zijn B2/B3-tests, juist om deze afspraak niet in de weg te
+zitten - daar mag vrijelijk getest worden, sessies aanmaken inbegrepen, zonder dat dit ooit
+meetelt voor de uitvoeringschecklist hierboven.
 
 ### Wat hier expliciet NIET bij hoort
 
@@ -7046,6 +7075,16 @@ instructielogica draait, dus deze drie accounts kunnen ook via `close_expired_se
 meer gesloten worden. Geverifieerd door de instructiedefinitie te lezen, niet aangenomen -
 hun rent blijft permanent vastzitten, exact zoals de oorspronkelijke afweging al benoemde.
 
+**AANVULLING (sectie 86): dit is niet uitsluitend een rentkwestie.** Het session-PDA-adres
+is afgeleid van `[b"session", wallet, session_key]` - `add_session_key` gebruikt `init` op
+dat adres (`programs/spankwallet/src/instructions.rs:1724-1731`), en `init` faalt op een
+adres dat al bestaat. Een gebrickt session-account bezet dat adres dus voor altijd: die ene
+specifieke `session_key` kan voor die ene wallet nooit meer gebruikt worden om een sessie
+aan te maken (praktisch onschadelijk - `session_key` is normaliter een vers, willekeurig
+gegenereerd keypair per sessie, dus dit "verbrandt" alleen die ene, toch-niet-herbruikte
+sleutelwaarde - maar het is meer dan de rent alleen, en had hier niet als zodanig moeten
+staan).
+
 **Dezelfde vraag speelt nu opnieuw voor B2's `epoch`-veld (421 -> 429 bytes), en moet
 opnieuw expliciet beantwoord worden, niet stilzwijgend hergebruikt:** op dit moment
 (gemeten, huidige devnet-slot 486707288) zijn ALLE 5 bestaande SessionKeyAccounts al voorbij
@@ -7136,3 +7175,54 @@ in de gesigneerde payload worden opgenomen. Een toekomstig achteraan-toegevoegd
 `WalletAccount`-veld dat NIET in een gesigneerde payload wordt opgenomen, en waarvan een
 giswaarde wél een beslissing beïnvloedt, zou dit argument niet automatisch erven - dat moet
 per veld opnieuw worden nagegaan, niet aangenomen op basis van dit precedent.
+
+## 86. Vier correcties op sectie 83/85 vóór stap 1: bestaande sessies daadwerkelijk gesloten (2 van 5), niet 5 van 5
+
+Vier punten, in opdracht, vóór sectie 83's stap 1 werd gestart.
+
+### 1. De vijf bestaande SessionKeyAccounts NU sluiten - resultaat: 2 gesloten, 3 blijken al langer permanent onsluitbaar
+
+Uitgevoerd (`scripts/closeExpiredSessions.ts`, nieuw, bewaard): voor elk van de 5 bestaande
+`SessionKeyAccount`s een `close_expired_session`-transactie gestuurd vanaf `id.json`
+(permissionless, `id.json` als `closer` betaalt de fee en ontvangt de rent).
+
+**Resultaat, direct gemeten, niet aangenomen: 2 van de 5 gesloten, 3 NIET.** De twee 421-byte
+accounts (`9XNheEEjRbdz6iAtn7BBxhCdYU45ZU9FXvptNg4s6Kz7`, `FfiXM5jd7H7SyYioq7wDrjs6jBhEXLVKNe7zeQWH312v`)
+sloten succesvol (sigs `63Wqz1Yv...`/`4YfTaP17...`, beide `finalized`, `err: null` -
+onafhankelijk bevestigd met `getTransaction` én `getAccountInfo("finalized")` die voor
+beide adressen `null` teruggeeft, dus echt weg, niet slechts een geslaagde simulatie). De
+eerste `getProgramAccounts`-nameting binnen hetzelfde scriptproces toonde nog steeds alle 5
+- een RPC-index-propagatie-gat (`getProgramAccounts`-scans lopen kennelijk achter op een
+directe `getAccountInfo`-read op hetzelfde commitment-niveau), niet een mislukte sluiting;
+een herhaalde meting na enkele seconden toonde het juiste, nieuwe totaal.
+
+De drie 341-byte-accounts (`BboAeF13yc6...`, `G7mHXv7mLhK...`, `Hfnv6gvWAMu...`) gaven bij de
+poging tot sluiten `AnchorError ... AccountDidNotDeserialize (0xbbb/3003)` - **een LIVE,
+vandaag daadwerkelijk opgetreden fout, niet langer een uit de broncode afgeleide
+verwachting.** Dit bevestigt sectie 85's conclusie hard: deze drie waren namelijk AL VOOR
+vandaag onsluitbaar (een gevolg van voorstel #10's eigen 341→421-uitbreiding, sectie 53),
+en blijven dat na deze poging net zo goed - er bestaat geen instructie in de huidige
+broncode die een account buiten Anchor's getypeerde `Account<'info, SessionKeyAccount>`-
+validatie om kan aanspreken (`close_session` gebruikt exact dezelfde typed-account-
+constraint als `close_expired_session`, geverifieerd door beide structdefinities te lezen).
+
+**Nameting: 3 SessionKeyAccounts over, NIET 0.** Dit wijkt af van wat opdracht 1 als
+uitkomst noemde ("bevestig dat er nul over zijn") - die aanname klopte niet voor de drie
+al-341-byte-accounts, om een reden die losstaat van vandaag: ze waren al vóór dit werk
+onsluitbaar. Wat WEL is bereikt: de twee accounts die nog daadwerkelijk sluitbaar waren (de
+enige twee waarvoor "vandaag nog sluiten, straks niet meer" een reële zorg was) zijn nu
+degelijk gesloten. Voor de resterende 3 verandert een B2/B3-deploy niets aan hun toestand -
+ze waren al kapot, blijven kapot, hun rent (3 x 3.264.240 = 9.792.720 lamport = 0,00979272
+SOL) zit al sinds vóór vandaag vast, niet pas sinds deze poging.
+
+### 2/3/4. Verwerkt direct op de brontekst, niet als losstaande aantekening hier
+
+- **Controle verplaatst van "bij indienen" naar "vlak vóór uitvoeren"**, met de volledige
+  72u-timelock-/B3-nog-niet-live-redenering: zie sectie 83's nieuwe "Uitvoeringschecklist"-
+  subsectie (bij stap 3) en de bijgewerkte regel bij stap 2.
+- **"Niet alleen rent"-correctie**: zie de "AANVULLING (sectie 86)" direct onder sectie 85's
+  oorspronkelijke, onvolledige rent-only-formulering - het session-PDA-adres wordt door
+  `add_session_key`'s `init`-constraint voor altijd bezet, niet alleen de rent gaat verloren.
+- **Expliciete afspraak (geen nieuwe sessies op het echte programma tot de upgrade)**: zie
+  sectie 83's nieuwe, met naam zo genoemde subsectie - vastgelegd, niet aan het geheugen
+  overgelaten.

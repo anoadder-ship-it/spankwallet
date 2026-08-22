@@ -7329,3 +7329,113 @@ proof-script al documenteerde, hier zelf opnieuw tegenaan gelopen bij het schrij
 B2-stap).
 
 **Nog steeds niets gepusht, geen buffer geschreven, geen voorstel ingediend.**
+
+## 88. Vier controles vóór de bufferstap: sessiestatus herbevestigd, scope dichtgetimmerd, droge oefening + reproduceerbaarheidsbewijs
+
+Vóór het eerste onomkeerbare moment sinds de deploy (een geschreven buffer + ingediend
+voorstel start de 72u-timelock; aanpassen kan daarna niet meer, alleen annuleren-en-
+opnieuw, de #8-les uit sectie 70) vier dingen gecontroleerd, geen van alle aangenomen.
+
+### 1. Sessiestatus opnieuw gemeten, niet aangenomen op sectie 86's uitkomst
+
+Direct herbevestigd tegen het echte programma: **2 van de 5 SessionKeyAccounts zijn
+daadwerkelijk gesloten** (`getAccountInfo("finalized")` op beide PDA's geeft `null` -
+onafhankelijk van `getProgramAccounts` bevestigd) - `7.642.080` lamport (`0,00764208`
+SOL) teruggevorderd naar `id.json`, exact herleid uit de twee transacties zelf
+(`preBalances`/`postBalances`/`fee`, niet aangenomen). **3 blijven staan - NIET nul.** Dit
+zijn dezelfde drie 341-byte-accounts als in sectie 86: nog steeds fysiek te kort voor het
+HUIDIGE (nog niet eens B2/B3-)programma, dus `close_expired_session`/`close_session` falen
+er nu al op (`AccountDidNotDeserialize`, Anchor's typed-account-validatie draait vóór de
+instructielogica) - onsluitbaar, niet "nog niet gesloten". Vastzittende rent: `3 x
+3.264.240 = 9.792.720` lamport (`0,00979272` SOL), ongewijzigd. Dit is geen actie die
+vandaag nog kon worden uitgevoerd - het was al vóór sectie 86 te laat voor deze drie.
+
+Beide gevraagde vastleggingen in sectie 83 herbevestigd aanwezig (regel voor regel
+nagelezen, niet uit het geheugen): de expliciete afspraak "geen nieuwe sessies op het echte
+programma tot de upgrade live is" staat er, en de nul-actieve-sessies-controle staat als
+harde stap in de UITVOERINGSCHECKLIST (vlak vóór uitvoeren), niet bij indienen - inclusief
+de eigen redenering waarom dat verschil hier betekenisvol is (72u-timelockvenster,
+`MAX_SESSION_DURATION_SLOTS` zelf pas live na deze upgrade).
+
+### 2. Scope-check: alles openstaand is client-side/documentatie, op één bevestigde uitzondering na die zelf ook niet meetelt
+
+Elk nog open punt nagelopen, niet op vertrouwen aangenomen:
+
+- **D3 (Tauri-CSP/`window.__TAURI__`)**: bevestigd bewust-alleen-gedocumenteerd (sectie 79),
+  betreft `desktop/src-tauri`'s Tauri-configuratie (CSP, capabilities) - geen Anchor-
+  programmacode, geen accountlayout.
+- **Tauri-fase-1-hardening** (de overige 18 instructies via de Tauri-desktop-app,
+  sectie 79's "structurele opening die vóór fase 1 dicht moet"): zelfde bevinding - client-
+  app-uitrol, geen programmawijziging.
+- **CodeQL #1** (`admin/wallet-signer.html`, "clear-text storage of sensitive information",
+  bevestigd via `gh api repos/:owner/:repo/code-scanning/alerts`: state `open`) - reëel,
+  bevestigd in sectie 64 als bewust een PROPORTIONELE mitigatie (verval-termijn) i.p.v. een
+  volledige fix, dus GitHub's alert blijft terecht open (de cleartext-`localStorage`-
+  schrijfactie zelf bestaat nog steeds, CodeQL's regel herkent geen "maar met TTL"). Puur
+  `admin/`-tooling (HTML/JS), geen programmacode.
+- **Bijvangst, niet door de gebruiker genoemd, wel gecontroleerd (huisregel: meet het
+  geheel):** drie ANDERE open CodeQL-alerts bleken te bestaan (`#3`/`#4`/`#5`,
+  `rust/hard-coded-cryptographic-value`, `desktop/src-tauri/src/challenge.rs` en
+  `fee_payer.rs`). Bronregels zelf gelezen, niet op de melding vertrouwd: alle drie liggen
+  binnen `#[cfg(test)] mod tests` - een vaste testvector (`action_nonce: u64 = 7`) en twee
+  testwachtwoorden (`"correct horse battery staple"`, de bekende XKCD-referentie, en
+  `"totaal ander wachtwoord"`, bewust verkeerd om weigering te testen). Bevestigde valse
+  positieven, geen echte kwetsbaarheid - en sowieso `desktop/src-tauri`, een aparte Rust-
+  crate, niet `programs/spankwallet`.
+- **Ontbrekende spend-cap op owner-signed `execute_advanced`**: geverifieerd door de
+  instructie zelf te lezen (`instructions.rs:1070` e.v.) - geen `max_lamports`-achtig veld,
+  geen cap-check, uitsluitend een allowlist-/executable-/CPI-target-binding-check. Dit is
+  geen half gebouwde functie die een migratie-overweging zou vereisen - er is structureel
+  NIETS gebouwd (spend-caps bestaan uitsluitend op `SessionKeyAccount`, nooit voor de
+  owner-eigen-passkey-route), consistent met de "gelaagde privileges" als nog-niet-begonnen
+  roadmap-item (sectie 1755/2043/5114). Terecht buiten scope: er is geen bestaand veld of
+  gedrag om mee rekening te houden.
+
+**Conclusie: niets van wat nu al gebouwd is (op `main`) vereist een programmawijziging die
+niet al in B1-B7 zit.** Alles wat openstaat is client-side, documentatie, of - voor de
+spend-cap-laag - eenvoudigweg nog niet begonnen.
+
+### 3. Droge oefening: `build-devnet-buffer.sh` tegen HEAD (`1fb3134`), niets geschreven
+
+- **Bron-commit:** `1fb3134043c800b16a544b338415724412b1e6ca` (HEAD op het moment van deze
+  oefening).
+- **Gebouwde `.so`:** 471.208 bytes, sha256 `62b450001e384805944c31d4da50fa3357f29a0b03012
+  935f6f3f14e83cbfb4a`.
+- **Controle 1 (positief):** `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` komt exact 1
+  keer voor, op offset 6712.
+- **Controle 2 (negatief):** geen van de 3 bekende test-/wegwerpadressen (lokale
+  spankwallet-testidentiteit, active-defense-testidentiteit, de B1-B7-wegwerp-devnet-deploy
+  uit sectie 87) komt voor in deze build.
+- **Exact commando dat STAP 1 zou uitvoeren** (met het `--buffer`-argument al vooraf
+  vastgelegd via voetangel 4's fix, sectie 87):
+  ```
+  solana program write-buffer /tmp/spankwallet-devnet-buffer-verified-1fb3134043c8.so \
+      --buffer <vooraf-gegenereerd-buffer-keypair.json> \
+      --url https://api.devnet.solana.com --keypair ~/.config/solana/id.json
+  ```
+  (het exacte buffer-adres verschilt per run, omdat het script bij elke aanroep een vers
+  keypair genereert - dat is bedoeld, zie sectie 87; er is geen enkele reden om een
+  buffer-adres tussen runs te hergebruiken.)
+
+Niets on-chain aangeraakt: het script schrijft zelf nooit een buffer, drukt uitsluitend het
+commando af.
+
+### 4. Reproduceerbaarheidsbewijs: dezelfde commit twee keer gebouwd, byte voor byte identiek
+
+Zelfde methode als sectie 79 destijds voor de canary-upgrade gebruikte. Het script noemt
+zijn tijdelijke bestanden naar de korte commit-hash - twee opeenvolgende runs op dezelfde
+commit overschrijven elkaars uitvoerbestand dus, ONTDEKT tijdens het uitvoeren van deze
+controle zelf (niet vooraf aangenomen dat dat geen probleem zou zijn) - opgevangen door elk
+resultaat direct na afloop naar een apart pad te kopiëren vóór de volgende run start.
+
+Twee volledig onafhankelijke builds (elk zijn eigen tijdelijke worktree, eigen
+`CARGO_TARGET_DIR`, geen enkel gedeeld cache-object) van exact commit `1fb3134`:
+- Run A: sha256 `62b450001e384805944c31d4da50fa3357f29a0b03012935f6f3f14e83cbfb4a`
+- Run B: sha256 `62b450001e384805944c31d4da50fa3357f29a0b03012935f6f3f14e83cbfb4a`
+- `cmp run-A.so run-B.so`: **geen verschil, byte-voor-byte identiek.**
+
+Alle tijdelijke bestanden (beide `.so`'s, beide buffer-keypairs) na afloop opgeruimd - geen
+van beide is ooit voor een echte `write-buffer`-aanroep gebruikt.
+
+**Nog steeds niets gepusht, geen buffer geschreven, geen voorstel ingediend. Wachten op
+een besluit van de gebruiker vóór er iets on-chain gebeurt.**

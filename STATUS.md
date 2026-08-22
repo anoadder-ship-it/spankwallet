@@ -7483,3 +7483,54 @@ van beide is ooit voor een echte `write-buffer`-aanroep gebruikt.
 
 **Nog steeds niets gepusht, geen buffer geschreven, geen voorstel ingediend. Wachten op
 een besluit van de gebruiker vóór er iets on-chain gebeurt.**
+
+## 89. Buffer geschreven, geverifieerd tegen de daadwerkelijke on-chain inhoud, authority naar de vault - voorstel nog NIET ingediend
+
+Na expliciete goedkeuring, in deze volgorde:
+
+**0. Poort geherformuleerd** (sectie 83/85, zie hierboven) vóórdat er iets on-chain
+gebeurde: "nul bruikbare sessies" i.p.v. "nul actieve/niet-verlopen sessies" - met die
+definitie was de poort al gehaald (2 gesloten, 3 inert, 0 bruikbaar).
+
+**1. Buffer gebouwd en geschreven tegen commit `1fb3134`** (expliciet dat commit, niet de
+inmiddels verder gevorderde HEAD): derde onafhankelijke build van dezelfde commit, sha256
+`62b450001e384805944c31d4da50fa3357f29a0b03012935f6f3f14e83cbfb4a` - identiek aan sectie
+88's twee eerdere, onafhankelijke builds. `--buffer` vooraf gepind op een zelf-gegenereerd
+keypair (voetangel 4's fix, sectie 87); het door `write-buffer` teruggegeven adres
+(`728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET`) kwam exact overeen met dat vooraf
+vastgelegde adres - geen enkele stap hing af van iets uit terminal-output overgetypt.
+
+**2. Voetangel 4 in de praktijk toegepast: geverifieerd tegen wat ECHT on-chain staat, niet
+tegen het lokale bestand.** `solana program dump` van het buffer-adres, `sha256sum` op de
+DUMP (niet op het lokale bestand) gaf exact `62b450001e384805944c31d4da50fa3357f29a0b030129
+35f6f3f14e83cbfb4a` - `cmp` tussen lokale build en on-chain-dump: byte-voor-byte identiek.
+`scripts/verify-program-id-in-binary.ts` gedraaid tegen DIE dump (niet het lokale bestand):
+beide controles geslaagd (adres exact 1x op offset 6712, geen bekend test-/wegwerpadres
+aanwezig).
+
+**3. Buffer-authority overgedragen aan de vault, geverifieerd door uit te lezen, niet
+aangenomen.** Vóór de overdracht: `solana program show` op het buffer-adres bevestigde
+authority = `id.json` (`G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`, wie het geschreven
+had). `solana program set-buffer-authority ... --new-buffer-authority
+89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw` gedraaid; **NIET op het commando's eigen
+printuitvoer vertrouwd** - een aparte, onafhankelijke `solana program show`-aanroep NA het
+commando bevestigt: `Authority: 89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`.
+
+**Kosten:** `id.json`-balans vóór het schrijven: `83,818225835` SOL; erna (schrijven +
+authority-overdracht): `80,535124755` SOL - delta `3,283101080` SOL. Daarvan is
+`3,28075608` SOL de rent-exempt-balans die nu IN het buffer-account zelf zit (komt terug
+naar de vault zodra het voorstel wordt uitgevoerd en de buffer geconsumeerd wordt - zelfde
+mechanisme als sectie 80 destijds voor voorstel #10 beschreef); de resterende `~0,0023` SOL
+zijn daadwerkelijke, niet-terugvorderbare transactiekosten (write-buffer schrijft een
+binary van deze grootte in veel losse chunk-transacties).
+
+**Terzijde opgemerkt, niet onderzocht (buiten scope van deze actie):** `solana program show
+--buffers --buffer-authority id.json` toont 11 ANDERE, oudere buffer-accounts onder
+`id.json`'s authority (in totaal ruim 30 SOL aan rent), vermoedelijk overblijfselen van
+eerdere voorstelrondes (proposal #5/#6/#7/#8, zie sectie 54/70) - niet aangeraakt, niet
+opgeruimd, geen aanname over gedaan. Losstaand punt voor een volgende opruimronde.
+
+**NIET gedaan, expliciet bij de gebruiker gelaten:** het multisig-voorstel indienen en
+goedkeuren via de adminpagina - dat blijft, zoals alles wat de multisig raakt, een bewuste,
+menselijke stap. Niets gepusht (de push-hold loopt door tot de upgrade live en
+geverifieerd is, SECURITY.md).

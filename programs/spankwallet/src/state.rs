@@ -63,11 +63,18 @@ pub struct WalletAccount {
     /// eenmaal geldige transactie bleef voor altijd letterlijk herhaalbaar.
     /// Bewust ACHTERAAN toegevoegd, nooit ertussenin, zelfde reden als de
     /// spend-limits-velden op SessionKeyAccount (sectie 53): Anchor/Borsh-
-    /// deserialisatie is offset-strikt, dus een bestaand, kortere-layout-
-    /// account (231 bytes, van vóór deze fix) faalt hierdoor SCHOON op
-    /// deserialisatie (AccountDidNotDeserialize, fail-closed) i.p.v. met een
-    /// giswaarde ingelezen te worden. Geen migratie-instructie gebouwd - zie
-    /// STATUS.md sectie 69 voor de expliciete, empirisch onderbouwde afweging.
+    /// deserialisatie is offset-strikt. LET OP - GECORRIGEERD (STATUS.md
+    /// sectie 85, na sectie 80/84's empirische controle): dit is GEEN
+    /// fail-closed garantie voor een echt (`None`/`None`) account, zoals
+    /// hier aanvankelijk stond. `WalletAccount::LEN`/`INIT_SPACE` is een
+    /// compile-time worst-case (beide Options `Some` verondersteld), dus een
+    /// gewoon `None`/`None`-account had al vóór deze fix nooit-beschreven
+    /// nul-padding achterin zijn toegekende ruimte zitten - dit veld leest
+    /// daar gewoon in en krijgt stilzwijgend `0` (fail-OPEN, geen fout).
+    /// Alleen de synthetische Some/Some-unittest (`old_231_byte_...`) raakt
+    /// écht de fysieke grens. Zie sectie 85 voor waarom dit desondanks geen
+    /// replay-gat opende (nonce zit in de gesigneerde payload zelf) en voor
+    /// de worst-case-analyse die wél bepaalt of dit structureel houdbaar is.
     pub action_nonce: u64,
 
     /// B2 (STATUS.md sectie 76, statische-audit-bevinding A2): monotoon
@@ -78,13 +85,15 @@ pub struct WalletAccount {
     /// wallet.session_epoch, dus een recovery maakt in één klap ELKE
     /// bestaande sessiesleutel ongeldig (SessionRevokedByRecovery), zonder
     /// dat elke sessie individueel opgezocht/ingetrokken hoeft te worden.
-    /// Bewust ACHTERAAN toegevoegd, nooit ertussenin - exact hetzelfde
-    /// offset-strikte fail-closed-argument als action_nonce hierboven: een
-    /// bestaand, kortere-layout-account (247 bytes, van vóór deze fix)
-    /// faalt hierdoor SCHOON op deserialisatie i.p.v. een giswaarde voor
-    /// session_epoch aan te nemen. Geen migratie-instructie - zie STATUS.md
-    /// sectie 76 voor de expliciete, praktische impact (bestaande devnet-
-    /// wallets/sessies falen na deploy schoon op deserialisatie).
+    /// Bewust ACHTERAAN toegevoegd, nooit ertussenin. LET OP - GECORRIGEERD
+    /// (STATUS.md sectie 85): dit is, net als action_nonce hierboven, GEEN
+    /// fail-closed garantie voor een echt account - zelfde Option-padding-
+    /// redenering, zelfde fail-open-uitkomst. (Oorspronkelijke, onjuiste
+    /// tekst noemde hier ook nog het verkeerde bytegetal - 247 is de lengte
+    /// MET dit veld, niet "van vóór deze fix"; dat was 239.) Zie sectie 85
+    /// voor de volledige, per-account worst-case-analyse van zowel
+    /// WalletAccount als SessionKeyAccount (die laatste heeft geen Option-
+    /// velden en faalt hierop wél echt fail-closed).
     pub session_epoch: u64,
 }
 
@@ -347,6 +356,18 @@ mod tests {
         // codeert Option::None altijd als 1 byte ongeacht T, dus alleen de
         // Some-tak geeft de volledige, WalletAccount::LEN-brede serialisatie
         // die deze tests nodig hebben om de layout-grenzen exact te simuleren.
+        //
+        // LET OP (STATUS.md sectie 85, na sectie 80/84's empirische controle
+        // tegen echte devnet-accounts): precies DAAROM bewijzen de twee
+        // tests hieronder GEEN fail-closed-garantie voor een echt account -
+        // vrijwel elke echte WalletAccount is None/None (deposit_authority
+        // kan in de huidige broncode zelfs nooit iets anders zijn dan None,
+        // geen enkele instructie zet 'm op Some), en een None/None-account
+        // leest een nieuw achteraan-veld gewoon uit nooit-beschreven
+        // nul-padding - stilzwijgend een 0, geen deserialisatiefout. Deze
+        // tests testen uitsluitend de theoretische Some/Some-grens (relevant
+        // zodra/als Fase 2 deposit_authority ooit op Some zet), niet wat een
+        // upgrade vandaag met een echt account doet.
         WalletAccount {
             seed_key: [2u8; PASSKEY_PUBKEY_LEN],
             wallet_seed_hash: [0u8; 32],

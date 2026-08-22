@@ -4481,7 +4481,10 @@ klasse fout als sectie 68 (`wallet` moet nu `mut`/writable zijn, stond nog overa
   flake in de sessiesleutel-expiry-test, losstaand van dit werk). `cargo test --lib`: een
   nieuwe, gerichte unit-test bevestigt het fail-closed-migratiepad direct op Anchor/Borsh's
   eigen (de)serialisatie (een oude 231-byte `WalletAccount` faalt schoon tegen de nieuwe
-  239-byte layout).
+  239-byte layout). **GECORRIGEERD, zie sectie 85:** dit klopt uitsluitend voor het
+  synthetische Some/Some-testgeval - een echt (`None`/`None`) account faalt NIET schoon,
+  het leest stilzwijgend `0` (fail-open, niet fail-closed). Sectie 85 bevat de volledige
+  correctie, de worst-case-analyse en waarom dit toch geen replay-gat bleek te zijn.
 - `tests/replay_execute.ts` omgebouwd van bewijs-van-het-lek naar permanente
   regressietest: eerste `execute()`-poging slaagt nog steeds, een TWEEDE poging met dezelfde
   (nu verouderde) handtekening wordt geweigerd, vaultbalans blijft na de tweede poging
@@ -5582,6 +5585,13 @@ elke wallet die na deze deploy weer gebruikt moet worden - de bestaande devnet-`
 (zie sectie 69's laatste empirische telling: 12 stuks, triviale rent-exempt-minimumbalansen)
 zijn daarna niet meer leesbaar door het programma en dus effectief verlaten; eventuele
 bestaande sessiesleutels zijn sowieso al irrelevant zodra hun wallet niet meer leesbaar is.
+
+**GECORRIGEERD, zie sectie 85 voor de volledige analyse:** de `WalletAccount`-helft van deze
+alinea klopt niet. Elke bestaande `WalletAccount` blijft na deze upgrade gewoon leesbaar -
+geen nieuwe wallet nodig, niets "verlaten". De `SessionKeyAccount`-helft klopt WEL (die
+heeft geen Option-velden, dus is dit hier daadwerkelijk fail-closed) - maar de conclusie
+("sessiesleutels zijn irrelevant") volgt dan uit de eigen fail-closed-aard van
+SessionKeyAccount, niet uit een dode wallet erachter.
 
 **Bewijs:** vier tests in `tests/sessionKeys.ts` - een sessie van vóór een recovery wordt na
 de recovery geweigerd met `SessionRevokedByRecovery` (en `spent_lamports` bewijsbaar
@@ -6812,43 +6822,33 @@ ook maar aan een buffer gedacht wordt:
    reproduceerbaar bewijs (signatuur, foutcode, exacte state-delta), niet aangenomen op
    basis van de unittests alleen.
 
-### Stap 2 - migratieveiligheid tegen de 14 ECHTE bestaande wallets, expliciet, niet aangenomen
+### Stap 2 - AFGEROND (sectie 85): worst-case-analyse, niet een momentopname
 
-Sectie 84 heeft empirisch bevestigd dat alle 14 huidige wallets (12 uit sectie 80 + 2 nieuw
-bijgekomen) nog gewoon decoderen tegen het HUIDIGE gedeployde programma (239-byte-layout,
-`action_nonce` aanwezig) - GEEN ervan is al kapot. De reden is nu ook precies bekend, niet
-alleen vermoed (sectie 84): `WalletAccount::LEN`/`INIT_SPACE` is altijd een compile-time
-WORST-CASE-constante (beide Options op `Some` verondersteld), gebruikt als vaste `space` bij
-`init` - dus ieder account had al vanaf zijn allereerste aanmaak "slack"-bytes achterin die
-in de praktijk (bij `None`/`None`, het gangbare geval) nooit beschreven werden. Een nieuw
-veld dat na een upgrade wordt toegevoegd, leest simpelweg verder in die al-bestaande,
-altijd-nul slack - zolang het totale aantal ECHT benodigde bytes (basisvelden + eventueel
-`Some`-payloads + alle inmiddels toegevoegde teller-velden) onder de fysieke accountgrootte
-blijft. Dat houdt een keer op: een account dat toevallig wél `Some`/`Some` was (of ooit
-wordt) op het moment dat zijn ruimte werd toegekend, heeft GEEN slack over.
+Sectie 85 heeft dit gedaan met de juiste maatstaf (worst case, niet "decodeert vandaag" -
+dat laatste bleek in sectie 84 zelf al het verkeerde criterium) en met `scripts/
+checkWorstCaseAccountSafety.ts` (nieuw, bewaard voor hergebruik), tegen alle 14
+`WalletAccount`s EN alle 5 bestaande `SessionKeyAccount`s:
 
-Verplicht, vóór een echt voorstel - niet meer een vage "generaliseert vermoedelijk"-aanname,
-maar een concrete berekening per bestaand account:
+- **`WalletAccount`: veilig, geen migratie nodig.** Onder de bereikbare worst case
+  (`recovery_state: Some` - een normale, door de eigenaar zelf te triggeren actie via
+  `initiate_recovery` - met `deposit_authority` geforceerd `None`, geverifieerd: precies één
+  schrijfplek in de hele broncode en die is altijd `None`) hebben alle 14 accounts ruim
+  voldoende marge (16-24 bytes over). Onder de volledige, nu nog onbereikbare Option-worst-
+  case (beide `Some`) zijn ze dat NIET - een vastgelegde tijdbom voor een toekomstig
+  Fase-2-voorstel, geen blokkade voor B1-B7.
+- **`SessionKeyAccount`: NIET veilig, zonder uitzondering, geen Option-velden dus geen
+  tussenpositie mogelijk.** Alle 5 bestaande sessies zijn te kort voor de nieuwe 429-byte
+  layout. Dit is dezelfde afweging die al eerder, bewust, is gemaakt (sectie 53, bij de
+  vorige zo'n toevoeging) en die vandaag empirisch is bevestigd exact zo te zijn uitgekomen
+  als toen voorspeld - zie sectie 85 voor de volledige precedent-analyse en waarom dit
+  bewust-aanvaarde-kosten-pad ook nu weer volstaat, MITS bij het daadwerkelijke voorstel
+  opnieuw (niet aangenomen) bevestigd wordt dat er dan nul actieve sessies bestaan.
 
-- Voor elk van de 14 accounts: fysieke `data.length` (al gemeten, sectie 84) MINUS de
-  daadwerkelijk benodigde bytelengte voor de NIEUWE B1-B7-layout, gegeven DIE ene account
-  zijn eigen `recovery_state`/`deposit_authority`-tags (`Some` kost meer dan `None`) - dat
-  verschil is de resterende slack. Alle 12 sectie-80-wallets zijn `None`/`None` op één na
-  (`recovery_state: Some`); geen enkele is `Some`/`Some` (het enige scenario zonder slack).
-  Reken dit toch per account uit in plaats van op dat patroon te vertrouwen - dat is precies
-  het verschil tussen meten en aannemen dat sectie 82 en sectie 84 allebei hebben willen
-  vastleggen.
-- `scripts/checkAllOldWallets.ts`-methodologie hergebruiken, maar dan de rauwe bytes van
-  alle huidige echte devnet-wallets (leesalleen, geen transacties, geen kosten) decoderen
-  tegen de NIEUWE B1-B7-IDL/layout uit stap 1's throwaway-deploy (niet tegen de huidige live
-  layout - sectie 84's methode, een geïsoleerde worktree op de exacte build-commit, hergebruiken
-  voor de B1-B7-kant van deze vergelijking). Doel: vaststellen of een van de 14 bestaande
-  wallets een onverwachte/giswaarde krijgt op een NIEUW B1-B7-veld (`session_epoch` of
-  vergelijkbaar), net zoals de bestaande `action_nonce`-restdata-vondst bij precies één
-  wallet (sectie 80).
-- Bij een treffer: uitzoeken of dat veld ergens een beslissing beïnvloedt (net als bij
-  `action_nonce`, waar een giswaarde onschadelijk bleek omdat client en programma dezelfde
-  bytes symmetrisch lezen) - niet aannemen dat het vanzelf goed gaat, aantonen.
+**Resterende, verplichte actie vóór een echt voorstel (niet vóór stap 1 hieronder, die mag
+gewoon doorgaan):** vlak vóór het indienen van een echt B1-B7-voorstel, `scripts/
+checkWorstCaseAccountSafety.ts`'s SessionKeyAccount-deel opnieuw draaien EN de `expiry_slot`
+van elk resultaat tegen de dan-actuele slot controleren - niet op de meting van vandaag
+(sectie 85) vertrouwen, die is een momentopname.
 
 ### Stap 3 - pas ná stap 1 én 2: de reeds-geformaliseerde bufferroute
 
@@ -6867,12 +6867,12 @@ sowieso gekoppeld aan SECURITY.md's beleid (pushen pas nadat de bijbehorende upg
 geverifieerd is), en B1-B7 is dat per definitie nog niet vóórdat stap 1-3 hierboven zijn
 doorlopen.
 
-**Bijgewerkt na sectie 84's hermeting:** dit plan was aanvankelijk geformuleerd zonder
-harde bevestiging dat de bestaande wallets nog leven - stap 2 hierboven ging aanvankelijk uit
-van sectie 80's vage "generaliseert vermoedelijk"-aanname. Sectie 84 heeft dit direct
-gemeten: alle 14 bestaande wallets decoderen nog gewoon tegen het huidige programma, en stap
-2 is hierboven al bijgewerkt naar een concrete restruimte-berekening per account in plaats
-van die aanname.
+**Bijgewerkt na sectie 84 en 85:** dit plan is in twee rondes scherper getrokken. Sectie 84
+verving eerst de aanname door een directe meting (alle 14 bestaande wallets decoderen nog
+tegen het huidige programma). Sectie 85 verving die momentopname op zijn beurt door de
+juiste maatstaf (worst case, niet "vandaag") en vond de daadwerkelijke ontwerpvraag: niet
+bij `WalletAccount` (veilig, zie stap 2), maar bij `SessionKeyAccount` (niet veilig, zonder
+uitzondering - zelfde, al eerder bewust aanvaarde afweging als sectie 53, opnieuw bevestigd).
 
 ## 84. Drie punten vóór sectie 83's uitvoering: nulmeting van de 14 echte wallets, spl-token-herkomst gevonden, werkboom weer leeg
 
@@ -6971,3 +6971,168 @@ dezelfde periode als sectie 81's werkboom-vermenging - dezelfde soort fout, ande
 
 `git worktree remove` voor de tijdelijke `deployed-state-check`-worktree, `git status` is nu
 leeg.
+
+## 85. Worst-case-analyse vóór B1-B7: fail-closed bleek fail-open, één ontwerpvraag blijft staan
+
+Vóór sectie 83's stap 1 (wegwerp-deploy) is eerst de goedkope vraag beantwoord: niet "werkt
+dit vandaag" (sectie 84 - het verkeerde criterium, achteraf), maar "is de TOEGEKENDE
+accountgrootte van elk bestaand account groot genoeg voor de nieuwe layout, onder de
+WORST CASE, niet de huidige staat". Reden waarom dit onderscheid ertoe doet: restruimte die
+vandaag ongebruikt is (`recovery_state: None`) kan morgen verdwijnen zodra de eigenaar
+`initiate_recovery` aanroept - precies het moment waarop iemand zijn wallet het hardst nodig
+heeft. Een momentopname van vandaag bewijst dus niets over overmorgen.
+
+### Het criterium, en waarom "volledige Option-worst-case" zelf ook niet klopt zonder verificatie
+
+Twee kandidaat-worst-cases voor `WalletAccount` (die twee `Option`-velden heeft,
+`recovery_state` en `deposit_authority`):
+- **Volledige Option-worst-case (247 bytes):** beide Options `Some`. Dit is wat de
+  bestaande unittests (`old_231_...`/`old_239_...`) simuleren.
+- **Bereikbare worst-case (215 bytes):** alleen de Options die de HUIDIGE broncode
+  daadwerkelijk kan zetten. Niet aangenomen, nagezocht: `grep -n "deposit_authority"
+  programs/spankwallet/src/instructions.rs` geeft precies ÉÉN schrijfplek
+  (`wallet.deposit_authority = None;`, in `init_wallet`) - geen enkele instructie zet dit
+  veld ooit op `Some`, het is expliciet "Fase 2, nog niet actief" (zie ook de eigen
+  foutmelding `errors.rs`: "Fee-inbox (deposit_authority) is nog niet actief"). `recovery_state`
+  daarentegen wordt WEL op `Some` gezet, door `initiate_recovery` - een normale, door de
+  eigenaar zelf te triggeren actie (`programs/spankwallet/src/instructions.rs:1542`). De
+  bereikbare worst case is dus: `recovery_state: Some`, `deposit_authority` geforceerd
+  `None` -> 215 bytes.
+
+Dit is precies het soort alternatief dat uitgesloten moet worden vóór een verklaring afkomt:
+de "volledige Option-worst-case" (247) is intern consistent maar irrelevant zolang
+`deposit_authority` structureel onbereikbaar is - en dat is nu geverifieerd, niet aangenomen.
+
+### Gemeten (`scripts/checkWorstCaseAccountSafety.ts`, nieuw, bewaard voor hergebruik bij elke volgende layoutwijziging)
+
+**WalletAccount (14 accounts):** allemaal 231 of 239 bytes toegekend.
+- Onder de BEREIKBARE worst case (215): **alle 14 veilig** (231 ≥ 215, marge 16 bytes; 239 ≥
+  215, marge 24 bytes). Geen migratie nodig voor B1-B7 - bestaande wallets blijven na een
+  B2/B3-deploy gewoon leesbaar, ook als de eigenaar ondertussen een recovery start.
+- Onder de VOLLEDIGE Option-worst-case (247): **alle 14 onveilig** (max 239 < 247). Dit is
+  op dit moment een dode letter (deposit_authority kan niet Some worden), maar wél een
+  concrete, nu al zichtbare tijdbom: **als Fase 2 ooit `deposit_authority` op `Some` zet
+  zonder een bijbehorende migratie/realloc, breken dezelfde 14 (of hoeveel er dan bestaan)
+  wallets alsnog** - vastgelegd hier zodat dit niet over een jaar opnieuw met tegenzin
+  ontdekt hoeft te worden. Een toekomstig Fase-2-voorstel moet deze exacte vraag opnieuw
+  stellen, met dan geldende cijfers.
+
+**SessionKeyAccount (5 accounts):** 421 of 341 bytes toegekend, GEEN Option-velden dus geen
+tussenpositie mogelijk - "bereikbare worst case" en "volledige worst case" vallen hier
+samen op 429. **Alle 5 onveilig, zonder uitzondering.** Dit is de daadwerkelijke
+ontwerpvraag die blijft staan (zie hieronder).
+
+### De ontwerpvraag zit dus bij SessionKeyAccount, niet bij WalletAccount - en dit is al eerder, bewust zo besloten
+
+Dit is GEEN nieuwe situatie: precies dezelfde stap (een nieuw veld achteraan
+`SessionKeyAccount`) gebeurde al één keer eerder, toen voorstel #10's spend-limits-velden
+werden toegevoegd (341 -> 421 bytes, sectie 53). Die beslissing staat al expliciet
+vastgelegd (regel ~3379 hierboven): *"bewust fail-closed, geen migratie-instructie
+gebouwd... de drie bestaande, al-verlopen devnet-accounts (~0,0098 SOL rent totaal) worden
+na een toekomstige deploy permanent onbruikbaar/onsluitbaar... een bewust aanvaarde, kleine
+en volledig fail-safe kost."*
+
+**Vandaag geverifieerd dat die voorspelling exact is uitgekomen, niet slechts waarschijnlijk
+is:** de drie 341-byte-accounts (`BboAeF13yc6...`, `G7mHXv7mLhK...`, `Hfnv6gvWAMu...`) zijn
+precies de drie uit die voorspelling (rauwe bytes gelezen: `wallet`/`sessionKey`/
+`expirySlot` blijven op vaste, ongewijzigde offsets ongeacht layoutversie, dus zonder
+IDL-afhankelijkheid uit te lezen). Alle drie hadden een `expiry_slot` (482743050/482751268/
+483285709) die al VOOR voorstel #10's executieslot (485929485) verstreken was - dus geen
+enkele levende sessie ging verloren, precies zoals voorzien. Rent: 3 x 3.264.240 = 9.792.720
+lamport = **0,00979272 SOL** - nagenoeg exact de voorspelde "~0,0098 SOL". **En:** `close_
+expired_session` gebruikt Anchor's getypeerde `Account<'info, SessionKeyAccount>` (niet een
+`UncheckedAccount`) - Anchor's eigen accountvalidatie deserialiseert dus AL vóórdat de
+instructielogica draait, dus deze drie accounts kunnen ook via `close_expired_session` niet
+meer gesloten worden. Geverifieerd door de instructiedefinitie te lezen, niet aangenomen -
+hun rent blijft permanent vastzitten, exact zoals de oorspronkelijke afweging al benoemde.
+
+**Dezelfde vraag speelt nu opnieuw voor B2's `epoch`-veld (421 -> 429 bytes), en moet
+opnieuw expliciet beantwoord worden, niet stilzwijgend hergebruikt:** op dit moment
+(gemeten, huidige devnet-slot 486707288) zijn ALLE 5 bestaande SessionKeyAccounts al voorbij
+hun eigen `expiry_slot` (de twee 421-byte-accounts inbegrepen: 485935230/485934649, beide
+< 486707288) - dus een deploy VANDAAG zou, net als bij #10, nul levende sessies raken.
+**Dit is een momentopname, geen garantie** - tussen nu en een daadwerkelijk voorstel kunnen
+nieuwe, wel-levende sessies ontstaan (gewoon testgebruik, of toekomstig echt gebruik). Sectie
+83's stap 1 gebruikt bewust een WEGWERP-programma-ID voor zijn eigen B2/B3-tests, dus die
+sessies tellen niet mee voor het echte programma - maar vóór een echt voorstel voor het echte
+programma moet deze exact-nul-actieve-sessies-conditie OPNIEUW gemeten worden, niet
+aangenomen op basis van dit moment. `MAX_SESSION_DURATION_SLOTS` (B3, ~7 dagen) geeft een
+harde bovengrens: wachten tot elke sessie die op enig moment tussen nu en het voorstel is
+aangemaakt, vanzelf verlopen is, is een eenvoudige, aantoonbare manier om dit gegarandeerd
+waar te maken in plaats van te hopen dat het toevallig zo uitkomt.
+
+**Conclusie, expliciet als ontwerpvraag (niet als afgehandeld detail):** B2/B3 kunnen in hun
+huidige vorm door zonder migratie-instructie, MITS bij het daadwerkelijke voorstel opnieuw
+(niet aangenomen) bevestigd wordt dat er dan nul actieve `SessionKeyAccount`s bestaan - exact
+dezelfde afweging als sectie 53 al eerder expliciet maakte en die nu voor de tweede keer
+correct blijkt. Het al geschetste migratiepad (`UncheckedAccount` + handmatige oude-layout-
+parsing + verse, passkey-ondertekende her-autorisatie per sessie) staat klaar voor het
+moment dat dit ooit wél om echte, actieve sessies gaat.
+
+### Fail-closed was fail-open: het mechanisme, precies
+
+De aanname in secties 69 en 76 (nu gecorrigeerd op de brontekst zelf, zie de
+"GECORRIGEERD"-aantekeningen daar, en in `state.rs`'s veldcommentaar) was: een ouder,
+kortere-layout `WalletAccount` faalt SCHOON op deserialisatie tegen een nieuwe, langere
+structuurdefinitie. Sectie 80/84 hebben al empirisch aangetoond dat dit niet zo is voor een
+echt account; hier het MECHANISME, niet slechts de waarneming:
+
+`WalletAccount::LEN`/Anchor's `INIT_SPACE` is een COMPILE-TIME constante, berekend voor het
+WORST-CASE-scenario (beide Options `Some`) - en dat was al zo vóórdat `action_nonce` of
+`session_epoch` bestonden. Een account met de gangbare `None`/`None`-combinatie krijgt bij
+`init` dus altijd al MEER fysieke ruimte toegekend dan de daadwerkelijk geserialiseerde
+inhoud nodig heeft; het verschil is nooit-beschreven nul-padding. Een later, achteraan
+toegevoegd veld leest simpelweg verder in die al-bestaande padding - binnen de fysieke
+buffer, dus geen `AccountDidNotDeserialize`, gewoon een `0`. Dat is fail-OPEN (stilzwijgend
+een plausibele default aannemen), niet fail-closed (expliciet weigeren) - het tegenovergestelde
+van wat er werd beweerd. Het houdt op zodra een account zijn toegekende worst-case-ruimte al
+volledig gebruikt (`Some`/`Some` bij toekenning) - vandaar dat de synthetische unittests
+(die precies dat geval bouwen) wel degelijk fail-closed waarnemen: ze testen het enige geval
+waarin dat ook klopt.
+
+### Heeft dit fail-open-gedrag een replay-venster geopend? Met bewijs, niet met een geruststelling
+
+Concrete vraag: de elf "onschadelijke" wallets lazen na voorstel #10's deploy stilzwijgend
+`action_nonce: 0` (i.p.v. een deserialisatiefout). Is dat ooit een bruikbaar replay-gat
+geweest?
+
+**Nee - om twee onafhankelijke, in de broncode geverifieerde redenen, niet uit aanname:**
+
+1. **De nonce zit IN de gesigneerde payload zelf, niet ernaast.** Elke van de 12 aanroepplekken
+   van `check_current_action_nonce` bouwt de `expected_challenge` op met
+   `payload.extend_from_slice(&current_nonce.to_le_bytes())` VOORDAT de passkey-handtekening
+   geverifieerd wordt (geverifieerd: alle 12 treffers van `current_nonce` in
+   `instructions.rs`, niet een steekproef). Een handtekening van VOOR de C-1-fix (toen
+   `action_nonce` nog niet bestond, dus een compleet ander, korter payload-formaat) kan
+   daardoor NOOIT tegen de nieuwe, nonce-bevattende challenge verifiëren - los van welke
+   waarde er toevallig on-chain staat. Er is dus geen "oude handtekening opnieuw indienen
+   nu de nonce toch 0 blijkt"-scenario mogelijk: het cryptografische materiaal zelf past
+   niet meer.
+2. **Vanaf de fix is de handhaving symmetrisch, ongeacht de startwaarde.** De client leest
+   de autoritatieve waarde altijd LIVE van de chain (`fetchActionNonce()` in
+   `tests/webauthnTestHelper.ts:55-83`: een rechtstreekse `getAccountInfo` + `readBigUInt64LE`
+   op het echte offset, geen cache, geen aparte client-telling) - dezelfde bytes die het
+   programma zelf controleert. Een eigenaar met de juiste passkey ontdekt dus altijd de
+   juiste, actuele waarde (0, of - voor het ene anomale account - een willekeurige grote
+   restwaarde) en ondertekent daarmee; het programma verhoogt hem na gebruik
+   (`consume_action_nonce`), dus een tweede indiening van dezelfde handtekening wordt
+   daarna geweigerd (`StaleActionNonce`) - empirisch al bevestigd voor een gloednieuwe
+   wallet (sectie 80's replay-test) en logisch identiek voor een startwaarde van 0 op een
+   oud account: er is niets bijzonders aan "beginnen bij 0", een gloednieuwe wallet doet dat
+   ook.
+
+**Waar dit WEL op uitkomt:** de oorspronkelijke garantie ("faalt schoon, geen giswaarde") was
+feitelijk onjuist, en dat is een reële correctie, geen kleinigheid - maar de VEILIGHEID van
+de replay-bescherming zelf hing daar nooit vanaf; die steunt op de nonce-in-de-signed-
+payload-constructie, die intact is gebleven. Voor het ene account met een echte
+restwaarde-`action_nonce` (`3Ape3ge72Rkv...`) geldt dezelfde redenering onverkort - een grote
+willekeurige startwaarde is voor dit mechanisme niet gevaarlijker dan 0, alleen minder
+voorspelbaar voor een buitenstaander (wat geen beveiligingseigenschap is waar iets op
+steunde).
+
+**Wat dit NIET beweert:** dat elke toekomstige, vergelijkbare toevoeging vanzelf even
+onschuldig is. Dit resultaat is specifiek voor `action_nonce`/`session_epoch` omdat BEIDE
+in de gesigneerde payload worden opgenomen. Een toekomstig achteraan-toegevoegd
+`WalletAccount`-veld dat NIET in een gesigneerde payload wordt opgenomen, en waarvan een
+giswaarde wél een beslissing beïnvloedt, zou dit argument niet automatisch erven - dat moet
+per veld opnieuw worden nagegaan, niet aangenomen op basis van dit precedent.

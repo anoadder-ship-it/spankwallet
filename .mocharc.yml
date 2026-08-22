@@ -7,5 +7,11 @@
 # wordt - onafhankelijk van welke bestanden de suite bevat of wat ze zelf
 # importeren. Zie STATUS.md sectie 76/77 voor het empirische bewijs dat dit
 # standhoudt, ook voor een testbestand dat de helper niet importeert.
+# Validator-detectie (STATUS.md, hunt-rentsplitsing/precisiefout-sectie):
+# tests/verifyValidatorType.ts exporteert mochaGlobalSetup, dat mocha
+# ZELF awaitet vóórdat ook maar één testbestand geladen wordt - net als
+# verifyBinaryFresh.ts hierboven onafhankelijk van hoe mocha wordt
+# aangeroepen. Weigert te draaien tegen surfpool.
 require:
   - tests/verifyBinaryFresh.ts
+  - tests/verifyValidatorType.ts

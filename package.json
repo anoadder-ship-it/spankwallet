@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "anchor test"
+    "test": "anchor test --validator legacy"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",

@@ -221,6 +221,24 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
   // daadwerkelijk in de instructie terechtkomt - alleen gebruikt door de
   // B5-manipulatietest hieronder om te bewijzen dat zo'n mismatch de
   // handtekeningverificatie laat falen.
+  // Wortelfix (STATUS.md, precisiefout-sectie): provider.wallet (=id.json)
+  // krijgt op elke verse lokale validator standaard 500.000.000 genesis-SOL
+  // (5e17 lamport) - ver voorbij Number.MAX_SAFE_INTEGER (~9e15). Elke test
+  // die een EXACT lamportbedrag afleidt uit transactie-meta (preBalances/
+  // postBalances, door web3.js als gewone JS Number geparsed, geen BigInt)
+  // op een account met zo'n balans meet dus met stille precisieverlies -
+  // niet een randgeval, een structurele eigenschap van id.json als fee-
+  // payer/rentDestination. Een verse, bescheiden gefinancierde keypair
+  // houdt elke gemeten balans in de transactie ruim binnen veilig
+  // Number-bereik, zonder dat er ook maar íets aan de meting zelf hoeft te
+  // veranderen.
+  async function fundFreshKeypair(lamports: number): Promise<Keypair> {
+    const kp = Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(kp.publicKey, lamports);
+    await provider.connection.confirmTransaction(sig, "confirmed");
+    return kp;
+  }
+
   async function callHunt(
     signingPasskey: TestPasskey,
     walletPda: PublicKey,
@@ -229,7 +247,8 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     targetTokenAccount: PublicKey,
     tokenMint: PublicKey,
     rentDestination: PublicKey,
-    signAsRentDestination?: PublicKey
+    signAsRentDestination?: PublicKey,
+    feePayer?: Keypair
   ) {
     const nonce = await fetchActionNonce(provider.connection, walletPda);
     const payload = Buffer.concat([
@@ -271,6 +290,20 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     });
 
     const tx = new anchor.web3.Transaction().add(secp256r1Ix, huntIx);
+    if (feePayer) {
+      // Handmatig gebouwd i.p.v. provider.sendAndConfirm: die ondertekent
+      // altijd met provider.wallet (=id.json) als fee-payer. Hier moet de
+      // meegegeven, bescheiden gefinancierde keypair de fee betalen (en dus
+      // ook de enige vereiste handtekening leveren - secp256r1Ix en huntIx
+      // vereisen zelf geen enkele Signer-account).
+      const { blockhash } = await provider.connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = feePayer.publicKey;
+      tx.sign(feePayer);
+      const sig = await provider.connection.sendRawTransaction(tx.serialize());
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      return sig;
+    }
     return provider.sendAndConfirm(tx);
   }
 
@@ -290,7 +323,16 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     // STATUS.md sectie 17 al documenteert). Opgelost door de daadwerkelijke
     // pre-/post-lamport-balansen rechtstreeks uit de transactie-meta te
     // lezen (zie txInfo hieronder) i.p.v. losse balansqueries vóór/na.
-    const rentDestination = provider.wallet.publicKey;
+    //
+    // rentDestination is BEWUST NIET provider.wallet (=id.json): die heeft
+    // op elke verse lokale validator 500.000.000 genesis-SOL, ver voorbij
+    // Number.MAX_SAFE_INTEGER, en deze test leest exacte lamportbedragen uit
+    // txInfo.meta - web3.js parseert die als gewone JS Number, dus een
+    // balans van die grootte geeft stille precisieverliezen (zie
+    // fundFreshKeypair hierboven). 2 SOL is ruim genoeg voor rent+fees en
+    // ruim binnen veilig Number-bereik.
+    const rentDestinationKeypair = await fundFreshKeypair(2_000_000_000);
+    const rentDestination = rentDestinationKeypair.publicKey;
 
     const tokenAccountRentExempt =
       await provider.connection.getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_LEN);
@@ -302,7 +344,9 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
       passkeysPda,
       tokenAccount.publicKey,
       mint.publicKey,
-      rentDestination
+      rentDestination,
+      undefined,
+      rentDestinationKeypair
     );
 
     // Harde bron van waarheid: de daadwerkelijke pre-/post-lamport-balansen
@@ -353,9 +397,13 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     );
 
     // Zelfde bron (transactie-meta) voor rentDestination - rentDestination
-    // is hier ook de fee-payer, dus een LOSSE balansquery zou ook de
-    // transactiekosten meetellen; de meta geeft de exacte, geïsoleerde
-    // delta van deze ene transactie, geen fudge-marge nodig.
+    // is hier ook de fee-payer (de verse rentDestinationKeypair, niet
+    // id.json), dus een LOSSE balansquery zou ook de transactiekosten
+    // meetellen; de meta geeft de exacte, geïsoleerde delta van deze ene
+    // transactie, geen fudge-marge nodig. Beide balansen (2 SOL start,
+    // gemeten delta's in de honderdduizenden lamport) zitten ruim binnen
+    // veilig Number-bereik, dus deze aftrekking is nu exact - geen BigInt
+    // nodig zoals bij een onvermijdelijk grote balans (zie STATUS.md).
     const rentDestinationIndex = txAccountKeys.findIndex((k) => k.equals(rentDestination));
     const rentDestinationTxDelta =
       txInfo.meta.postBalances[rentDestinationIndex] - txInfo.meta.preBalances[rentDestinationIndex];

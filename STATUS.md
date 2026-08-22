@@ -6457,3 +6457,310 @@ ongerelateerde broncode). Met de aparte worktree hierboven kan dat structureel n
 gebeuren: elke branch heeft nu zijn eigen map, zijn eigen HEAD, zijn eigen `git`-commando's
 die alleen daar landen.
 
+## 82. Hunt-rentsplitsing-onderzoek: twee meetfouten, drie voetangels, en waarom "groen" dit vandaag al drie keer iets anders bleek te betekenen
+
+Aanleiding: `tests/hunt.ts`'s 50/50-rentsplitsing-test faalde met een verschil van exact
+5000 lamport - één signatuurfee. Wat volgde was geen enkele bug, maar twee losstaande
+meetfouten in de teststack zelf (geen van beide een programmabug), plus drie structurele
+voetangels die daarbij aan het licht kwamen. Zelfde discipline als sectie 76: meten, niet
+aannemen, en bij twijfel de assertie NIET verzachten met een marge - een assertie met
+speling bewijst niets meer.
+
+### Vondst 1: surfpool meldt de helft van de daadwerkelijk ingehouden fee
+
+**Symptoom:** `rentDestinationTxDelta + fee === expectedToUser` faalde met exact 5000
+lamport verschil, op een validator gestart via een kale `anchor test` (deze
+anchor-cli-fork's `--validator`-vlag heeft `default_value = "surfpool"` -
+bevestigd in de fork's eigen broncode, `cli/src/lib.rs`, niet aangenomen).
+
+**Hoe gevonden:** de hunt-instructie zelf bevat een gesloten-vorm-identiteit
+(`instructions.rs`): `to_incinerator + to_user` telt altijd exact op tot `reclaimed`, en de
+vault keert na de instructie altijd terug naar zijn beginbalans. Incinerator ontving exact
+`to_incinerator`; vault-delta was exact 0 - dus moest rent_destination's ECHTE, door het
+programma gecrediteerde bedrag exact `to_user` zijn, ongeacht wat de meting zei. Het verschil
+kon dus niet in het programma zitten.
+
+**Werkelijke oorzaak, empirisch bevestigd op zowel surfpool als een echte
+`solana-test-validator`, met een balans klein genoeg om JS-Number-precisie niet te laten
+knappen (zie vondst 2):**
+
+| bron | fee_payer pre | post | delta | meta.fee |
+|---|---|---|---|---|
+| surfpool | 9999981299160 | 9999982308800 | 1009640 | **5000** |
+| echte validator | 9992687880 | 9993697520 | 1009640 | **10000** |
+
+Dezelfde transactie, dezelfde 1009640-lamport-delta - maar surfpool rapporteert `meta.fee =
+5000` waar de daadwerkelijke inhouding (af te leiden uit de delta + de gesloten-vorm-
+identiteit) 10000 is. Surfpool houdt dus in de praktijk het dubbele in van wat het in
+`meta.fee` meldt, voor deze transactie. Geen programmabug, geen testbug - een fout in
+surfpool's eigen fee-rapportage.
+
+**Waarom de assertie zonder marge juist goed was:** `rentDestinationTxDelta + fee ===
+expectedToUser` is op een echte validator EXACT juist (1009640 + 10000 = 1019640 =
+expectedToUser, geen afronding, geen speling nodig). Het verschil zat uitsluitend in de
+INPUT (`meta.fee`), niet in de vergelijking zelf. Een marge inbouwen om dit op surfpool
+groen te krijgen zou de 50/50-splitsing niet meer bewijzen - precies waarom dat niet is
+gedaan.
+
+### Vondst 2: id.json's 500.000.000 genesis-SOL laat JS `Number` de lamportbalans stilzwijgend afronden
+
+**Symptoom:** met de precieze surfpool-fout omzeild bleef de test op een ECHTE
+`solana-test-validator` alsnog falen - ditmaal 40 lamport verschil, geen nette veelvoud van
+een fee.
+
+**Hoe gevonden:** de rauwe RPC-JSON-tekst (string-niveau) naast web3.js' `Number`-parsing
+gelegd voor exact dezelfde transactie:
+
+| bron | pre | post | delta |
+|---|---|---|---|
+| rauwe RPC-tekst (BigInt) | 500000000947320240 | 500000000948329880 | **1009640** |
+| web3.js (`Number`) | 500000000947320260 | 500000000948329860 | **1009600** |
+
+`BigInt-delta + fee (10000) = 1019640 = expectedToUser`, exact - de on-chain boekhouding was
+weer eens perfect sluitend. Het verschil (40 lamport) ontstaat puur doordat `id.json` - de
+standaardwallet die deze hele workspace als fee-payer/rentDestination gebruikt - bij elke
+verse `solana-test-validator` automatisch 500.000.000 SOL genesis-krijgt (5×10¹⁷ lamport),
+ver voorbij `Number.MAX_SAFE_INTEGER` (≈9×10¹⁵). `getTransaction()`'s `preBalances`/
+`postBalances` worden door web3.js via gewone `JSON.parse` ingelezen - geen BigInt - dus die
+getallen zijn al fout vóórdat de test ook maar gaat aftrekken.
+
+**Wortelfix, niet de assertie:** `tests/hunt.ts`'s hoofdtest gebruikt niet langer
+`provider.wallet` (=id.json) als fee-payer/rentDestination, maar een verse, met 2 SOL
+gefinancierde keypair (`fundFreshKeypair()`) - ruim genoeg voor rent+fees, ver onder de
+veilige grens. Dat haalt de conditie weg voor de HELE suite, niet alleen voor deze ene test;
+de assertie zelf (`rentDestinationTxDelta + fee === expectedToUser`) is ongewijzigd, exact,
+zonder marge.
+
+**Sweep over de hele suite** (`preBalances`, `postBalances`, `getBalance(`, `.lamports`
+na `getAccountInfo`, `getMultipleAccountsInfo`, `getParsedAccountInfo`,
+`getTokenAccountBalance`, `pre/postTokenBalances`, `getMinimumBalanceForRentExemption`, en
+elke `getAccountInfo`/`getBalance` gecombineerd met `provider.wallet`, doorzocht over alle
+`tests/*.ts`): `tests/hunt.ts` was de ENIGE besmette plek. Elke andere exacte-bedrag-
+assertie meet een account dat expliciet met een bescheiden bedrag is gefund (nooit id.json
+zelf), of leest programma-eigen state (`session.spentLamports`/`spentTokenAmount`) via
+Anchor's BN-decodering van accountdata - een ander leespad, nooit via JSON.parse van een
+grote RPC-balans. B5/B6/B7 specifiek gecontroleerd: geen van de drie meet een exact
+lamportbedrag op een groot-balans-account.
+
+### Het patroon: dit is vandaag de derde keer dat "groen"/"gemeten" iets anders bleek te betekenen dan gedacht
+
+Binnen 24 uur: de binary-versheidscontrole (EIS 1, sectie 77 - "80 passing" kon tegen een
+verouderde binary draaien zonder dat iets dat meldde), het gedeelde-werkboom-incident
+(sectie 81 - een testrun kon tegen de verkeerde branch draaien zonder dat iemand het
+merkte), en nu dit - een testrun kon tegen de verkeerde validator draaien, of met een
+balans die de meting zelf corrumpeerde, zonder foutmelding. Telkens dezelfde vorm: de
+MEETOPSTELLING was onbetrouwbaar, niet het programma - en telkens pas zichtbaar doordat een
+op zichzelf onschuldig verschil (een binary-mtime, een branch-HEAD, 5000 lamport) niet werd
+weggeredeneerd maar tot op de bodem uitgezocht.
+
+### Voetangel A: `--clean` wiste het enige exemplaar van het lokale programma-keypair (van BEIDE programma's)
+
+`scripts/build-and-deploy.sh --clean` doet `rm -rf target`, wat ook
+`target/deploy/<programma>-keypair.json` wist - het ENIGE exemplaar van het lokale
+programma-keypair (nooit gecommit, `.gitignore`'d). Eenmaal weg, voorgoed weg: geverifieerd
+dat het keypair voor het oorspronkelijk gecommitte lokale testadres
+(`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) nergens op deze machine meer bestaat (git-
+geschiedenis doorzocht op ooit-gecommitte keypair-bestanden: geen; machinebreed gezocht op
+`*spankwallet*keypair*.json`: alleen de nieuwe, vervangende identiteit). Niet fataal (de
+échte devnet-upgrade-authority is de vault/multisig, sectie 42, niet dit lokale keypair),
+maar wel voorgoed onmogelijk om lokaal weer naar exact dat adres te deployen. `anchor keys
+sync` genereerde daarna stilzwijgend een NIEUWE identiteit en herschreef `declare_id!` in
+`lib.rs` EN `Anchor.toml` - en dat raakte niet alleen spankwallet: `anchor keys sync`
+(zonder `-p`) synchroniseert het HELE Cargo-workspace, dus ook `programs/active-defense`,
+ook wanneer alleen spankwallet gebouwd wordt.
+
+**Structurele fix:** het enige-exemplaar-keypair leeft nu BUITEN de repo-checkout (niet
+alleen buiten `target/` - ook `git clean -fdx` wist genegeerde bestanden net zo hard), onder
+`${XDG_CONFIG_HOME:-~/.config}/spankwallet/program-keypairs/`, met dezelfde expliciete
+"(eerste keer: genereer ...)"-logregel als de rest van dit script bij het allereerste
+gebruik op een machine. `target/deploy/*-keypair.json` is een symlink daarnaartoe - `rm -rf
+target` kan de symlink wissen, nooit de sleutel zelf.
+
+### Voetangel B: declare_id! zelf - lokaal testadres nodig tijdens de build, devnet-adres nodig in git
+
+Om lokaal te bouwen/deployen moet `declare_id!` TIJDELIJK naar het lokale keypair wijzen
+(Anchor's eigen zelf-CPI-checks hebben het juiste, daadwerkelijk-gedeployde adres nodig om
+te kunnen draaien) - maar de GECOMMITTE broncode moet altijd het echte devnet-adres tonen
+(`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`, multisig-bestuurd, sectie 42). De eerste
+versie van de fix zette de tijdelijke waarde blijvend weg: ná een run stond de werkboom vuil
+met het lokale adres, in plaats van het devnet-adres dat er in git staat - "schone werkboom"
+was daarmee onbruikbaar als signaal, exact het soort ruis dat sectie 77 (EIS 1) en sectie 81
+(de aparte worktree) al hadden weggenomen.
+
+**Fix:** een `trap` op `EXIT INT TERM` herstelt `declare_id!`/`Anchor.toml` zodra het script
+stopt - geslaagd, gefaald, of onderbroken (Ctrl+C/`kill`) maakt niet uit. Leidend voor het
+herstel is NIET `git show HEAD:` maar een losstaande, git-onafhankelijke constante
+(`scripts/lib/devnet-program-id.sh`, gedeeld met de bufferroute hieronder): sectie 81
+documenteert een incident waarbij een werkboom's HEAD verschoof zonder dat iemand het op
+dat moment merkte - blind vertrouwen op "wat er nu toevallig is uitgecheckt" is voor het
+enige programma met echte devnet-inzet niet genoeg zekerheid. `git show HEAD:` wordt alleen
+nog gebruikt als controle (luide, niet-blokkerende waarschuwing bij afwijking). De mtime
+van elk hersteld bestand wordt ook teruggezet (niet alleen de inhoud) - anders zou
+`tests/verifyBinaryFresh.ts` de zojuist gebouwde, inhoudelijk verse binary ten onrechte als
+verouderd aanmerken, EN (empirisch tegengekomen tijdens het testen van deze fix zelf) kan
+een teruggedraaide mtime `cargo-build-sbf` zelf foppen tot een verouderde cache-hit bij een
+latere, losse build-aanroep op dezelfde boom - vermeden door de bufferroute hieronder altijd
+een eigen, verse `CARGO_TARGET_DIR` te geven.
+
+Getest, niet alleen geschreven: `--clean` twee keer achter elkaar gedraaid (zelfde
+identiteit beide keren); `declare_id!` handmatig gesaboteerd (script herstelt, waarschuwt);
+`program-keypairs/` zelf verwijderd (script herkent dat correct als eerste-keer-verlies,
+bootstrapt opnieuw, meldt dat expliciet); een mislukte run (kapotte RPC-URL) en een echte
+onderbreking (`timeout -s INT` tijdens `cargo-build-sbf`, voorgrond-signaallevering - een
+`&`-backgrounde non-interactieve bash negeert SIGINT standaard, dat gaf aanvankelijk een
+vals beeld) lieten beide een schone werkboom achter. Eindcontrole: volledige suite
+opnieuw **80 passing, 2 pending, 0 failing** met het herontworpen script, `git status` leeg.
+
+### Voetangel C: het lokale build-artefact is niet te onderscheiden van een deploybare devnet-buffer
+
+Ná een `build-and-deploy.sh`-run is de werkboom weer schoon met het devnet-adres in git -
+maar `target/deploy/spankwallet.so` bevat het LOKALE adres, ingebakken tijdens het
+compileren, en is verder in niets te onderscheiden van een echte, deploybare binary. Een
+buffer voor de B1-t/m-B7-upgrade die hier per ongeluk uit gebouwd zou worden, zou een
+programma met het VERKEERDE `declare_id!` deployen - elke instructie faalt daarna, pas
+zichtbaar nadat de 72u-timelock al verstreken is.
+
+**Uitgezocht hoe voorstel #10's buffer daadwerkelijk gebouwd werd** (secties 39/41/54/57/58/
+70): een sinds sectie 39 herhaaldelijk met de hand uitgevoerde, nooit gescripte route - verse
+build vanaf een specifieke commit, "programma-ID-byte-offset-check (exact 1 treffer)",
+DAN pas `solana program write-buffer`. Sectie 79 gebruikte hiervoor al een losstaande,
+geïsoleerde `git worktree` (hetzelfde structurele patroon dat sectie 81 later koos voor
+active-defense-phase1).
+
+**Formaliseer, niet opnieuw uitvinden - twee nieuwe bestanden:**
+- `scripts/verify-program-id-in-binary.ts`: zoekt een verwacht base58-adres als rauwe 32
+  bytes in een `.so`-bestand. Twee controles met elk een eigen faalreden: POSITIEF (exact 1
+  treffer - nul is verkeerd/ontbrekend programma, meer dan 1 is dubbelzinnig) en NEGATIEF
+  (geen enkel bekend lokaal testadres, uitgelezen uit
+  `${XDG_CONFIG_HOME:-~/.config}/spankwallet/program-keypairs/` - automatisch actueel, niemand
+  hoeft de lijst bij te houden; bestaat die map niet, dan wordt dat expliciet gemeld, niet
+  stil overgeslagen). Getest: accepteert een genuine devnet-`.so` (offset 6712, reproduceerbaar
+  - zelfde sha256 als een onafhankelijke handmatige build), weigert een lokale-testadres-`.so`
+  ("ADRES NIET GEVONDEN"), weigert een dubbel adres ("MEERDERE KEREN GEVONDEN"), en vangt
+  specifiek de verwisseling waar deze hele voetangel over gaat ("LOKAAL TESTADRES
+  AANGETROFFEN") wanneer het positieve adres toevallig ook een lokaal testadres is.
+- `scripts/build-devnet-buffer.sh [commit]`: bouwt in een verse, geïsoleerde `git worktree`
+  (nooit deze werkboom - raakt `anchor keys sync`/de ID-swap-machinerie dus nooit aan), met
+  een eigen `CARGO_TARGET_DIR` (geen enkel cache-hergebruik mogelijk), verifieert daarna met
+  bovenstaande tool, en drukt bij succes zowel het `write-buffer`-commando af als de
+  VERVOLGSTAPPEN die daarna moeten gebeuren (`solana program dump`, sha256-vergelijking,
+  dezelfde adrescontrole nogmaals tegen wat daadwerkelijk on-chain staat) - precies de
+  controles die bij voorstel #10 doorslaggevend waren, nu vastgelegd in plaats van
+  afhankelijk van iemands geheugen. Schrijft zelf NOOIT een buffer en doet NOOIT een
+  on-chain-aanroep - dat blijft, zoals overal in dit project, een bewuste, handmatige stap.
+  De tijdelijke worktree wordt via een `trap` opgeruimd (geslaagd, gefaald, onderbroken),
+  het geverifieerde `.so`-bestand wordt er eerst uit gekopieerd naar een stabiele plek. Bij
+  het testen bleek dat de opruiming NA een `echo`-melding stond kwetsbaar: schrijven naar een
+  gesloten downstream-pipe (bv. `| tail`) kan een SIGPIPE geven die het traphandler-proces
+  doodt VOORDAT de opruiming loopt - gefixt door de opruiming vóór elke melding te zetten
+  plus `trap '' PIPE`. Getest: een volledige, ongestoorde run (drie keer herhaald, telkens
+  dezelfde sha256), en een tijdens `cargo-build-sbf` onderbroken run - inclusief hetzelfde
+  `| tail`-scenario dat de SIGPIPE-kwetsbaarheid blootlegde - lieten na de fix consequent
+  (herhaald getest) geen wees-worktree achter (`git worktree list` en `/tmp` gecontroleerd).
+
+### Stap 3: validator-detectie - technisch wél betrouwbaar te onderscheiden
+
+Onderzocht of de suite bij het opstarten kan vaststellen tegen wat voor validator hij praat.
+`getVersion` en `getIdentity` empirisch tegen zowel surfpool als een echte
+`solana-test-validator` gelegd:
+
+| RPC | surfpool | echte validator |
+|---|---|---|
+| `getVersion` | bevat een `surfnet-version`-sleutel | GEEN `surfnet-version`-sleutel |
+| `getIdentity` | altijd `SUrFPooLSUrFPooLSUrFPooLSUrFPooLSUrFPooLSUr` (vaste vanity-string) | willekeurige, per-run-unieke validator-identiteit |
+
+**Eerste versie was een blokkeerlijst, niet fail-closed - gecorrigeerd na een expliciete
+review.** Blokkeerde uitsluitend bij HERKENDE surfpool-signalen; alles anders (RPC
+onbereikbaar op een andere manier dan een simpele connectiefout, een onverwacht/misvormd
+`getVersion()`-antwoord, een derde, niet-eerder-geziene validator-implementatie) zou
+stilzwijgend zijn DOORGELATEN - exact het patroon waarmee surfpool hier ongemerkt kon
+binnenkomen. Omgedraaid naar een eis van POSITIEF bewijs: een geldige `solana-core`-
+versiestring moet aanwezig zijn IN COMBINATIE MET de afwezigheid van beide surfpool-
+signalen; ontbreekt dat positieve bewijs (om welke reden dan ook, inclusief een RPC die
+gewoon niet antwoordt of een respons die nergens op lijkt), dan weigert de check - surfpool
+herkennen blijft alleen behouden om de foutmelding preciezer te maken, nooit als voorwaarde
+om te blokkeren.
+
+**Geïmplementeerd** als `tests/verifyValidatorType.ts`, dat `mochaGlobalSetup` exporteert -
+mocha awaitet dit zelf vóór er ook maar één testbestand geladen wordt, toegevoegd aan
+`.mocharc.yml`'s `require` naast `verifyBinaryFresh.ts` (EIS 1), dus onafhankelijk van hoe
+mocha wordt aangeroepen. De foutmelding is bewust bruikbaar gemaakt, niet alleen correct:
+benoemt expliciet dat een kale `anchor test` in deze workspace altijd surfpool kiest (de
+fork's hardcoded `default_value = "surfpool"`), waarom surfpool onbetrouwbaar is voor deze
+suite (de `meta.fee`-bevinding hierboven), en drukt het exacte werkende commando af.
+
+**Getest, alle vier scenario's expliciet, niet alleen het gunstige geval:**
+- Tegen surfpool: weigert, met beide herkende redenen benoemd.
+- Tegen een echte validator: bevestigt zich (`[verifyValidatorType] echte validator
+  bevestigd`) en laat door.
+- Tegen een adres waar niets luistert (`http://127.0.0.1:1`): weigert direct
+  (`ECONNREFUSED`), geen timeout, geen doorlaten.
+- Tegen een minimale eigen HTTP-server die geldige JSON-RPC teruggeeft maar géén
+  Solana-vormige inhoud (`getVersion()` -> `{}`) - het scenario waar de oude blokkeerlijst
+  stilzwijgend doorgelaten zou hebben: weigert, met de reden "geen geldig
+  `solana-core`-versieveld" - bevestigt dat de fail-closed-omdraaiing daadwerkelijk werkt
+  voor een NIET-herkende validator, niet alleen voor herkende surfpool-signalen.
+
+Eindcontrole met dit permanent ingebakken, ná de fail-closed-correctie: volledige suite
+**80 passing, 2 pending, 0 failing**.
+
+### Stap 4: sectie 76 t/m 79 hermeten - wat overeind blijft en wat niet
+
+Elke harde bewering in sectie 76-79 die op een testrun of transactie-meta rust, nagelopen op
+twee vragen: is die op surfpool gemeten, en leunt hij op een lamportmeting die door vondst 2
+geraakt kan zijn.
+
+**Surfpool: uitgesloten voor sectie 76-79 in zijn geheel.** De enige plek waar het exacte
+commando expliciet staat (sectie 78, PUNT 2: "Volledige suite (`anchor test
+--skip-local-validator --skip-build --skip-deploy`, ...)") toont `--skip-local-validator` -
+dat commando laat anchor NOOIT zelf een validator kiezen (surfpool of legacy), het praat
+uitsluitend met wat al handmatig draait. Dit is bovendien het enige workflow dat sectie 5 en
+elke build/testronde sindsdien (secties 39-81) ooit beschrijft - "surfpool" komt letterlijk
+nul keer voor in dit hele document vóór vandaag. Elke "N passing"-telling in sectie 76-79
+staat dus op stevige grond wat surfpool betreft.
+
+**Precisiefout (vondst 2): raakt structureel exact één regel, niet de tellingen als geheel.**
+`tests/hunt.ts`'s 50/50-splitsing-test gebruikte, op het moment dat sectie 76-79 geschreven
+werden, dezelfde `provider.wallet`(=id.json)-gebaseerde meting als vandaag gevonden en
+gefixt. Sectie 5's workflow (die sectie 78 expliciet citeert) start `solana-test-validator
+--reset` zonder `--mint` - id.json krijgt dan altijd de 500.000.000-SOL-genesisbalans, dus
+de conditie voor de precisiefout was bij elke van die runs structureel aanwezig. Of de
+afronding in die specifieke, allang-verdwenen validator-instanties toevallig netjes uitkwam
+(zoals soms wel, soms niet gebeurt - afhankelijk van het exacte residu van id.json's
+balans op dat moment) is niet meer met terugwerkende kracht vast te stellen; de ruwe
+pre-/post-balansen van die runs zijn niet bewaard. **Eerlijke conclusie: de "0 failing" in
+de historische 75/80-tellingen is voor precies dit ene testregel geen betrouwbaar bewijs
+meer, ongeacht of het toen toevallig klopte - de meetopstelling was onbetrouwbaar, niet per
+se de uitkomst.** Wat wel vaststaat: de ONDERLIGGENDE bewering (hunt's 50/50-rentsplitsing
+werkt correct) is vandaag opnieuw, methodologisch solide, bevestigd (root-fix + een echte
+validator, zie vondst 2) - de twijfel zit in de historische METING, nooit in het
+programmagedrag zelf, dat is op geen enkel moment aantoonbaar fout geweest.
+
+**Alle overige beweringen in sectie 76-79 blijven ONGEWIJZIGD overeind, expliciet
+gecontroleerd, niet aangenomen:**
+- Sectie 76 (A1-A4): kwalitatieve structuur-/permissiebeweringen (wipe overgeslagen,
+  sessie overleeft recovery, geen bovengrens, `hunt` mist de freeze) - geen van alle
+  hangt af van een exacte lamportmeting op een groot-balans-account. `spent_lamports`
+  (A2) komt uit `session.spentLamports`, Anchor's BN-decodering van accountdata - een ander
+  leespad dan `preBalances`/`postBalances`, nooit via `JSON.parse` van een RPC-balans.
+- Sectie 77 (B1-B7): zelfde kwalitatieve aard. `WalletAccount::LEN`/`SessionKeyAccount::LEN`
+  zijn compile-time Rust-struct-groottes, geen RPC-meting. De binary-sha256 is een lokale
+  bestandshash, geen RPC-meting. `transfer_token`'s "saldi geverifieerd... via de
+  transactie-meta" (B6) bleek bij nalezen van `tests/transferToken.ts` uitsluitend
+  `txInfo.meta.err === null` te checken (transactie zonder fout) - geen `preBalances`/
+  `postBalances`-aftrekking, dus niet vatbaar voor vondst 2.
+- Sectie 78 (PUNT 1-3): `uint8ArrayByteFidelity`-tests zijn pure crypto-/byte-vergelijkingen,
+  geen RPC. De bundle-backup-sha256 is een lokaal bestand. README-correcties zijn
+  brontekst-tegen-code-vergelijkingen.
+- Sectie 79 (C1/C2/D3): uitsluitend brontekst-tegen-`instructions.rs`/configuratie-audits,
+  geen enkele testrun-afhankelijke bewering.
+
+### Nog openstaand vóór commit
+
+Huidige diff (niets gecommit, niets gepusht): `package.json` (`--validator legacy`),
+`tests/hunt.ts` (de wortelfix), `.mocharc.yml` (`verifyValidatorType.ts` toegevoegd),
+`scripts/build-and-deploy.sh` (voetangel A/B-fix), en nieuw: `scripts/lib/
+devnet-program-id.sh`, `scripts/build-devnet-buffer.sh`, `scripts/verify-program-id-in-
+binary.ts`, `tests/verifyValidatorType.ts`. `programs/spankwallet/src/lib.rs`,
+`programs/active-defense/src/lib.rs` en `Anchor.toml` staan weer op hun gecommitte
+(devnet-)waarden - geen diff daar, zoals bedoeld.

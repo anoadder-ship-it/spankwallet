@@ -6,7 +6,7 @@
  * 2. PDA derivation works correctly
  * 3. Account reading works (returns null for non-existent accounts)
  * 
- * Run: npx ts-node test/verify-deployment.ts
+ * Run: npx ts-node --esm test/verify-deployment.ts
  */
 
 import { Connection, PublicKey } from "@solana/web3.js";
@@ -16,7 +16,7 @@ import {
   deriveMaliciousPda,
   readPoisonTokenAccount,
   readMaliciousAddresses,
-} from "../client/src/poisonToken";
+} from "../client/src/poisonToken.ts";
 
 const RPC_URL = "https://api.devnet.solana.com";
 
@@ -53,13 +53,12 @@ async function main() {
   console.log("\n[TEST 2] PDA derivation");
   console.log("-".repeat(40));
 
-  // Use a mock wallet PDA for testing
   const mockWalletPda = new PublicKey(
     "9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9"
   );
   const mockMint = new PublicKey(
     "So11111111111111111111111111111111111111112"
-  ); // Wrapped SOL mint
+  );
 
   const [poisonTokenPda, poisonBump] = derivePoisonTokenPda(
     mockWalletPda,
@@ -72,7 +71,6 @@ async function main() {
   console.log(`  Malicious PDA: ${maliciousPda.toBase58()}`);
   console.log(`  Bump: ${maliciousBump}`);
 
-  // Verify PDAs are valid (not all zeros)
   if (
     poisonTokenPda.toBytes().every((b) => b === 0) ||
     maliciousPda.toBytes().every((b) => b === 0)

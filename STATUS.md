@@ -6812,20 +6812,40 @@ ook maar aan een buffer gedacht wordt:
    reproduceerbaar bewijs (signatuur, foutcode, exacte state-delta), niet aangenomen op
    basis van de unittests alleen.
 
-### Stap 2 - migratieveiligheid tegen de 12 ECHTE bestaande wallets, expliciet, niet aangenomen
+### Stap 2 - migratieveiligheid tegen de 14 ECHTE bestaande wallets, expliciet, niet aangenomen
 
-Sectie 80's belangrijkste bevinding (de fail-closed-aanname voor oudere-layout-accounts is
-empirisch ONWAAR, en "generaliseert vermoedelijk direct naar B2") is voor de B1-B7-layout
-zelf nog NIET empirisch gecontroleerd - alleen de synthetische Some/Some-unittest bestaat
-daarvoor, en die methodologie is precies wat sectie 80 al onbetrouwbaar bleek. Verplicht,
-vóór een echt voorstel:
+Sectie 84 heeft empirisch bevestigd dat alle 14 huidige wallets (12 uit sectie 80 + 2 nieuw
+bijgekomen) nog gewoon decoderen tegen het HUIDIGE gedeployde programma (239-byte-layout,
+`action_nonce` aanwezig) - GEEN ervan is al kapot. De reden is nu ook precies bekend, niet
+alleen vermoed (sectie 84): `WalletAccount::LEN`/`INIT_SPACE` is altijd een compile-time
+WORST-CASE-constante (beide Options op `Some` verondersteld), gebruikt als vaste `space` bij
+`init` - dus ieder account had al vanaf zijn allereerste aanmaak "slack"-bytes achterin die
+in de praktijk (bij `None`/`None`, het gangbare geval) nooit beschreven werden. Een nieuw
+veld dat na een upgrade wordt toegevoegd, leest simpelweg verder in die al-bestaande,
+altijd-nul slack - zolang het totale aantal ECHT benodigde bytes (basisvelden + eventueel
+`Some`-payloads + alle inmiddels toegevoegde teller-velden) onder de fysieke accountgrootte
+blijft. Dat houdt een keer op: een account dat toevallig wél `Some`/`Some` was (of ooit
+wordt) op het moment dat zijn ruimte werd toegekend, heeft GEEN slack over.
 
+Verplicht, vóór een echt voorstel - niet meer een vage "generaliseert vermoedelijk"-aanname,
+maar een concrete berekening per bestaand account:
+
+- Voor elk van de 14 accounts: fysieke `data.length` (al gemeten, sectie 84) MINUS de
+  daadwerkelijk benodigde bytelengte voor de NIEUWE B1-B7-layout, gegeven DIE ene account
+  zijn eigen `recovery_state`/`deposit_authority`-tags (`Some` kost meer dan `None`) - dat
+  verschil is de resterende slack. Alle 12 sectie-80-wallets zijn `None`/`None` op één na
+  (`recovery_state: Some`); geen enkele is `Some`/`Some` (het enige scenario zonder slack).
+  Reken dit toch per account uit in plaats van op dat patroon te vertrouwen - dat is precies
+  het verschil tussen meten en aannemen dat sectie 82 en sectie 84 allebei hebben willen
+  vastleggen.
 - `scripts/checkAllOldWallets.ts`-methodologie hergebruiken, maar dan de rauwe bytes van
   alle huidige echte devnet-wallets (leesalleen, geen transacties, geen kosten) decoderen
-  tegen de NIEUWE B1-B7-IDL/layout uit stap 1's throwaway-deploy, niet tegen de huidige
-  live layout. Doel: vaststellen of een van de 12 bestaande wallets een onverwachte/
-  giswaarde krijgt op een NIEUW B1-B7-veld (sessie-epoch of vergelijkbaar), net zoals de
-  bestaande `action_nonce`-restdata-vondst.
+  tegen de NIEUWE B1-B7-IDL/layout uit stap 1's throwaway-deploy (niet tegen de huidige live
+  layout - sectie 84's methode, een geïsoleerde worktree op de exacte build-commit, hergebruiken
+  voor de B1-B7-kant van deze vergelijking). Doel: vaststellen of een van de 14 bestaande
+  wallets een onverwachte/giswaarde krijgt op een NIEUW B1-B7-veld (`session_epoch` of
+  vergelijkbaar), net zoals de bestaande `action_nonce`-restdata-vondst bij precies één
+  wallet (sectie 80).
 - Bij een treffer: uitzoeken of dat veld ergens een beslissing beïnvloedt (net als bij
   `action_nonce`, waar een giswaarde onschadelijk bleek omdat client en programma dezelfde
   bytes symmetrisch lezen) - niet aannemen dat het vanzelf goed gaat, aantonen.
@@ -6846,3 +6866,108 @@ Geen buffer schrijven, geen voorstel indienen, geen push naar `origin` - dat laa
 sowieso gekoppeld aan SECURITY.md's beleid (pushen pas nadat de bijbehorende upgrade live en
 geverifieerd is), en B1-B7 is dat per definitie nog niet vóórdat stap 1-3 hierboven zijn
 doorlopen.
+
+**Bijgewerkt na sectie 84's hermeting:** dit plan was aanvankelijk geformuleerd zonder
+harde bevestiging dat de bestaande wallets nog leven - stap 2 hierboven ging aanvankelijk uit
+van sectie 80's vage "generaliseert vermoedelijk"-aanname. Sectie 84 heeft dit direct
+gemeten: alle 14 bestaande wallets decoderen nog gewoon tegen het huidige programma, en stap
+2 is hierboven al bijgewerkt naar een concrete restruimte-berekening per account in plaats
+van die aanname.
+
+## 84. Drie punten vóór sectie 83's uitvoering: nulmeting van de 14 echte wallets, spl-token-herkomst gevonden, werkboom weer leeg
+
+Vóór er ook maar aan sectie 83's stap 1 begonnen wordt, drie losse dingen expliciet
+uitgezocht - gevraagd omdat een aanname ("hoort nu al schoon te falen") en een onverklaarde
+dependency niet mochten blijven staan zonder meting.
+
+### 1. Directe hermeting tegen het EXACT gedeployde programma - niet de aanname, het echte
+
+Hypothese die gecontroleerd moest worden: omdat voorstel #10 `action_nonce` al aan
+`WalletAccount` heeft toegevoegd (live sinds `2026-08-20T20:58:05Z`), zou een account van
+vóór die upgrade nu fysiek te klein moeten zijn voor de nieuwe `LEN` en dus AL schoon moeten
+falen op deserialisatie - vóór er sprake is van B1-B7. Dit staat haaks op sectie 80's eigen
+bevinding (alle 12 decodeerden toen zonder fout); opnieuw gemeten, niet op het geheugen van
+die eerdere sessie vertrouwd.
+
+**Methode:** een geïsoleerde `git worktree` (`deployed-state-check`, buiten deze werkboom,
+achteraf weer verwijderd met `git worktree remove`) op commit `414068c` - exact de commit
+waarvan voorstel #10's buffer is gebouwd (sectie 80/82), dus met precies de brondefinitie die
+NU echt gedeployed staat (`action_nonce` aanwezig, `session_epoch` afwezig - geverifieerd
+door de gegenereerde IDL zelf te doorzoeken: precies één `action_nonce`-veld, geen
+`session_epoch` waar dan ook). `anchor build -p spankwallet` in die worktree (eigen
+`CARGO_TARGET_DIR`, `node_modules` gesymlinkt vanuit de hoofd-werkboom - `package.json` bleek
+tussen beide commits op de `--validator legacy`-regel na identiek) genereerde de bijbehorende
+IDL/types. Een los leesalleen-scriptje (`checkCurrentState.ts`, alleen in de worktree
+geschreven, niet gecommit) haalde met die EXACTE IDL alle bestaande `WalletAccount`s op via
+`getProgramAccounts` tegen `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` op devnet.
+
+**Resultaat: 14 accounts (niet 12 - twee méér dan sectie 80, zie hieronder), ALLE 14
+decoderen zonder fout.** Twaalf zijn 231 bytes (van vóór voorstel #10), twee zijn 239 bytes
+(`ECYCEqZpKaYSLWoC99dwHJgqTFmwhEygBggyxRh4K4WC` en `7KfY6nKU8zQZbsMZgBG8AdU9jx3xULXuzLwRrNYyCzft`,
+beide met een echte, betekenisvolle `actionNonce: 2` - vermoedelijk bijgekomen via
+functioneel-bewijs-scriptruns ná sectie 80, niet verder uitgezocht, buiten scope van deze
+drie punten). Van de twaalf 231-byte-accounts decoderen elf met `actionNonce: 0`, en exact
+dezelfde ene account als sectie 80 al vond
+(`3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ`) nog steeds met dezelfde restdata-waarde
+(`11743083837406067974`) - consistent met sectie 80, niets veranderd sindsdien op dat vlak.
+
+**De hypothese is dus empirisch verworpen: niets is al kapot.** Waarom, precies (niet alleen
+"toevallig", zoals sectie 80 het liet staan): `WalletAccount::LEN`/Anchor's `INIT_SPACE` is
+een COMPILE-TIME constante, berekend voor het WORST-CASE-scenario (`recovery_state` EN
+`deposit_authority` allebei `Some`) - en dat was al zo VOORDAT `action_nonce` bestond. Een
+account met de gangbare `None`/`None`-combinatie kreeg bij `init` dus altijd al een groter
+fysiek blok toegekend (231 bytes) dan de daadwerkelijk beschreven inhoud nodig had (~158
+bytes voor `None`/`None`) - de resterende ~73 bytes zijn sindsdien altijd-nul-padding, nooit
+actief beschreven. Na de upgrade leest het programma `action_nonce` (8 bytes) simpelweg
+verder in die al-bestaande, altijd-nul padding - ruim binnen de fysieke 231 bytes, dus geen
+`AccountDidNotDeserialize`, gewoon een nul. Dit houdt op zodra een account z'n toegekende
+worst-case-ruimte al volledig gebruikt (`Some`/`Some` bij toekenning) - geen van de huidige
+14 accounts is in die staat, maar het is geen garantie voor de toekomst (zie sectie 83's
+bijgewerkte stap 2, die dit nu als expliciete per-account-berekening meeneemt in plaats van
+als aanname).
+
+### 2. `@solana/spl-token`-mysterie: gevonden, verklaard, teruggedraaid
+
+Vermoeden (expliciet zo gesteld): dezelfde bron als `quick-test.ts`, `simple-test.js` en
+sectie 81's stray keypair - het losse active-defense-werk dat via de gedeelde werkboom hier
+beland is. Gecontroleerd door de active-defense-worktree
+(`/home/michel/projects/spankwallet-active-defense`) zelf te doorzoeken:
+
+- Active-defense's EIGEN root-`package.json` (het equivalent van spankwallet's root
+  `package.json`, voor de Anchor/mocha-testsuite) heeft GEEN `@solana/spl-token` - identiek
+  aan spankwallet's eigen, schone root.
+- Active-defense's `client/package.json` heeft het WEL (`^0.4.9`), gebruikt door meerdere
+  bestanden daar (`poisonToken.ts`, `knownPrograms.ts`, `sessionKeys.ts`, e.a.).
+- **Spankwallet's EIGEN `client/package.json` heeft het OOK AL** (`^0.4.9`), al langer
+  gecommit, gebruikt door spankwallet's eigen `client/src/hunt.ts`, `main.ts`,
+  `knownPrograms.ts`, e.a. - dus de dependency is op zichzelf niets vreemds, hij hoort alleen
+  in een ANDERE `package.json` (`client/`, niet root) dan waar hij was neergezet.
+- Root-package.json (de Anchor-testsuite-kant) heeft en had het nooit nodig - opnieuw
+  bevestigd, geen enkel bestand in `tests/*.ts`/`scripts/*.ts` importeert
+  `@solana/spl-token`; de bestaande bestanden zeggen dat expliciet in hun eigen commentaar.
+
+**Conclusie:** de weeshunk in spankwallet's ROOT `package.json` (`^0.4.15` - een nieuwere
+versie dan de `^0.4.9` die zowel spankwallet's als active-defense's eigen `client/`
+al gepind hebben, consistent met een later, ongepind `npm install @solana/spl-token` zonder
+versienummer) is vrijwel zeker een `npm install` die per ongeluk vanuit de VERKEERDE
+werkdirectory is uitgevoerd (de gedeelde root in plaats van een `client/`-submap) tijdens
+dezelfde periode als sectie 81's werkboom-vermenging - dezelfde soort fout, ander symptoom.
+**Teruggedraaid:** `git checkout -- package.json package-lock.json` - beide weer exact op
+`HEAD`, geen diff meer.
+
+### 3. Losse root-bestanden opgeruimd - pas nadat vastgesteld was dat dat kon
+
+- Vier `.bak`-bestanden (`errors.rs.bak`, `instructions.rs.bak`, `lib.rs.bak`,
+  `state.rs.bak`): opnieuw `diff` tegen hun getrackte tegenhanger gedraaid (nog steeds
+  byte-identiek) - verwijderd zonder informatieverlies, de inhoud staat al gewoon gecommit.
+- `quick-test.ts`/`simple-test.js`: bevestigd dat ze NERGENS anders bestaan (ook niet in de
+  active-defense-worktree) - dus niet simpelweg "elders al aanwezige duplicaten", maar wel
+  hard vastgesteld dat ze hier NIET WERKEN (`quick-test.ts`'s import van
+  `./client/src/poisonToken` resolveert niet binnen spankwallet - dat bestand bestaat alleen
+  in de active-defense-worktree) en dat de ECHTE, onderhouden implementatie die ze aanroepen
+  daar al netjes gecommit staat (`626ad73`, "feat: add real client-side code + deployment
+  verification test"). Beide zijn dus kapotte, overbodige wegwerp-smoke-testscripts zonder
+  unieke inhoud - verwijderd.
+
+`git worktree remove` voor de tijdelijke `deployed-state-check`-worktree, `git status` is nu
+leeg.

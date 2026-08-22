@@ -6833,7 +6833,9 @@ checkWorstCaseAccountSafety.ts` (nieuw, bewaard voor hergebruik), tegen alle 14
   vorige zo'n toevoeging) en die vandaag empirisch is bevestigd exact zo te zijn uitgekomen
   als toen voorspeld - zie sectie 85 voor de volledige precedent-analyse en waarom dit
   bewust-aanvaarde-kosten-pad ook nu weer volstaat, MITS bij het daadwerkelijke voorstel
-  opnieuw (niet aangenomen) bevestigd wordt dat er dan nul actieve sessies bestaan.
+  opnieuw (niet aangenomen) bevestigd wordt dat er dan nul BRUIKBARE sessies bestaan - zie
+  de uitvoeringschecklist hieronder voor de precieze definitie van "bruikbaar" (GECORRIGEERD
+  na sectie 88's afronding, "actief"/"niet-verlopen" was hier het verkeerde criterium).
 
 **GECORRIGEERD (sectie 86): niet vóór het INDIENEN, vlak vóór het UITVOEREN** - zie de
 uitvoeringschecklist bij stap 3 hieronder voor de volledige redenering (het 72u-
@@ -6850,7 +6852,7 @@ en doet geen on-chain-aanroep; het daadwerkelijk schrijven van de buffer en het 
 het multisig-voorstel blijven, zoals overal in dit project, een bewuste, handmatige stap na
 expliciete bevestiging - niet iets wat deze of een volgende ronde automatisch doet.
 
-### Uitvoeringschecklist - de nul-actieve-sessies-controle hoort bij UITVOEREN, niet bij INDIENEN
+### Uitvoeringschecklist - de nul-BRUIKBARE-sessies-controle hoort bij UITVOEREN, niet bij INDIENEN
 
 **GECORRIGEERD (sectie 86):** "controleer dit bij het indienen van het voorstel" is NIET
 hetzelfde als "controleer dit vlak vóór het uitvoeren", en het verschil is hier
@@ -6862,14 +6864,50 @@ nog actieve, oude programma) heeft op dat moment nog GEEN bovengrens op zijn `ex
 Een controle bij het indienen zegt dus niets betrouwbaars over de staat op het moment van
 uitvoeren.
 
-**Daarom, als harde stap in de uitvoeringschecklist (naast de vijf verificaties die bij
-voorstel #10 zijn gedraaid, sectie 80) - VLAK VÓÓR het klikken op "uitvoeren", niet eerder:**
-1. `scripts/checkWorstCaseAccountSafety.ts`'s `SessionKeyAccount`-deel opnieuw draaien.
-2. Voor elk resultaat: `expiry_slot` tegen de dan-actuele slot controleren.
-3. Bestaat er ook maar één niet-verlopen `SessionKeyAccount`, dan NIET uitvoeren - eerst
-   wachten tot hij vanzelf verloopt (er is vandaag geen bovengrens om op te wachten totdat
-   B3 zelf live is, dus dit kan in het slechtste geval een keer expliciet worden afgewacht)
-   of alsnog een migratiepad bouwen, niet de deploy toch doorzetten.
+**GECORRIGEERD (nu, ná sectie 88): "actief"/"niet-verlopen" was zelf ook het verkeerde
+criterium.** Zoals oorspronkelijk geformuleerd zou punt 3 hieronder blokkeren op ELK
+`SessionKeyAccount` met `expiry_slot > current_slot` - inclusief een account dat, net als de
+drie 341-byte-zombies uit sectie 86/88, al fysiek te kort is om door welke `_via_session`-
+instructie dan ook gedeserialiseerd te worden. Zo'n account is niet "een sessie die nog
+gerespecteerd moet worden", het is dode staat die toevallig nog een `expiry_slot` in de
+toekomst heeft staan - een poort met dat criterium zou door precies zulke zombie-accounts
+voor altijd geblokkeerd kunnen blijven, met wegwuiven als enige uitweg. Exact het patroon
+dat deze week drie keer apart is opgeruimd (de fail-closed/fail-open-verwarring, sectie 85;
+"decodeert vandaag" als verkeerd criterium, sectie 84/85; en nu dit).
+
+**Het juiste criterium: "bruikbaar", niet "niet-verlopen".** Een `SessionKeyAccount` telt
+alleen mee als blokkade als het BEIDE is:
+1. **Nog daadwerkelijk deserialiseerbaar** tegen het programma dat op het moment van de
+   controle LIVE is (vóór uitvoering is dat nog het huidige, 421-byte-vereisende programma -
+   `SessionKeyAccount` heeft geen `Option`-velden, dus dit is een exacte, geen-
+   interpretatieruimte-latende toets: toegekende `data.length >= 421`).
+2. **En** `expiry_slot > current_slot` (nog niet vanzelf verlopen).
+
+Een account dat conditie 1 niet haalt, kan door GEEN ENKELE `_via_session`-instructie
+gebruikt worden (Anchor's getypeerde `Account<'info, SessionKeyAccount>>` deserialiseert
+vóór de instructielogica draait, faalt dus voor zo'n account altijd) - het is inert, telt
+niet mee, ongeacht zijn `expiry_slot`.
+
+**Als harde stap in de uitvoeringschecklist (naast de vijf verificaties die bij voorstel
+#10 zijn gedraaid, sectie 80) - VLAK VÓÓR het klikken op "uitvoeren", niet eerder:**
+1. `scripts/checkWorstCaseAccountSafety.ts`'s `SessionKeyAccount`-deel opnieuw draaien (geeft
+   `data.length` per account).
+2. Voor elk resultaat MET `data.length >= 421`: `expiry_slot` tegen de dan-actuele slot
+   controleren. Een resultaat MET `data.length < 421` is per definitie inert - direct
+   overslaan, geen `expiry_slot`-controle nodig, nooit een blokkade.
+3. Bestaat er ook maar één `SessionKeyAccount` dat BEIDE voorwaarden haalt (bruikbaar EN nog
+   niet verlopen), dan NIET uitvoeren - eerst wachten tot hij vanzelf verloopt (er is
+   vandaag geen bovengrens om op te wachten totdat B3 zelf live is, dus dit kan in het
+   slechtste geval een keer expliciet worden afgewacht) of alsnog een migratiepad bouwen,
+   niet de deploy toch doorzetten.
+
+**Met deze definitie is de poort NU al gehaald** (sectie 88, direct vóór het schrijven van
+de buffer opnieuw gemeten): van de oorspronkelijke 5 zijn er 2 gesloten en 3 inert
+(`data.length = 341 < 421`, kunnen nooit meer bruikbaar worden, ongeacht hun `expiry_slot`) -
+**nul bruikbare sessies, vandaag.** Dit moet ONVERANDERD blijven waar: vlak vóór uitvoeren
+(na de 72u-timelock) opnieuw meten, niet op deze meting van vandaag vertrouwen - in dat
+venster kan een NIEUWE, wél-bruikbare sessie ontstaan (zie de expliciete afspraak
+hieronder, die dat voor het ECHTE programma uitsluit totdat de upgrade live is).
 
 ### Expliciete afspraak: geen nieuwe sessies op het ECHTE programma tot de upgrade
 
@@ -7092,12 +7130,18 @@ aangemaakt, vanzelf verlopen is, is een eenvoudige, aantoonbare manier om dit ge
 waar te maken in plaats van te hopen dat het toevallig zo uitkomt.
 
 **Conclusie, expliciet als ontwerpvraag (niet als afgehandeld detail):** B2/B3 kunnen in hun
-huidige vorm door zonder migratie-instructie, MITS bij het daadwerkelijke voorstel opnieuw
-(niet aangenomen) bevestigd wordt dat er dan nul actieve `SessionKeyAccount`s bestaan - exact
-dezelfde afweging als sectie 53 al eerder expliciet maakte en die nu voor de tweede keer
-correct blijkt. Het al geschetste migratiepad (`UncheckedAccount` + handmatige oude-layout-
-parsing + verse, passkey-ondertekende her-autorisatie per sessie) staat klaar voor het
-moment dat dit ooit wél om echte, actieve sessies gaat.
+huidige vorm door zonder migratie-instructie, MITS vlak vóór UITVOEREN (niet bij indienen -
+zie sectie 83's uitvoeringschecklist) opnieuw (niet aangenomen) bevestigd wordt dat er dan
+nul BRUIKBARE `SessionKeyAccount`s bestaan - exact dezelfde afweging als sectie 53 al eerder
+expliciet maakte en die nu voor de tweede keer correct blijkt. **GECORRIGEERD:** "actief"
+was hier zelf ook het verkeerde criterium - een account dat al te kort is om door welke
+`_via_session`-instructie dan ook gedeserialiseerd te worden (zoals de drie 341-byte-
+zombies uit sectie 86/88) telt niet mee, ongeacht zijn `expiry_slot`; zie sectie 83's
+uitvoeringschecklist voor de precieze, tweevoudige definitie van "bruikbaar". Met die
+definitie is de poort NU al gehaald (sectie 88): 2 gesloten, 3 inert, **nul bruikbaar**. Het
+al geschetste migratiepad (`UncheckedAccount` + handmatige oude-layout-parsing + verse,
+passkey-ondertekende her-autorisatie per sessie) staat klaar voor het moment dat dit ooit
+wél om echte, bruikbare sessies gaat.
 
 ### Fail-closed was fail-open: het mechanisme, precies
 

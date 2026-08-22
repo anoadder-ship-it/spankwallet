@@ -6755,12 +6755,94 @@ gecontroleerd, niet aangenomen:**
 - Sectie 79 (C1/C2/D3): uitsluitend brontekst-tegen-`instructions.rs`/configuratie-audits,
   geen enkele testrun-afhankelijke bewering.
 
-### Nog openstaand vóór commit
+### Vandaag gecommit, in vier losse commits (niets gepusht)
 
-Huidige diff (niets gecommit, niets gepusht): `package.json` (`--validator legacy`),
-`tests/hunt.ts` (de wortelfix), `.mocharc.yml` (`verifyValidatorType.ts` toegevoegd),
-`scripts/build-and-deploy.sh` (voetangel A/B-fix), en nieuw: `scripts/lib/
-devnet-program-id.sh`, `scripts/build-devnet-buffer.sh`, `scripts/verify-program-id-in-
-binary.ts`, `tests/verifyValidatorType.ts`. `programs/spankwallet/src/lib.rs`,
-`programs/active-defense/src/lib.rs` en `Anchor.toml` staan weer op hun gecommitte
-(devnet-)waarden - geen diff daar, zoals bedoeld.
+Sectie 80, 81 en 82 elk als eigen commit (met de bijbehorende code/scripts), plus een losse
+vierde commit voor `Cargo.lock` (lockfile-drift sinds `d6d1033` - `active-defense` stond al
+in `Cargo.toml`, nooit meegenomen in `Cargo.lock`; zuivere synchronisatie, geen inhoudelijke
+wijziging).
+
+**Bewust NIET meegecommit, blijft als open diff staan:** `package.json`'s
+`@solana/spl-token`-dependency-toevoeging + de `@solana/web3.js`-versiebump (`^1.98.0` ->
+`^1.98.4`), met de bijbehorende `package-lock.json`-wijziging. Herkomst niet vast te
+stellen: niets in de huidige boom (geen `tests/*.ts`, geen `scripts/*.ts`) importeert
+`@solana/spl-token` - de bestaande testbestanden (`policy.ts`, `sessionKeys.ts`, `hunt.ts`)
+noemen expliciet in hun eigen commentaar dat ze die dependency juist NIET nodig hebben.
+Vermoedelijk een geïnstalleerde-maar-nooit-gebruikte kant van een ander stuk werk (mogelijk
+gerelateerd aan de gedeelde-werkboom-situatie uit sectie 81) - blijft open totdat vastgesteld
+is waarvoor dit bedoeld was.
+
+`programs/spankwallet/src/lib.rs`, `programs/active-defense/src/lib.rs` en `Anchor.toml`
+staan op hun gecommitte (devnet-)waarden - geen diff daar, zoals bedoeld.
+
+**Ook aangetroffen, niet meegenomen in deze ronde (buiten scope van wat vandaag gevraagd
+werd):** vier `.bak`-bestanden in `programs/spankwallet/src/` (byte-identiek aan hun
+niet-`.bak`-tegenhanger, dus onschadelijk maar overbodig) en twee losse scratch-scripts in de
+repo-root (`quick-test.ts`, `simple-test.js`) die overduidelijk bij het losstaande
+active-defense-werk horen (emoji-rijke wegwerp-output, hardcoded placeholder-adressen,
+"vervang dit met je eigen wallet"-commentaar) - vermoedelijk dezelfde soort
+werkboom-vermenging als sectie 81's `active-defense-keypair.json`-vondst. Niet verwijderd
+zonder expliciet akkoord; wel iets om bewust op te ruimen of te verplaatsen, niet om te
+laten liggen.
+
+## 83. Plan volgende ronde: B1-B7 naar devnet - functioneel bewijs EERST, buffer pas daarna
+
+Uitsluitend een plan, nog niets van uitgevoerd: geen buffer geschreven, geen voorstel
+ingediend, niets gepusht. Volgorde is bewust zo gekozen dat een fout zich toont VOORDAT er
+een 72-uurs-timelock aan vastzit, niet erna (zoals bij voorstel #10 nog wel gebeurde - sectie
+80's functionele bewijs kwam pas NA de al-uitgevoerde upgrade).
+
+### Stap 1 - functioneel bewijs op een verse devnet-wallet, VÓÓR enig bufferwerk
+
+B1 t/m B7 (sectie 76-79) staan als broncode al op `main`, maar zijn nog nooit tegen een
+echte devnet-RPC uitgeoefend - alleen tegen de lokale validator (sectie 82's nu-betrouwbare
+`--validator legacy`-suite, 80 passing) en in geïsoleerde native cargo-unittests. Vóór er
+ook maar aan een buffer gedacht wordt:
+
+1. Build de B1-B7-broncode met `scripts/build-and-deploy.sh` (nu met de voetangel-A/B-fixes
+   uit sectie 82 - geen wees-keypairs, geen vervuilde werkboom achteraf).
+2. Deploy die build naar devnet onder een VERSE, wegwerpbare programma-ID (niet het echte,
+   multisig-bestuurde adres `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) - een throwaway-
+   keypair zoals `build-and-deploy.sh` er toch al één beheert, gewoon met een aparte,
+   duidelijk als zodanig gemarkeerde identiteit.
+3. Herhaal tegen die throwaway-deploy exact de vier bewijzen die sectie 80 al deed voor
+   voorstel #10 (`init_wallet`, `add_passkey`, replay-weigering, spend-limit-cap), plus
+   expliciet de NIEUWE B1-B7-onderdelen die sectie 80 nog niet kon testen: sessie-epoch
+   (B2), max-sessieduur (B3), en de overige B4-B7-punten - elk met hetzelfde soort hard,
+   reproduceerbaar bewijs (signatuur, foutcode, exacte state-delta), niet aangenomen op
+   basis van de unittests alleen.
+
+### Stap 2 - migratieveiligheid tegen de 12 ECHTE bestaande wallets, expliciet, niet aangenomen
+
+Sectie 80's belangrijkste bevinding (de fail-closed-aanname voor oudere-layout-accounts is
+empirisch ONWAAR, en "generaliseert vermoedelijk direct naar B2") is voor de B1-B7-layout
+zelf nog NIET empirisch gecontroleerd - alleen de synthetische Some/Some-unittest bestaat
+daarvoor, en die methodologie is precies wat sectie 80 al onbetrouwbaar bleek. Verplicht,
+vóór een echt voorstel:
+
+- `scripts/checkAllOldWallets.ts`-methodologie hergebruiken, maar dan de rauwe bytes van
+  alle huidige echte devnet-wallets (leesalleen, geen transacties, geen kosten) decoderen
+  tegen de NIEUWE B1-B7-IDL/layout uit stap 1's throwaway-deploy, niet tegen de huidige
+  live layout. Doel: vaststellen of een van de 12 bestaande wallets een onverwachte/
+  giswaarde krijgt op een NIEUW B1-B7-veld (sessie-epoch of vergelijkbaar), net zoals de
+  bestaande `action_nonce`-restdata-vondst.
+- Bij een treffer: uitzoeken of dat veld ergens een beslissing beïnvloedt (net als bij
+  `action_nonce`, waar een giswaarde onschadelijk bleek omdat client en programma dezelfde
+  bytes symmetrisch lezen) - niet aannemen dat het vanzelf goed gaat, aantonen.
+
+### Stap 3 - pas ná stap 1 én 2: de reeds-geformaliseerde bufferroute
+
+Uitsluitend als stap 1 en 2 allebei zonder onverklaarde afwijking zijn afgerond:
+`scripts/build-devnet-buffer.sh` (geïsoleerde worktree, eigen `CARGO_TARGET_DIR`) +
+`scripts/verify-program-id-in-binary.ts` om de buffer te bouwen en te verifiëren - exact de
+tooling die sectie 82 vandaag formaliseerde. Dit script schrijft zelf nog steeds geen buffer
+en doet geen on-chain-aanroep; het daadwerkelijk schrijven van de buffer en het indienen van
+het multisig-voorstel blijven, zoals overal in dit project, een bewuste, handmatige stap na
+expliciete bevestiging - niet iets wat deze of een volgende ronde automatisch doet.
+
+### Wat hier expliciet NIET bij hoort
+
+Geen buffer schrijven, geen voorstel indienen, geen push naar `origin` - dat laatste blijft
+sowieso gekoppeld aan SECURITY.md's beleid (pushen pas nadat de bijbehorende upgrade live en
+geverifieerd is), en B1-B7 is dat per definitie nog niet vóórdat stap 1-3 hierboven zijn
+doorlopen.

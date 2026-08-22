@@ -6384,3 +6384,76 @@ voor twee nog-actief-kwetsbare bevindingen publiek maken vóórdat het gedeployd
 dicht. Blijft uit tot de volgende upgrade live en op dezelfde manier geverifieerd is als
 vandaag.
 
+## 81. Gedeelde werkboom-incident: twee sessies, één map - eerst een lege pagina, daarna een stille rebase van veertien commits
+
+Twee losstaande, opeenvolgende symptomen bleken achteraf dezelfde oorzaak te hebben.
+
+**Symptoom 1 (middag):** `admin/wallet-signer.html` toonde plotseling niets meer - sectie
+80's "Aanleiding" beschrijft de leesronde die dit uitzocht. Destijds werd de oorzaak
+vastgesteld als: de werkboom stond op `active-defense-phase1` in plaats van `main`, dus
+serveerde de server een verouderde `BUFFER`-constante. Opgelost door terug te wisselen en de
+server te herstarten - maar WIE of WAT die eerste wissel had veroorzaakt, bleef toen
+onbekend (geen lokaal sessielog, geen shell-geschiedenis dekte het tijdstip).
+
+**Symptoom 2 (avond, tijdens het opstellen van sectie 80):** vlak vóór het committen van
+sectie 80 bleek `main`'s HEAD niet meer `f650942` te zijn maar `cbe7cd1` - zelfde
+commit-boodschap, ANDERE hash, en met `programs/active-defense/` (een volledig los,
+onafhankelijk Anchor-programma) er middenin. `git reflog` liet de oorzaak zien: om
+`2026-08-20T23:18:08+0200` was, terwijl `main` hier stond uitgecheckt, `git pull --rebase
+origin active-defense-phase1` gedraaid - dat rebaseerde alle 14 commits van vandaag bovenop
+`active-defense-phase1`'s tip, met nieuwe hashes voor elk van de 14 als gevolg.
+
+**Werkelijke oorzaak van beide, bevestigd door de gebruiker:** een TWEEDE, gelijktijdige
+Claude Code-sessie werkte vanavond aan het losstaande active-defense-project, in dezelfde
+map als deze sessie. Geen inbraak, geen kwaadaardige actie - twee sessies die zonder
+coördinatie dezelfde working tree en dezelfde `.git` deelden, en elkaars `git
+checkout`/`git pull --rebase` daardoor letterlijk onder elkaar vandaan trokken.
+
+**Schade, hard gecontroleerd vóór er iets herschreven werd:**
+- `f650942` bestond nog gewoon als los, geldig commit-object (`git cat-file -t` bevestigde
+  dit) - niets was verloren, alleen de branch-pointer was elders gaan wijzen.
+- `git diff f650942 cbe7cd1` liet uitsluitend `Cargo.toml` (+1 workspace-member) en de 5
+  nieuwe `programs/active-defense/*`-bestanden zien - verder NIETS: `STATUS.md` was
+  byte-identiek tussen beide versies, geen samenvoegconflicten, geen `.git/rebase-merge`-
+  resten.
+- `origin/main` was ongewijzigd (nog op `b6793f7`) - er was niets gepusht, de schade was
+  puur lokaal.
+- Tijdens het uitzoeken kwam ook een los, nooit-gecommit bestand aan het licht:
+  `active-defense-keypair.json` in de repo-root (231 bytes, ontstaan `22:43:40`, ~35 minuten
+  vóór de rebase) - bevestigd via `git rev-list --objects --all` én `git fsck --unreachable`
+  dat de inhoud NERGENS in de geschiedenis van welke branch dan ook, bereikbaar of hangend,
+  ooit is gecommit. Verplaatst naar `~/.config/solana/spankwallet-dev-keys/` (buiten de
+  repo, `chmod 600`), `*-keypair.json` toegevoegd aan `.gitignore`. Verder geen ander
+  sleutelmateriaal gevonden dat niet al gitignored was (`admin/*.pem`, `test-ledger/`,
+  `target/deploy/*-keypair.json` - alle drie bevestigd nooit getrackt).
+
+**Herstel, in deze volgorde, elke stap bevestigd vóór de volgende:**
+1. Bevestigd dat er geen tweede sessie/proces meer actief was op deze map (procestabel
+   doorzocht op cwd, geen vreemde `git`-lock-bestanden).
+2. Sleutelmateriaal eerst verwijderd/veiliggesteld (hierboven).
+3. Beide toestanden vastgezet met tags (`main-pre-active-defense-rebase-20260820` op
+   `f650942`, `main-post-active-defense-rebase-20260820` op `cbe7cd1`) vóórdat er iets
+   herschreven werd, plus een verse, volledige bundle-backup (`--all`, dus met beide tags,
+   beide branches en alle remotes) in `/home/michel/spankwallet-backups/
+   spankwallet-full-2026-08-21.bundle` - geverifieerd met `git bundle verify`.
+4. **Structurele scheiding: een eigen `git worktree` voor `active-defense-phase1`, buiten
+   deze map, op `/home/michel/projects/spankwallet-active-defense`.** Bevestigd dat beide
+   werkbomen onafhankelijk hun eigen HEAD/branch vasthouden (`git worktree list` toont
+   `main`@`cbe7cd1` hier en `active-defense-phase1`@`bf76c8c` daar, geen van beide
+   beïnvloedt de ander) en dat ongecommitte wijzigingen niet oversijpelen tussen de twee.
+5. `main` teruggezet naar `f650942` (`git reset --hard`) - bevestigd: 14 commits sinds
+   `b6793f7`, tip `f650942`, `STATUS.md` (gecommit) eindigt bij sectie 79, geen
+   `programs/active-defense/` meer in de boom, `Cargo.toml`'s workspace weer uitsluitend
+   `programs/spankwallet`, en de active-defense-commit nog gewoon aanwezig en bereikbaar op
+   zijn eigen branch (`bf76c8c`). Sectie 80 (dit verslag ervoor) was als ongecommitte
+   werkboom-wijziging bewaard vóór de reset en er weer bovenop gezet.
+
+**Structurele conclusie, expliciet zo bedoeld en geen stijlvoorkeur:** één werkboom per
+project is hier vandaag GEEN kwestie van netheid gebleken, maar een voorwaarde. Dezelfde
+gedeelde map leidde twee keer op één dag tot een verkeerde staat - eerst verkeerde
+broncode (de lege pagina, een stale `BUFFER`-constante uit de verkeerde branch), daarna
+verkeerde geschiedenis (veertien herschreven commit-hashes en ongevraagd binnengehaalde,
+ongerelateerde broncode). Met de aparte worktree hierboven kan dat structureel niet meer
+gebeuren: elke branch heeft nu zijn eigen map, zijn eigen HEAD, zijn eigen `git`-commando's
+die alleen daar landen.
+

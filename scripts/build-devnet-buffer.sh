@@ -115,19 +115,50 @@ cp "$SO_PATH" "$VERIFIED_OUTPUT"
 SHA256="$(sha256sum "$VERIFIED_OUTPUT" | cut -d' ' -f1)"
 SO_SIZE=$(stat -c%s "$VERIFIED_OUTPUT" 2>/dev/null || stat -f%z "$VERIFIED_OUTPUT")
 
+# VOETANGEL 4 (STATUS.md): "exact één keer gevonden, geen besmetting" bewijst
+# alleen iets over het BESTAND dat je erlangs haalt - niet over waar dat
+# bestand straks daadwerkelijk terechtkomt. Een `solana program write-buffer`
+# zonder `--buffer` genereert zelf een WILLEKEURIG buffer-adres, dat je pas
+# kent nadat het commando al gedraaid heeft - de mens moet dat adres dan met
+# de hand overtypen/plakken in stap 2, en precies dat kopieerpad (aannemen
+# i.p.v. controleren) is exact de fout die de wegwerp-devnet-deploy vandaag
+# maakte (declare_id! klopte, maar het adres waar `solana program deploy`
+# ECHT naartoe schreef kwam van een andere, nooit-geverifieerde keypair).
+# Fix: het buffer-adres hier NIET laten afhangen van uit elkaar geplukte
+# terminal-output, maar van een keypair-bestand dat WIJ vooraf aanmaken en
+# waarvan we het adres zelf, programmatisch, uitlezen - dezelfde bron voor
+# zowel "waar we straks naartoe schrijven" (stap 1, via --buffer) als "wat
+# we straks terugverifiëren" (stap 2). Bewust nog steeds GEEN on-chain-
+# aanroep door dit script zelf (dezelfde grens als altijd) - alleen het
+# keypair-bestand wordt hier gegenereerd, het schrijven blijft een bewuste,
+# handmatige stap.
+BUFFER_KEYPAIR="/tmp/spankwallet-buffer-keypair-${SHORT_COMMIT}.json"
+solana-keygen new --no-bip39-passphrase --silent --force --outfile "$BUFFER_KEYPAIR" >/dev/null
+BUFFER_ADDRESS="$(solana-keygen pubkey "$BUFFER_KEYPAIR")"
+
 echo ""
 echo "==> Build geverifieerd. commit=$RESOLVED_COMMIT bytes=$SO_SIZE"
 echo "==> sha256=$SHA256"
 echo "==> Geverifieerde .so: $VERIFIED_OUTPUT"
+echo "==> Vooraf vastgelegd buffer-adres (keypair: $BUFFER_KEYPAIR): $BUFFER_ADDRESS"
 echo ""
-echo "STAP 1 - buffer schrijven (handmatig uitvoeren, niet door dit script):"
+echo "STAP 1 - buffer schrijven op het HIERBOVEN al vastgelegde adres (handmatig"
+echo "uitvoeren, niet door dit script) - '--buffer' pint het adres, zodat er in stap 2"
+echo "niets uit terminal-output overgetypt hoeft te worden:"
 echo "    solana program write-buffer $VERIFIED_OUTPUT \\"
+echo "        --buffer $BUFFER_KEYPAIR \\"
 echo "        --url $RPC_URL --keypair ~/.config/solana/id.json"
 echo ""
-echo "STAP 2 - PAS NA Stap 1, met het buffer-adres dat die net teruggaf: bevestig dat"
-echo "wat er daadwerkelijk on-chain staat overeenkomt met deze build (niet aannemen -"
-echo "dit zijn precies de controles die bij voorstel #10 doorslaggevend waren):"
-echo "    solana program dump <BUFFER_ADRES> /tmp/spankwallet-buffer-dump.so --url $RPC_URL"
+echo "    VERPLICHTE CONTROLE: het 'Buffer: ...'-adres dat dit commando afdrukt MOET"
+echo "    letterlijk $BUFFER_ADDRESS zijn. Is dat niet zo, STOP - er is iets mis met"
+echo "    het --buffer-argument zelf, ga dan NIET verder naar stap 2."
+echo ""
+echo "STAP 2 - PAS NA een geslaagde controle hierboven: lees uit waar ECHT naartoe"
+echo "geschreven is ($BUFFER_ADDRESS, niet een aangenomen adres) en bevestig dat de"
+echo "INHOUD daarvan zowel byte-voor-byte als qua gedeclareerd programma-adres"
+echo "overeenkomt met deze build (dit zijn precies de controles die bij voorstel #10"
+echo "doorslaggevend waren):"
+echo "    solana program dump $BUFFER_ADDRESS /tmp/spankwallet-buffer-dump.so --url $RPC_URL"
 echo "    sha256sum /tmp/spankwallet-buffer-dump.so"
 echo "        # moet EXACT overeenkomen met: $SHA256"
 echo "    node_modules/.bin/ts-node --transpile-only scripts/verify-program-id-in-binary.ts \\"

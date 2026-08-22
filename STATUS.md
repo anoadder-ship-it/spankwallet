@@ -6802,25 +6802,16 @@ ingediend, niets gepusht. Volgorde is bewust zo gekozen dat een fout zich toont 
 een 72-uurs-timelock aan vastzit, niet erna (zoals bij voorstel #10 nog wel gebeurde - sectie
 80's functionele bewijs kwam pas NA de al-uitgevoerde upgrade).
 
-### Stap 1 - functioneel bewijs op een verse devnet-wallet, VÓÓR enig bufferwerk
+### Stap 1 - AFGEROND (sectie 87): functioneel bewijs op een verse devnet-wallet
 
-B1 t/m B7 (sectie 76-79) staan als broncode al op `main`, maar zijn nog nooit tegen een
-echte devnet-RPC uitgeoefend - alleen tegen de lokale validator (sectie 82's nu-betrouwbare
-`--validator legacy`-suite, 80 passing) en in geïsoleerde native cargo-unittests. Vóór er
-ook maar aan een buffer gedacht wordt:
-
-1. Build de B1-B7-broncode met `scripts/build-and-deploy.sh` (nu met de voetangel-A/B-fixes
-   uit sectie 82 - geen wees-keypairs, geen vervuilde werkboom achteraf).
-2. Deploy die build naar devnet onder een VERSE, wegwerpbare programma-ID (niet het echte,
-   multisig-bestuurde adres `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) - een throwaway-
-   keypair zoals `build-and-deploy.sh` er toch al één beheert, gewoon met een aparte,
-   duidelijk als zodanig gemarkeerde identiteit.
-3. Herhaal tegen die throwaway-deploy exact de vier bewijzen die sectie 80 al deed voor
-   voorstel #10 (`init_wallet`, `add_passkey`, replay-weigering, spend-limit-cap), plus
-   expliciet de NIEUWE B1-B7-onderdelen die sectie 80 nog niet kon testen: sessie-epoch
-   (B2), max-sessieduur (B3), en de overige B4-B7-punten - elk met hetzelfde soort hard,
-   reproduceerbaar bewijs (signatuur, foutcode, exacte state-delta), niet aangenomen op
-   basis van de unittests alleen.
+Uitgevoerd tegen een verse, wegwerpbare programma-ID op devnet
+(`2NHovxaquuaf1RsPsKAPk9rVAcN4ntfoFCiHWYhpCAp8`, nooit het echte, multisig-bestuurde adres).
+Alle 11 controles geslaagd: de vier uit sectie 80 (`init_wallet`, `add_passkey`, replay-
+weigering, spend-limit-cap) plus B2 (sessie-epoch/recovery-invalidatie) en B3
+(`MAX_SESSION_DURATION_SLOTS`, zowel de weigering ver-erboven de grens als het slagen EXACT
+op de grens). Zie sectie 87 voor de volledige uitvoering, een tijdens deze stap zelf
+aangetroffen en gecorrigeerde mismatch (voetangel 4), en waar het wegwerp-adres en zijn
+keypair nu bewaard blijven.
 
 ### Stap 2 - AFGEROND (sectie 85): worst-case-analyse, niet een momentopname
 
@@ -7226,3 +7217,115 @@ SOL) zit al sinds vóór vandaag vast, niet pas sinds deze poging.
 - **Expliciete afspraak (geen nieuwe sessies op het echte programma tot de upgrade)**: zie
   sectie 83's nieuwe, met naam zo genoemde subsectie - vastgelegd, niet aan het geheugen
   overgelaten.
+
+## 87. Sectie 83's stap 1 uitgevoerd: functioneel bewijs op een wegwerp-devnet-deploy, voetangel 4 (een groene controle tegen een aangenomen adres bewijst niets over het echte adres), en drie vervolgacties
+
+### Voetangel 4: "exact één keer gevonden" bewees iets over het bestand, niet over het doel
+
+Tijdens het bouwen van de wegwerp-deploy zelf een reële, niet-hypothetische versie van
+precies de foutklasse die sectie 76-82/84 al drie keer in andere vormen blootlegde (een
+verouderde binary die niemand meldde, een gedeelde werkboom waarvan de HEAD kon
+verschuiven, een validator die zich voordeed als een andere): `scripts/
+verify-program-id-in-binary.ts` bevestigde "adres 5zUzSwgw... komt exact 1 keer voor, geen
+lokaal testadres aangetroffen" - een correcte, eerlijke uitspraak over het BESTAND. Maar
+`solana program deploy --program-id <pad-naar-keypair>` was aangeroepen met een pad dat
+NIET naar dat keypair wees (per ongeluk in de verkeerde van twee mogelijke target-mappen
+gekopieerd) - `anchor build` had op het daadwerkelijk gebruikte pad zelf, stilzwijgend, een
+ANDER keypair gegenereerd (`2NHovxaquuaf1RsPsKAPk9rVAcN4ntfoFCiHWYhpCAp8`). De binary
+declareerde dus 5zUzSwgw..., maar de daadwerkelijke deploy ging naar 2NHovx... - een
+programma dat zijn eigen `declare_id!` niet herkent, exact voetangel B's failure-mode
+(build-and-deploy.sh, sectie 82), nu opgetreden ondanks een groene tool-uitkomst.
+
+**Waarom de tool geen schuld treft, en wat wel:** de tool beantwoordde precies de vraag die
+eraan gesteld werd ("staat dit adres in dit bestand, en geen bekend testadres") - het
+probleem zat in de AANNAME die ik daaraan vastknoopte (dat het bestand ook naar dat adres
+zou landen), niet in de meting zelf. **Ontdekt en gecorrigeerd door het net zo te
+controleren als de rest van dit project inmiddels standaard doet: niet aannemen, meten.**
+`solana-keygen pubkey` op het daadwerkelijk gebruikte keypair-pad vergeleken met
+`declare_id!` - mismatch bevestigd, `declare_id!`/`Anchor.toml` gecorrigeerd naar het ECHTE
+gedeployde adres, herbouwd, opnieuw geverifieerd (positief + negatief), gedeployd
+(upgrade), en de on-chain-inhoud teruggehaald (`solana program dump`) en met `cmp`/
+`sha256sum` byte-voor-byte tegen de lokale build vergeleken - pas NA die bevestiging is er
+verder getest.
+
+**Structurele fix in `scripts/build-devnet-buffer.sh`, dezelfde redenering doorgetrokken
+naar de echte bufferroute (waar dit script wél toe leidt):** een `solana program
+write-buffer` zonder `--buffer` genereert zelf een willekeurig buffer-adres, pas kenbaar uit
+de terminal-output NA het commando - de mens moet dat adres dan met de hand overtypen/
+plakken naar stap 2's verificatie, en precies dat kopieerpad (aannemen i.p.v. controleren)
+is dezelfde fout in een andere vorm. Het script genereert nu VOORAF een eigen
+buffer-keypair-bestand (`solana-keygen new`), leest daar zelf, programmatisch, het adres
+uit, en gebruikt exact DIE waarde voor zowel `write-buffer --buffer <bestand>` (stap 1) als
+de terugverificatie (stap 2, `solana program dump <datzelfde adres>`) - geen enkele stap
+hangt meer af van iets dat uit terminal-output overgetypt moet worden. Stap 1's afdruk
+bevat bovendien een VERPLICHTE controle: het `Buffer: ...`-adres dat `write-buffer` zelf
+teruggeeft moet letterlijk gelijk zijn aan het vooraf vastgelegde adres - blijkt dat niet zo,
+dan is de instructie: stop, ga niet door naar stap 2.
+
+### Drie vervolgacties, direct verwerkt
+
+**1. `scripts/throwawayB1B7Proof.ts` bewaard, met een harde grendel.** Dit script doet
+destructieve dingen (`initiate_recovery`, `finalize_recovery`, `add_passkey`) - zou het ooit
+per ongeluk tegen het echte programma draaien, dan raakt het echte wallets. `refuseIfReal
+Program()` leest `scripts/lib/devnet-program-id.sh` (dezelfde ENE bron als build-and-
+deploy.sh/build-devnet-buffer.sh, geen eigen kopie van dat adres) en WEIGERT (gooit een
+Error, geen waarschuwing) zodra het opgeloste `program.programId` daar exact aan gelijk is -
+vóór er ook maar een RPC-aanroep gebeurt. Getest in beide richtingen: geweigerd tegen het
+echte adres, doorgelaten tegen het wegwerp-adres (en de volledige proof draaide daarna
+opnieuw, met exact dezelfde 11/11 uitkomst als de eerste keer).
+
+**2. De wegwerp-deploy blijft staan, nu herkenbaar vastgelegd in plaats van los
+rondzwevend:**
+- **Adres:** `2NHovxaquuaf1RsPsKAPk9rVAcN4ntfoFCiHWYhpCAp8`.
+- **Doel:** herbruikbare functionele B1-B7-verificatie vóór een echt voorstel voor het
+  echte programma - hertesten na elke volgende brontekstwijziging aan B1-B7 (of een latere
+  B8+) is goedkoper dan opnieuw vanaf nul bouwen.
+- **Upgrade-authority:** `id.json` (`G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`) -
+  **uitdrukkelijk GEEN multisig-bestuurd programma**, in tegenstelling tot het echte,
+  gedeployde spankwallet-programma (sectie 42, Squads V4, 2-of-3, 72u-timelock). Wie dit
+  adres ooit tegenkomt zonder deze sectie gelezen te hebben, moet niet aannemen dat dezelfde
+  bescherming hier geldt.
+- **Keypair:** verplaatst naar `${XDG_CONFIG_HOME:-~/.config}/spankwallet/program-keypairs/
+  spankwallet-b1b7-throwaway-devnet-keypair.json` (uit de tijdelijke worktree, die straks
+  toch verdwijnt) - zelfde reden als waarom het lokale programma-keypair daar al stond
+  (sectie 82, voetangel A): een enige-exemplaar-keypair hoort niet in een wegwerp-worktree.
+
+**3. Toegevoegd aan `verify-program-id-in-binary.ts`'s negatieve controle.** Omdat het
+keypair in dezelfde `program-keypairs`-map staat, pikt de bestaande scan-logica dit adres
+nu AUTOMATISCH mee - geen aparte code-wijziging nodig, wel de tool's eigen taal
+gecorrigeerd (was: "lokale testadressen"; nu: "bekende test-/wegwerpadressen" - dit adres is
+namelijk geen lokaal-validator-adres). Getest: een `.so` die dit adres bevat, wordt nu
+terecht geweigerd ("BEKEND TEST-/WEGWERPADRES AANGETROFFEN") - een binary met dit adres kan
+dus nooit meer per ongeluk voor een deploybare devnet-build worden aangezien.
+
+### Stap 1's functionele resultaten - alle 11 controles geslaagd
+
+Tegen `2NHovxaquuaf1RsPsKAPk9rVAcN4ntfoFCiHWYhpCAp8` (bytes bevestigd identiek aan de lokale
+build, `cmp` + `sha256sum`, vóór er iets getest werd):
+
+- De vier uit sectie 80: `init_wallet`, `add_passkey`, replay-weigering
+  (`StaleActionNonce`), spend-limit (binnen cap OK, boven cap geweigerd met
+  `SessionSpendPerTxExceeded`, `spent_lamports` correct ongewijzigd na de geweigerde
+  poging).
+- **B3:** `add_session_key` met `expiry_slot` ruim voorbij `current_slot +
+  MAX_SESSION_DURATION_SLOTS` geweigerd (`SessionDurationTooLong`); EXACT op de grens
+  (`current_slot + MAX_SESSION_DURATION_SLOTS`, de `<=` in de broncode, niet `<`) geslaagd -
+  beide kanten van de grens expliciet getest, niet alleen de kant die "moet werken"
+  bevestigt.
+- **B2:** een sessie aangemaakt vóór `initiate_recovery` werkt daarvoor gewoon
+  (`execute_via_session`, betaling aangekomen); `initiate_recovery`
+  (`backup_authority`-handtekening, geen passkey) + een korte, uitsluitend-voor-deze-
+  wegwerptest ingestelde `recovery_timelock_seconds` (5s - `init_wallet`'s argument kent
+  geen minimum, geverifieerd) + `finalize_recovery` na het verstrijken daarvan;
+  `session_epoch` correct 0 -> 1; DEZELFDE, oude sessie daarna geweigerd met
+  `SessionRevokedByRecovery`; een NIEUWE sessie, aangemaakt door de nieuwe eigenaar NA de
+  recovery, werkt gewoon.
+
+Twee eigen scriptfouten onderweg gevonden en gefixt, geen van beide een programmabug: een
+rate-limit van de publieke devnet-RPC (opgelost met vaste korte pauzes tussen stappen, niet
+op web3.js' eigen beperkte retry-backoff vertrouwd) en een testbedrag onder Solana's
+rent-exempt-minimum voor een verse ontvanger (zelfde valkuil als sectie 80's eigen
+proof-script al documenteerde, hier zelf opnieuw tegenaan gelopen bij het schrijven van de
+B2-stap).
+
+**Nog steeds niets gepusht, geen buffer geschreven, geen voorstel ingediend.**

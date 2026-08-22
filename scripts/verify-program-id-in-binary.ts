@@ -9,14 +9,18 @@
 //      rauwe .so-bytes (niet in de broncode - de bytes die daadwerkelijk
 //      geüpload zouden worden). Nul treffers = verkeerd/geen programma;
 //      meer dan 1 treffer = dubbelzinnig, niet automatisch te vertrouwen.
-//   2. NEGATIEF: GEEN van de bekende lokale test-adressen (uit
+//   2. NEGATIEF: GEEN van de bekende test-/wegwerpadressen (uit
 //      ${XDG_CONFIG_HOME:-~/.config}/spankwallet/program-keypairs/) mag
-//      voorkomen. Dit is de controle die de daadwerkelijke voetangel
-//      tegenhoudt: een lokaal-test-artefact dat voor een deploybare
-//      devnet-.so wordt aangezien (zie STATUS.md - "de .so is een
-//      valstrik"-sectie). Bestaat de keypair-store niet, dan is dat geen
-//      fout - de controle wordt dan expliciet (niet stilzwijgend)
-//      overgeslagen.
+//      voorkomen - zowel lokale-validator-testadressen als devnet-
+//      wegwerpdeploys (STATUS.md sectie 87: 2NHovxaquuaf1RsPsKAPk9rVAcN4nt-
+//      foFCiHWYhpCAp8, de B1-B7-throwaway-deploy, staat hier ook expliciet
+//      in - een devnet-adres kan net zo goed per ongeluk voor "de echte,
+//      deploybare build" worden aangezien als een lokaal testadres). Dit is
+//      de controle die de daadwerkelijke voetangel tegenhoudt: een test-
+//      artefact dat voor een deploybare devnet-.so wordt aangezien (zie
+//      STATUS.md - "de .so is een valstrik"-sectie). Bestaat de keypair-
+//      store niet, dan is dat geen fout - de controle wordt dan expliciet
+//      (niet stilzwijgend) overgeslagen.
 //
 // Gebruik:
 //   node_modules/.bin/ts-node --transpile-only \
@@ -92,14 +96,14 @@ function main(): void {
       `op offset ${expectedOffsets[0]}.`
   );
 
-  // --- Controle 2: NEGATIEF - geen enkel lokaal testadres ---
+  // --- Controle 2: NEGATIEF - geen enkel bekend test-/wegwerpadres ---
   const xdgConfigHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
   const keypairStore = path.join(xdgConfigHome, "spankwallet", "program-keypairs");
 
   if (!fs.existsSync(keypairStore)) {
     console.log(
       `MELDING (negatieve controle OVERGESLAGEN): ${keypairStore} bestaat niet - ` +
-        "geen bekende lokale testadressen om tegen te controleren. Dit is geen " +
+        "geen bekende test-/wegwerpadressen om tegen te controleren. Dit is geen " +
         "fout, maar de negatieve controle heeft in dit geval NIET gedraaid."
     );
     console.log("ALLE UITGEVOERDE CONTROLES GESLAAGD.");
@@ -126,7 +130,7 @@ function main(): void {
       const secret = JSON.parse(fs.readFileSync(fullPath, "utf8"));
       keypair = Keypair.fromSecretKey(Uint8Array.from(secret));
     } catch {
-      fail(`FOUT (ongeldig lokaal keypair-bestand): ${fullPath} kon niet gelezen worden als een geldig Solana-keypair.`);
+      fail(`FOUT (ongeldig keypair-bestand): ${fullPath} kon niet gelezen worden als een geldig Solana-keypair.`);
     }
     return { file, pubkey: keypair.publicKey.toBase58(), bytes: Buffer.from(keypair.publicKey.toBytes()) };
   });
@@ -137,11 +141,12 @@ function main(): void {
     if (offsets.length > 0) {
       foundAny = true;
       console.error(
-        `FOUT (LOKAAL TESTADRES AANGETROFFEN): ${pubkey} (uit ${file}) komt ` +
+        `FOUT (BEKEND TEST-/WEGWERPADRES AANGETROFFEN): ${pubkey} (uit ${file}) komt ` +
           `${offsets.length} keer voor in\n` +
           `${soPath}, op offsets ${offsets.join(", ")}.\n` +
           "Dit is precies het artefact dat deze controle moet tegenhouden: een " +
-          "lokale-test-build die voor een deploybare devnet-.so wordt aangezien."
+          "lokale-test- of devnet-wegwerp-build die voor een deploybare devnet-.so " +
+          "wordt aangezien."
       );
     }
   }
@@ -150,8 +155,8 @@ function main(): void {
   }
 
   console.log(
-    `OK (geen lokale testadressen aangetroffen): gecontroleerd tegen ` +
-      `${localIdentities.length} bekende lokale identiteit(en) uit ${keypairStore}.`
+    `OK (geen bekende test-/wegwerpadressen aangetroffen): gecontroleerd tegen ` +
+      `${localIdentities.length} bekende identiteit(en) uit ${keypairStore}.`
   );
   console.log("ALLE CONTROLES GESLAAGD.");
 }

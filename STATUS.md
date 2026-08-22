@@ -6238,3 +6238,149 @@ geregenereerd na C1/C2, zie de aanbeveling in PUNT 1/VOORAF B om dit periodiek t
   client-side/documentatie, D3 raakt zelfs geen gebouwde code).
 - Pushen naar de publieke remote blijft uit tot de gebruiker expliciet bevestigt dat de
   bijbehorende upgrade live en geverifieerd is (SECURITY.md).
+
+## 80. Voorstel #10 uitgevoerd: vijf verificaties, functioneel bewijs op een verse wallet, en een gefalsifieerde fail-closed-aanname bij bestaande wallets
+
+### Aanleiding: het lege-pagina-incident
+
+`admin/wallet-signer.html` toonde plotseling niets meer ("alles is weg, gesloten"). Eerst
+uitsluitend een leesronde, geen actie: rechtstreeks tegen devnet bevestigd (dezelfde
+`@sqds/multisig`-methode als sectie 70/77, los Node-scriptje, niet de pagina zelf) dat
+voorstel #10 nog gewoon `Approved` stond, de buffer (`2JnLSDRXSMb5LYwH2JBFG74mPj3pZkUyeqtGLKt7Wz7r`)
+intact was, en de timelock al verstreken was. De lege pagina bleek NIET een on-chain
+probleem: `git reflog` liet zien dat de werkboom via een niet-lokaal-gelogde sessie was
+omgezet naar branch `active-defense-phase1` (afgesplitst vóór `main`'s `22265d6`, de commit
+die `wallet-signer.html`'s `BUFFER`-constante naar voorstel #10 bijwerkte) - de server
+serveerde dus gewoon een stale bestand dat naar voorstel #8's (inmiddels `Cancelled`) buffer
+wees. `findCanonicalProposal()` filterde daardoor terecht alles weg. Geen schade: alle 14
+commits van vandaag stonden veilig op `main`, niets ongecommit ging verloren bij het
+terugwisselen. Opgelost door terug te wisselen naar `main` en de server te herstarten -
+geverifieerd (`curl` tegen de daadwerkelijk geserveerde pagina, niet aangenomen) dat
+`PAGE_BUILD`, `BUFFER` en de letterlijke, geserveerde `findCanonicalProposal()`-code
+voorstel #10 correct als canoniek herkenden vóórdat de gebruiker verder ging.
+
+### De vijf verificaties (canary-niveau rigor, elk met los, onafhankelijk bewijs)
+
+Eerste ronde (vóór de daadwerkelijke klik op "4. Uitvoeren") toonde terecht dat NIETS was
+uitgevoerd: het browserlog liet zien dat alleen op knop 2 ("Voorstel indienen") en knop 3
+("Goedkeuren") was geklikt, beide correct geweigerd door bestaande vangrails (voorstel bestaat
+al / al voldoende goedkeuringen) - nul transacties van welke van de drie leden dan ook,
+onafhankelijk bevestigd tegen twee losse RPC-providers (Helius + `api.devnet.solana.com`).
+Na de daadwerkelijke klik op knop 4 (Phantom, lid `3zZcLwT...`):
+
+1. **Signatuur/slot:** `5YdGjZEfL9QjBSNntZZ1SJLkAiCnhJUU2p9q5ePYJPq8YfW3XQMNkkTdB1smQT1wrCnt1LWf91PMwXm9cMp9assc`,
+   slot `485929485`, `finalized`, `err: null`, blocktime `2026-08-20T20:58:05Z`. Programlog
+   letterlijk: `Upgraded program 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`.
+2. **Programma-hash:** `3f41d07190311036966492991a6d57a38c9915ba115462e6dfd7a4112cd6a60a` -
+   exacte match met de al eerder onafhankelijk bevestigde buffer-hash (zelf gerebuild vanaf
+   commit `414068c` in een geïsoleerde `git worktree`, `cmp` byte-identiek). Methodenote:
+   `ProgramData`'s accountgrootte krimpt niet mee bij een upgrade naar een kleiner binary -
+   754.848 bytes code-regio, waarvan de laatste 204.984 bytes bevestigd 100% nul (historische
+   padding van een eerdere, grotere deploy) - pas na hashen van precies de eerste 549.864
+   bytes (dezelfde lengte als de buffer) kwam de match tevoorschijn.
+3. **Buffer:** bestaat niet meer. Vault-saldo steeg van 3.100.241.520 naar 6.928.443.360
+   lamports - een toename van exact 3.828.201.840 lamports, precies gelijk aan wat de buffer
+   ervoor bevatte.
+4. **Upgrade authority:** ongewijzigd, `89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw` (vault).
+5. **Proposal #10:** status `Executed` (timestamp `2026-08-20T20:58:05Z`, consistent met de
+   blocktime). `multisig.transactionIndex` staat nog op 10 - geen nieuw voorstel aangemaakt.
+
+### Functioneel bewijs op een verse devnet-wallet
+
+Reden: deze deploy verandert `WalletAccount`'s layout, dus "de transactie is geslaagd" bewijst
+nog niet dat het programma werkt. Script (`tests/devnetPostUpgradeProof.ts`-stijl, software-
+`p256`/`@noble/curves`-testhelper zoals de bestaande Anchor-testsuite, geen echte hardware
+nodig) rechtstreeks tegen devnet, fee-payer `G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`
+(`~/.config/solana/id.json`, expliciet vooraf gecontroleerd: geen van de drie multisig-leden
+en niet de vault-PDA, dus geen sleutel die over de upgrade-authority kan meetekenen als
+routine-testsleutel gebruikt). Verse wallet `ECYCEqZpKaYSLWoC99dwHJgqTFmwhEygBggyxRh4K4WC`:
+
+- `init_wallet`: geslaagd (sig `2F2SGMS5...`), account 239 bytes (nieuwe layout), `action_nonce`
+  start op 0.
+- `add_passkey` (passkey-gebonden actie): geslaagd (sig `4ch8qF3i...`), `action_nonce` 0 -> 1.
+- **Replay: exact dezelfde, al gebruikte handtekening + nonce nogmaals verstuurd** (nieuwe
+  transactie, verse blockhash, identieke instructie-data): geweigerd. `AnchorError ...
+  instructions.rs:555. Error Code: StaleActionNonce. Error Number: 6043.` - precies de
+  bedoelde, specifieke fout, geen generieke.
+- Spend-limit: `add_session_key` met `maxLamportsPerTx=2.000.000`/`maxLamportsTotal=10.000.000`
+  (sig `3hp8uxBm...`). `execute_via_session(1.500.000)` binnen de cap: geslaagd (sig
+  `4AyvjSYy...`), ontvanger-balans exact 1.500.000. `execute_via_session(2.000.001)` boven de
+  cap: geweigerd, `Error Code: SessionSpendPerTxExceeded. Error Number: 6038.`
+  `session.spentLamports` na beide pogingen: 1.500.000 - de mislukte poging telde niet mee
+  (atomaire rollback, zoals verwacht).
+
+Alle vier de gevraagde functionele bewijzen: **geslaagd, exact zoals bedoeld.**
+
+### Bestaande, vóór-upgrade wallets: de fail-closed-aanname is empirisch GEFALSIFICEERD
+
+Dit is het belangrijkste, meest verrassende resultaat van deze ronde en verdient nadruk, geen
+understatement. De aanname (expliciet zo geformuleerd, sectie 69: "een oude, kortere-layout-
+account faalt hierdoor SCHOON op deserialisatie (`AccountDidNotDeserialize`, fail-closed)",
+bevestigd door een native `cargo test`-unittest) **klopt niet tegen de 12 echte, bestaande
+devnet-wallets.** Alle 12 decoderen gewoon, zonder fout, met `program.account.walletAccount
+.fetch()` - geen enkele gaf `AccountDidNotDeserialize`.
+
+**Waarom de unittest een vals gevoel van zekerheid gaf:** de test (`state.rs`,
+`old_231_byte_wallet_account_fails_closed_against_new_239_byte_layout`) construeert zijn
+"oude account" door een WalletAccount met BEIDE Options bewust op `Some(...)` te zetten (de
+enige manier om de volle 231 bytes te bereiken), en knipt daar dan de laatste 8 bytes af. In
+dát specifieke, synthetische geval eindigt de buffer inderdaad precies op byte 231, dus lezen
+voorbij dat punt faalt terecht. Maar `WalletAccount::LEN` was in de praktijk een VAST
+`init`-groottegetal (231), berekend voor het worst-case Some/Some-scenario, ongeacht de
+werkelijke runtime-waarden - en zowel `recovery_state` als `deposit_authority` zijn in vrijwel
+elke echte wallet `None` (de normale, documenteerde toestand). Zo'n account gebruikt maar
+~166 van zijn 231 toegekende bytes; de resterende ~65 bytes zijn on-chain gewoon aanwezig,
+altijd-nul, nooit weggehaald. De nieuwe `action_nonce`-lezing (8 bytes, direct na de bestaande
+velden) past daar gewoon in - geen "niet genoeg bytes"-fout, want er ZIJN genoeg bytes,
+alleen niet om de bedoelde reden.
+
+**Empirisch, per wallet (`tests/checkAllOldWallets.ts`, alle 12 tegen devnet):**
+- 10 van de 12 (incl. de ene met een actieve `recovery_state`) decoderen met `actionNonce: 0`
+  - toevallig onschadelijk, want die 8 bytes waren altijd nul geweest.
+- **1 wallet (`3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ`) decodeert met
+  `actionNonce: 11743083837406067974`** - aantoonbaar GEEN toeval, echte restdata uit
+  hergebruikte/nooit-genulde accountruimte (recovery_state/deposit_authority stonden bij
+  aanmaak beide op `None`, dus deze bytes werden nooit door een `Some`-tak beschreven; waar
+  ze precies vandaan komen - stale Solana-accountgeheugen van vóór deze wallet's eigen
+  `init_wallet`, of iets anders - is niet verder onderzocht, buiten scope van vandaag).
+
+**Wat dit wel en niet betekent:** dit is geen actief misbruikbaar gat op zichzelf - de client
+leest bij een echte actie dezelfde bytes die het programma leest (`fetchActionNonce()` en de
+on-chain check zijn symmetrisch), dus een eigenaar met de juiste passkey zou vermoedelijk nog
+gewoon met dat wallet kunnen werken, gewoon vanaf een willekeurige/absurde nonce-startwaarde
+in plaats van 0. Niet empirisch bevestigd vandaag (geen signing-sleutel voor deze bestaande
+testwallets voorhanden, en die reconstrueren viel buiten de scope van een leesronde). Wel
+hard bevestigd: de eerder vastgelegde garantie ("faalt schoon, geen giswaarde") is ONWAAR
+voor echte accounts, en de reden is een unittest die een niet-representatief synthetisch
+geval test in plaats van hoe `init_wallet` daadwerkelijk ruimte toekent.
+
+**Dit generaliseert direct naar B2 (sectie 77, nog niet gedeployed):** diezelfde
+toets-methodologie (`old_239_byte_wallet_account_fails_closed_against_current_layout`,
+`old_421_byte_session_key_account_fails_closed_against_current_layout`) is met exact dezelfde
+Some/Some-truncatie-aanpak gebouwd, dus draagt vermoedelijk hetzelfde gat. Expliciet
+meegenomen als verplichte pre-check in het voorstel voor de volgende ronde hieronder - NIET
+aangenomen dat B1-B7 dit probleem alsnog structureel oplost.
+
+### Wat nu live staat, wat nog niet
+
+**Live op het gedeployde programma (`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) sinds
+`2026-08-20T20:58:05Z`:** de C-1-fix (wallet-brede `action_nonce`, sectie 69) en de
+spend-limits voor sessiesleutels (sectie 53/58) - dat is exact en uitsluitend wat voorstel
+#10's buffer bevatte (commit `414068c`).
+
+**NIET live, nadrukkelijk:** B1 t/m B7 (FASE A/B/C, secties 76-79 - de statische-audit-fixes,
+sessie-epoch/B2, max-sessieduur/B3, en de overige B4-B7-punten) zitten NIET in deze deploy.
+**H-1 en H-2 staan dus nog gewoon live op het huidige gedeployde programma** - onveranderd
+sinds vóór vandaag, ongeacht dat de broncode ervoor op `main` al wel gefixed is.
+
+### De push-hold blijft onverkort staan
+
+De 14 lokale commits op `main` (`33e2876` t/m `f650942`, plus de admin/wallet-signer.html-
+opruiming en dit sectie-80-verslag) gaan **niet** naar GitHub. Reden, expliciet vastgelegd
+zodat dit niet per ongeluk als "afgehandeld" gelezen wordt: SECURITY.md's disclosure-beleid
+koppelt pushen aan "de bijbehorende upgrade is live en geverifieerd" - en de upgrade die
+B1-B7 (waaronder H-1/H-2) daadwerkelijk fixt, is dat nog niet. Pushen nu zou de fix-broncode
+voor twee nog-actief-kwetsbare bevindingen publiek maken vóórdat het gedeployde programma ze
+dicht. Blijft uit tot de volgende upgrade live en op dezelfde manier geverifieerd is als
+vandaag.
+

@@ -42,8 +42,8 @@
     <p>
       Programma: <code>9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9</code><br />
       Multisig: <code>A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp</code><br />
-      Huidige voorgestelde upgrade: <strong>gecombineerd: spend-limits (sectie 53) + action_nonce/C-1-fix (sectie 69)</strong><br />
-      Buffer: <code>2JnLSDRXSMb5LYwH2JBFG74mPj3pZkUyeqtGLKt7Wz7r</code>
+      Huidige voorgestelde upgrade: <strong>B1-B7 statische-audit-fixes (sectie 76/77): recovery-wipe verplicht, sessie-epoch/max-sessieduur, hunt/transfer_token-accountbinding, remove_session_key-payer</strong><br />
+      Buffer: <code>728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET</code>
     </p>
     <button id="connect-btn">1. Wallet verbinden (desktop-extensie, of Mobile Wallet Adapter op Android)</button>
     <button id="connect-solflare-deeplink-btn">1b. Verbinden via Solflare (mobiel, echte deep-link naar de app)</button>
@@ -80,7 +80,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-08-20T14:00:00Z-buffer-voorstel-10-cancel8-knop-verwijderd-al-voltooid";
+      var PAGE_BUILD = "2026-08-22T21:58:05Z-buffer-b1b7-728EpFN-vervangt-voorstel-10s-buffer";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -200,15 +200,25 @@
       const MULTISIG_PDA = new PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
       const VAULT_PDA = new PublicKey("89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw");
       // Wijzigt bij elke nieuwe voorgestelde upgrade (STATUS.md, admin/README.md
-      // stap 1) - momenteel: gecombineerde upgrade spend-limits (sectie 53) +
-      // action_nonce/C-1-fix (sectie 69), voorstel #8 geannuleerd en vervangen
-      // (sectie 70) om niet twee losse 72u-timelocks te hoeven doorlopen voor de
-      // kritieke C-1-fix. De vorige waarde (voorstel #8's buffer,
-      // BDnDJLueS9Xfo6n2VJBarzvdqUtPBRe2SyzoWYJ4LuE2, sectie 58) is bewust NIET
-      // hergebruikt of als fallback behouden - zelfde reden als altijd: een oude
-      // buffer laten matchen zou een voorstel voor DEZE upgrade nooit als
-      // canoniek herkennen.
-      const BUFFER = new PublicKey("2JnLSDRXSMb5LYwH2JBFG74mPj3pZkUyeqtGLKt7Wz7r");
+      // stap 1) - momenteel: B1-B7 statische-audit-fixes (sectie 76/77),
+      // gebouwd tegen commit 1fb3134, geverifieerd tegen de daadwerkelijke
+      // on-chain buffer-inhoud vóór deze waarde hier werd ingevuld (STATUS.md
+      // sectie 89 - sha256 62b450001e384805944c31d4da50fa3357f29a0b0301293
+      // 5f6f3f14e83cbfb4a). De vorige waarde (voorstel #10's buffer,
+      // 2JnLSDRXSMb5LYwH2JBFG74mPj3pZkUyeqtGLKt7Wz7r, sectie 80) is bewust
+      // NIET hergebruikt of als fallback behouden - die buffer bestaat
+      // sowieso niet meer (geconsumeerd bij het uitvoeren van voorstel #10)
+      // - en zelfde reden als altijd: een oude buffer laten matchen zou een
+      // voorstel voor DEZE upgrade nooit als canoniek herkennen.
+      //
+      // VERPLICHTE STAP BIJ ELKE NIEUWE BUFFER, GEEN OPTIONELE HERINNERING
+      // (STATUS.md sectie 89 - dit is de TWEEDE keer dat deze constante een
+      // probleem veroorzaakte of dreigde te veroorzaken): deze pagina MOET
+      // bijgewerkt worden zodra een nieuwe buffer geschreven is, want
+      // findCanonicalProposal() hieronder filtert strikt op deze constante -
+      // een verouderde waarde laat de pagina een NIET-bestaand of VERKEERD
+      // voorstel als canoniek behandelen, precies het #8-scenario.
+      const BUFFER = new PublicKey("728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET");
       const BPF_LOADER_UPGRADEABLE = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
 
       const connection = new Connection(DEVNET_URL, "confirmed");
@@ -722,7 +732,7 @@
           vaultIndex: 0,
           ephemeralSigners: 0,
           transactionMessage: innerMessage,
-          memo: "SpankWallet spend-limits-deploy (STATUS.md sectie 53)",
+          memo: "SpankWallet B1-B7 statische-audit-fixes (STATUS.md sectie 76/77)",
         });
 
         const proposalIx = multisig.instructions.proposalCreate({

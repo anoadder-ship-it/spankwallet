@@ -80,7 +80,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-08-22T21:58:05Z-buffer-b1b7-728EpFN-vervangt-voorstel-10s-buffer";
+      var PAGE_BUILD = "2026-08-23T18:37:03Z-timeout-meldt-nu-echte-ketenstatus-niet-schijnbare-mislukking";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -402,6 +402,77 @@
 
       async function fetchMultisig() {
         return multisig.accounts.Multisig.fromAccountAddress(connection, MULTISIG_PDA);
+      }
+
+      // VOETANGEL (STATUS.md, sectie 91 - de vijfde keer deze week dat een
+      // MEETOPSTELLING loog i.p.v. het systeem zelf): `connection.
+      // confirmTransaction(signature, "confirmed")` met een kale
+      // signature-string gooit na een vaste, vrij korte termijn een
+      // timeoutfout - die fout zegt NIETS over wat er op de keten gebeurde,
+      // alleen dat DEZE specifieke polling-poging niet op tijd een
+      // bevestiging zag. Bij voorstel #11 leidde dat drie keer tot een
+      // client die "onbekend/mislukt" meldde over een transactie die in
+      // werkelijkheid allang, succesvol, geland was - rechtstreeks
+      // geverifieerd tegen devnet (getTransaction, err: null, alle drie).
+      // Het risico is niet symmetrisch: een retry op knop 3/4 is onschadelijk
+      // (Squads wijst een ongeldige tweede poging gewoon af), maar een retry
+      // op knop 2 maakt een heel NIEUW voorstel aan (het #6/#7-scenario,
+      // sectie 54) - vandaar de extra, knop-2-specifieke stap in
+      // finishPropose hieronder.
+      //
+      // Poll rechtstreeks de signatuur zelf (niet een nieuwe blockhash-
+      // gebaseerde strategie, die confirmTransaction() onder de motorkap wél
+      // gebruikt en die een ANDER expiratievenster kan hebben dan de
+      // daadwerkelijk verstuurde transactie) - dit is exact dezelfde
+      // rechtstreekse controle waarmee sectie 91 de drie signaturen
+      // achteraf bevestigde.
+      async function pollSignatureStatus(signature, { attempts = 10, intervalMs = 3000 } = {}) {
+        for (let i = 0; i < attempts; i++) {
+          try {
+            const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+            const status = value[0];
+            if (status && (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized")) {
+              return { landed: true, err: status.err };
+            }
+          } catch (e) {
+            log(
+              "[debug] tijdelijke fout bij het controleren van de signatuurstatus (poging " +
+                (i + 1) + "/" + attempts + "): " + e.message,
+              "log-debug"
+            );
+          }
+          if (i < attempts - 1) await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        return { landed: false, err: null };
+      }
+
+      // Gedeelde bevestigingslogica voor ALLE drie de knoppen EN het
+      // deep-link-pad (finishPropose/finishApprove/finishSquadsExecute
+      // worden door beide paden aangeroepen - een fix hier werkt dus
+      // automatisch ook op mobiel, waar een timeout tijdens het heen-en-
+      // weer-springen tussen apps nog waarschijnlijker een onnodige herklik
+      // uitlokt dan op desktop). Meldt de gebruiker expliciet WAT te doen
+      // (niet klikken, ik controleer het), niet slechts WAT de code niet
+      // weet - en gooit alleen een fout als er na herhaalde controle
+      // daadwerkelijk iets mis is, nooit uitsluitend omdat de EERSTE
+      // controle traag was.
+      async function awaitConfirmation(signature, onTimeoutDetected) {
+        try {
+          await connection.confirmTransaction(signature, "confirmed");
+          log("Bevestigd.");
+          return { timedOut: false, landed: true, err: null };
+        } catch (err) {
+          log(
+            "De transactie is verstuurd (signature " + signature + "), maar de bevestiging duurt " +
+              "langer dan verwacht. Ik controleer dit nu rechtstreeks bij de RPC - klik niet opnieuw " +
+              "terwijl dit loopt.",
+            "log-error"
+          );
+          log("[debug] confirmTransaction gaf: " + (err && err.message ? err.message : String(err)), "log-debug");
+          if (onTimeoutDetected) onTimeoutDetected();
+          const outcome = await pollSignatureStatus(signature);
+          return { timedOut: true, landed: outcome.landed, err: outcome.err };
+        }
       }
 
       // Logt zo veel mogelijk van een fout - niet enkel err.message, dat bij
@@ -752,8 +823,55 @@
 
       async function finishPropose(signature) {
         log("Verstuurd. Signature: " + signature);
-        await connection.confirmTransaction(signature, "confirmed");
-        log("Bevestigd.");
+        const proposeBtn = document.getElementById("propose-btn");
+        const result = await awaitConfirmation(signature, () => {
+          // Knop 2 blijft uit zolang de extra controle hieronder loopt -
+          // sluit het venster waarin een ongeduldige herklik tijdens die
+          // controle zelf nog een duplicaat zou kunnen aanmaken.
+          proposeBtn.disabled = true;
+        });
+
+        if (result.timedOut) {
+          // KNOP-2-SPECIFIEK (STATUS.md sectie 91): een kale signatuur-check
+          // is hier niet genoeg - het voorstel-ACCOUNT zelf is het
+          // gezaghebbende antwoord, niet de status van de tx die het
+          // aanmaakte. Ververs findCanonicalProposal() rechtstreeks tegen de
+          // keten, ongeacht wat de signatuur-poll hierboven vond, VOORDAT de
+          // knop weer vrijkomt.
+          const multisigInfo = await fetchMultisig();
+          const { canonical } = await findCanonicalProposal(multisigInfo);
+
+          if (canonical) {
+            log(
+              "Gecontroleerd tegen de keten: voorstel #" + canonical.transactionIndex + " bestaat al voor " +
+                "deze buffer (status: " + JSON.stringify(canonical.proposal.status) + "). De eerdere " +
+                "transactie is dus GELAND - er is niets mis, klik NIET opnieuw op '2. Voorstel indienen'. " +
+                "Gebruik knop 3/4 op dit voorstel."
+            );
+            return; // knop 2 blijft bewust uit - er is al een canoniek voorstel
+          }
+
+          // Geen canoniek voorstel gevonden - knop 2 mag weer vrij, maar
+          // alleen NADAT dit vaststaat, niet ervoor.
+          proposeBtn.disabled = false;
+
+          if (result.landed && result.err === null) {
+            throw new Error(
+              "Onverwacht: transactie " + signature + " lijkt on-chain geland (geen fout), maar er is " +
+                "geen voorstel voor deze buffer gevonden. Controleer dit handmatig (bijv. via een block " +
+                "explorer) voordat je opnieuw klikt."
+            );
+          }
+          if (result.landed && result.err !== null) {
+            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
+          }
+          throw new Error(
+            "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland is, " +
+              "en er is geen voorstel voor deze buffer gevonden. Controleer dit handmatig (bijv. via een " +
+              "block explorer) voordat je opnieuw op '2. Voorstel indienen' klikt - een retry zonder dat te " +
+              "weten kan een overbodig, dubbel voorstel aanmaken."
+          );
+        }
 
         const multisigInfo = await fetchMultisig();
         const transactionIndex = BigInt(Number(multisigInfo.transactionIndex));
@@ -854,8 +972,21 @@
       // misleidend statusbericht tonen vlak na een security-kritieke actie.
       async function finishApprove(signature, transactionIndex) {
         log("Verstuurd. Signature: " + signature);
-        await connection.confirmTransaction(signature, "confirmed");
-        log("Bevestigd.");
+        const result = await awaitConfirmation(signature);
+
+        if (result.timedOut) {
+          if (result.landed && result.err === null) {
+            log("Gecontroleerd: de transactie is alsnog bevestigd geland. Er is niets mis, klik niet opnieuw.");
+          } else if (result.landed && result.err !== null) {
+            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
+          } else {
+            throw new Error(
+              "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
+                "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op " +
+                "'3. Voorstel goedkeuren'."
+            );
+          }
+        }
 
         const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
@@ -888,7 +1019,22 @@
 
       async function finishSquadsExecute(signature) {
         log("Verstuurd. Signature: " + signature);
-        await connection.confirmTransaction(signature, "confirmed");
+        const result = await awaitConfirmation(signature);
+
+        if (result.timedOut) {
+          if (result.landed && result.err === null) {
+            log("Gecontroleerd: de transactie is alsnog bevestigd geland. Er is niets mis, klik niet opnieuw.");
+          } else if (result.landed && result.err !== null) {
+            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
+          } else {
+            throw new Error(
+              "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
+                "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op " +
+                "'4. Uitvoeren'."
+            );
+          }
+        }
+
         log("SUCCES - uitgevoerd. Signature: " + signature);
       }
 

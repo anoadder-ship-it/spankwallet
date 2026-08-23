@@ -7524,13 +7524,95 @@ mechanisme als sectie 80 destijds voor voorstel #10 beschreef); de resterende `~
 zijn daadwerkelijke, niet-terugvorderbare transactiekosten (write-buffer schrijft een
 binary van deze grootte in veel losse chunk-transacties).
 
-**Terzijde opgemerkt, niet onderzocht (buiten scope van deze actie):** `solana program show
---buffers --buffer-authority id.json` toont 11 ANDERE, oudere buffer-accounts onder
-`id.json`'s authority (in totaal ruim 30 SOL aan rent), vermoedelijk overblijfselen van
-eerdere voorstelrondes (proposal #5/#6/#7/#8, zie sectie 54/70) - niet aangeraakt, niet
-opgeruimd, geen aanname over gedaan. Losstaand punt voor een volgende opruimronde.
+**Terzijde opgemerkt, toen nog niet onderzocht:** `solana program show --buffers
+--buffer-authority id.json` toonde 10 ANDERE, oudere buffer-accounts onder `id.json`'s
+authority (ruim 30 SOL aan rent) - zie sectie 90 voor het vervolg: uitgezocht en
+opgeruimd, niet als aanname.
+
+**VERPLICHTE STAP, GEEN OPTIONELE HERINNERING (dit is de tweede keer dat dit een probleem
+veroorzaakte of dreigde te veroorzaken - zie sectie 90):** elke nieuw geschreven buffer
+vereist dat `admin/wallet-signer.html`'s `BUFFER`-constante (en de zichtbare bufferregel,
+de upgrade-omschrijving, en de on-chain memo-string - alle vier, niet alleen de constante)
+wordt bijgewerkt naar het nieuwe adres, VOORDAT een voorstel wordt ingediend. Zonder deze
+stap blijft `findCanonicalProposal()` op de VORIGE, mogelijk niet-meer-bestaande buffer
+filteren, en zou de pagina een niet-bestaand of verkeerd voorstel als canoniek behandelen -
+exact het #8-scenario (sectie 70). Deze stap hoort standaard bij "buffer schrijven", niet
+bij "als iemand het zich toevallig herinnert".
 
 **NIET gedaan, expliciet bij de gebruiker gelaten:** het multisig-voorstel indienen en
 goedkeuren via de adminpagina - dat blijft, zoals alles wat de multisig raakt, een bewuste,
 menselijke stap. Niets gepusht (de push-hold loopt door tot de upgrade live en
 geverifieerd is, SECURITY.md).
+
+## 90. Adminpagina bijgewerkt naar de nieuwe buffer, en de tien oude, ongerefereerde buffer-accounts opgeruimd
+
+### `admin/wallet-signer.html`: vier plekken bijgewerkt, niet slechts de constante
+
+`git log`/`grep` bevestigde vier plekken met voorstel #10's inmiddels-niet-meer-bestaande
+buffer (`2JnLSDRXSMb5LYwH2JBFG74mPj3pZkUyeqtGLKt7Wz7r`, geconsumeerd bij het uitvoeren van
+#10): de zichtbare bufferregel (regel 46), de `BUFFER`-JS-constante (regel 211, met de
+volledige herziene toelichting inclusief de "verplichte stap"-waarschuwing hierboven), de
+"Huidige voorgestelde upgrade"-omschrijving (regel 45, "spend-limits/C-1-fix" ->
+"B1-B7 statische-audit-fixes"), en de on-chain `memo`-string die in de daadwerkelijke
+Squads-vaultTransaction terechtkomt (regel 725/739, idem). Alle vier bijgewerkt naar
+`728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET`.
+
+`PAGE_BUILD` opgehoogd naar `2026-08-22T21:58:05Z-buffer-b1b7-728EpFN-vervangt-voorstel-10s-
+buffer` - dezelfde cache-detectiecontrole die vorige week al bruikbaar bleek (sectie 64)
+blijft zo bruikbaar.
+
+**Geverifieerd, niet aangenomen:**
+- `node --check` op beide `<script>`-blokken (het klassieke early-log-script EN het
+  module-script): beide syntactisch schoon.
+- Server herstart vanuit de main-werkboom (`/home/michel/projects/spankwallet/admin`,
+  bevestigd via `/proc/<pid>/cwd`) - de vorige instantie draaide toevallig al vanuit
+  dezelfde map, maar herstart alsnog uitgevoerd zoals gevraagd, niet aangenomen dat dat
+  hetzelfde zou zijn als "niet nodig".
+- **Tegen de daadwerkelijk uitgeserveerde pagina, via `curl -k
+  https://127.0.0.1:8766/wallet-signer.html`, niet tegen het bestand op schijf:**
+  `PAGE_BUILD`, de `BUFFER`-constante en de zichtbare bufferregel kwamen alle drie exact
+  overeen met de bijgewerkte waarden.
+- `findCanonicalProposal()`'s EXACTE logica (dezelfde `vaultTxMatchesConfiguredBuffer`-
+  matching, dezelfde scanvolgorde) los gereproduceerd in een standalone Node-script
+  (`@sqds/multisig` v2.1.4, devnet) tegen de nieuwe `BUFFER`: **0 kandidaten, canonical
+  GEEN** - het correcte antwoord, want er is nog niets ingediend. Bijvangst van deze
+  reproductie: voorstellen #1-#4, #6, #7 en #9 staan nog steeds op status `Active` (nooit
+  afgesloten, vermoedelijk resten van eerdere, losstaande incidenten/tests) - geen van
+  allen matcht de nieuwe buffer, dus geen van allen wordt door de pagina als canoniek
+  gezien; verder niet onderzocht, apart genoteerd voor het geval dit ooit relevant wordt.
+
+**Server-URL voor de signers:** `https://192.168.178.205:8766/wallet-signer.html`
+(bevestigd tegen het certificaat's eigen Subject Alternative Name - `openssl x509 -text`
+op `admin/cert.pem` toont exact dit IP, plus `127.0.0.1`/`localhost`).
+
+Gecommit: `5ee1f42`.
+
+### Tien oude, losstaande buffer-accounts: gecontroleerd per stuk, daarna opgeruimd
+
+Vóór het sluiten van ook maar één account: `findCanonicalProposal()`'s onderliggende
+matching-logica hergebruikt (hetzelfde standalone Node-script als hierboven, uitgebreid)
+om ALLE 10 voorstellen (`1..multisig.transactionIndex`, nu nog steeds 10) op te halen en
+voor elk de `accountKeys` van zijn `vaultTransaction` te vergelijken met de 10 bekende,
+losstaande buffer-adressen.
+
+**Resultaat: geen van de 10 komt voor in ENIG voorstel (1 t/m 10), open of afgesloten -**
+niet slechts "geen open referentie", maar nooit ooit door dit multisig-account
+gerefereerd. Dit zijn dus geen restanten van een specifiek eerder voorstel (de aanname in
+sectie 89 - "vermoedelijk overblijfselen van proposal #5/#6/#7/#8" - blijkt bij nadere
+controle NIET te kloppen), maar buffers die ooit met `write-buffer` zijn geschreven en
+vervolgens NOOIT in een `vaultTransactionCreate` zijn opgenomen - losse, nooit-gebruikte
+schrijfacties. Ook bevestigd: geen van de 10 is de nieuwe buffer
+(`728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET`) - die staat sowieso al onder een andere
+authority (de vault, sinds sectie 89), dus zat structureel niet eens in deze
+`id.json`-authority-gefilterde lijst.
+
+**Opgeruimd** (`solana program close --buffers --authority id.json`, sluit alle
+matchende buffers in één keer): **31,77119464 SOL teruggevorderd** (som van de 10
+individuele buffer-balansen, `31,77124464` SOL, minus 10 sluit-transacties à ~5.000
+lamport fee = `0,00005` SOL - het verschil klopt exact). Geverifieerd, niet aangenomen
+dat het commando geslaagd was: `id.json`'s balans vóór/na vergeleken (delta klopt exact
+met de som), EN alle 10 adressen los met `getAccountInfo("finalized")` gecontroleerd -
+`null` voor alle 10. De nieuwe buffer (`728EpFN...`) apart herbevestigd: nog intact,
+authority nog steeds de vault, ongewijzigd door deze opruiming - deze actie was gescopet
+op `id.json`'s authority en kon de nieuwe buffer sowieso niet raken, maar aangenomen wordt
+hier niets.

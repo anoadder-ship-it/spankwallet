@@ -7616,3 +7616,135 @@ met de som), EN alle 10 adressen los met `getAccountInfo("finalized")` gecontrol
 authority nog steeds de vault, ongewijzigd door deze opruiming - deze actie was gescopet
 op `id.json`'s authority en kon de nieuwe buffer sowieso niet raken, maar aangenomen wordt
 hier niets.
+
+## 91. Voorstel #11: een client-side timeout presenteerde drie geslaagde transacties als mislukt - de vijfde keer deze week dat de meting loog, niet het systeem
+
+### Wat er gebeurde
+
+De pagina liep tijdens het indienen/goedkeuren van voorstel #11 herhaaldelijk in een
+bevestigingstimeout. De gebruiker had drie signaturen en de logs, maar geen zekerheid over
+wat er daadwerkelijk op de keten geland was - en vroeg expliciet om verificatie, niet om een
+aanname.
+
+**Rechtstreeks tegen devnet gecontroleerd, elke transactie los (`getTransaction`, volledige
+`logMessages`, niet alleen `getSignatureStatuses`):**
+
+| Signatuur | Instructie | Ondertekenaar | Slot | `err` |
+|---|---|---|---|---|
+| `5NAKVCUB7k...` (indienen) | `VaultTransactionCreate` + `ProposalCreate` | `3zZcLwT...` | 487084941 | `null` |
+| `e7pH1CnKU3...` (goedkeuring) | `ProposalApprove` | `3zZcLwT...` | 487086094 | `null` |
+| `2qphiJ1b5V...` (goedkeuring) | `ProposalApprove` | `CP2fg9z...` | 487085998 | `null` |
+
+**Alle drie geslaagd, finalized, geen enkele foutcode.** De pagina's timeout gaf dus drie
+keer een vals negatief beeld over transacties die al gelukt waren.
+
+**Voorstel #11 zelf, rechtstreeks gedecodeerd:** bestaat
+(`7N6Z1Az4WwjpPH4DMTDNe3UdpsjbGD6RidwxTGHPmJHT`), status **`Approved`**, goedgekeurd door
+`3zZcLwT...` EN `CP2fg9z...` (multisig-leden, ter controle: `2jDzaP3...`, `3zZcLwT...`,
+`CP2fg9z...`, threshold 2 - dus al bereikt, niemand hoeft nog te tekenen). De
+`VaultTransaction` zelf gedecodeerd (niet aangenomen): instructie 0 → programId
+`BPFLoaderUpgradeab1e11111111111111111111111`, opcode (u32 LE) = `3` (Upgrade), accounts in
+volgorde ProgramData/ProgramId/**`728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET`**
+(bevestigd: de juiste buffer)/Vault(spill)/Rent/Clock/**Vault(authority, signer)** - exact
+de verwachte structuur. `multisig.transactionIndex` = **11**, proposal #12 expliciet
+opgevraagd: bestaat niet. Geen duplicaat.
+
+**Timelock:** de proposal-status-timestamp (`1787509052`) valt EXACT samen met `e7pH1CnK`'s
+`blockTime` - onafhankelijk bevestigd dat dít de threshold-bereikende transactie was
+(`CP2fg9z`'s goedkeuring, eerder op `blockTime` `1787509031`, bracht het aantal nog niet op
+2; pas `3zZcLwT`'s eigen, latere goedkeuring deed dat). Timelock gestart:
+**2026-08-23T18:17:32Z**. Vroegst mogelijke uitvoering: **2026-08-26T18:17:32Z**.
+
+### Mijn eigen eerste lezing was ook fout - dat onderstreept het punt
+
+Bij het opstellen van de vraag werd aangenomen dat er nog maar één goedkeuring stond en dat
+`2jDzaP3` of `3zZcLwT` nog moest tekenen. Dat klopte niet: er stonden al twee (`3zZcLwT` +
+`CP2fg9z`), threshold was al gehaald, niemand hoefde nog te tekenen. **Logs van een client
+(inclusief de eigen lezing daarvan) zijn geen ketenstaat** - precies het punt dat deze
+verificatie moest bewijzen, bevestigde zichzelf hiermee nog een keer, van een onverwachte
+kant.
+
+### De vijfde keer deze week dat de meting loog, niet het systeem
+
+1. De verouderde binary die niemand meldde (sectie 77, EIS 1 / `verifyBinaryFresh.ts`).
+2. De gedeelde werkboom waarvan de HEAD kon verschuiven zonder dat iemand het merkte
+   (sectie 81).
+3. Surfpool die zich voordeed als een echte validator, met een halve fee gerapporteerd
+   (sectie 82, vondst 1).
+4. `id.json`'s 500.000.000-SOL-genesisbalans die JS `Number`-precisie liet knappen
+   (sectie 82, vondst 2).
+5. **Deze: een client-side bevestigingstimeout die drie geslaagde transacties als mislukt
+   presenteerde** - en, terzijde, een menselijke lezing van diezelfde onvolledige logs die
+   daardoor ook de verkeerde kant op redeneerde.
+
+Telkens dezelfde vorm: niet het onderliggende systeem (de binary, de branch, het
+programma, de keten) loog, maar het instrument waarmee ernaar gekeken werd. Telkens pas
+zichtbaar geworden doordat een op zichzelf onschuldig signaal (een mtime, een branch-HEAD,
+5000 lamport, 40 lamport, een timeoutfout) niet werd weggeredeneerd maar tot op de bodem
+uitgezocht.
+
+### De fix: timeout meldt nu de echte ketenstatus, niet een schijnbare mislukking
+
+`connection.confirmTransaction(signature, "confirmed")` met een kale signature-string gooit
+na een vaste, vrij korte termijn een timeoutfout die niets zegt over de keten. Vervangen
+door een gedeelde `awaitConfirmation()`-helper (gebruikt door `finishPropose`/
+`finishApprove`/`finishSquadsExecute` - en dus AUTOMATISCH ook door het deep-link-pad,
+`resumeDeeplinkIfNeeded()`, dat dezelfde drie functies aanroept, geen aparte code nodig):
+bij een timeout wordt niet de mislukking gemeld, maar eerst de gebruiker verteld wat er
+gebeurt en wat NIET te doen ("de transactie is verstuurd, de bevestiging duurt langer dan
+verwacht, ik controleer dit nu - klik niet opnieuw"), gevolgd door een rechtstreekse
+`getSignatureStatuses`-polling-cyclus (10x, 3s interval) op DEZELFDE signatuur - niet een
+nieuwe blockhash-gebaseerde strategie zoals `confirmTransaction` intern gebruikt, die een
+ander expiratievenster kan hebben dan de daadwerkelijk verstuurde transactie.
+
+**Knop-2-specifiek (het risico is niet symmetrisch - een retry op knop 3/4 is onschadelijk,
+Squads wijst een ongeldige tweede poging af, maar een retry op knop 2 maakt een heel NIEUW
+voorstel aan, het #6/#7-scenario sectie 54):** ná een timeout wordt niet alleen de
+signatuurstatus gecontroleerd, maar ook `findCanonicalProposal()` vers tegen de keten
+ververst, VOORDAT knop 2 weer vrijkomt - het voorstel-account zelf is het gezaghebbende
+antwoord, niet de status van de transactie die het aanmaakte. Vindt de pagina een canoniek
+voorstel, dan blijft knop 2 uit en meldt de pagina dat het voorstel er al is (met verse
+gegevens, niet de stand van vóór de klik). Knop 2 wordt bovendien AL bij het detecteren van
+de timeout (niet pas na de volledige extra controle) tijdelijk uitgeschakeld, om de klik-
+tijdens-de-controle-race te sluiten.
+
+Uitkomsten zijn altijd geformuleerd vanuit wat de gebruiker moet doen: "geland, geen actie
+nodig, klik niet opnieuw" of "nog steeds onbevestigd/mislukt, controleer handmatig (bijv.
+via een block explorer) voordat je opnieuw op knop X klikt" - nooit "onbekend of het gelukt
+is".
+
+**Geverifieerd, niet aangenomen:** de exacte, geëxtraheerde functiebodies (niet retyped -
+`python3`-regex-extractie rechtstreeks uit het bestand) in een Node-testharnas geladen met
+gemockte `connection`/`document`/`multisig`, zes scenario's doorlopen: (A) geen timeout -
+ongewijzigd gedrag; (B) timeout, canoniek voorstel gevonden - geen fout, knop blijft uit,
+juiste melding; (C) timeout, signatuur geland maar met een echte on-chain fout - gooit met
+de foutcode; (D) timeout, signatuur nooit gevonden, geen voorstel - gooit met een concrete
+"controleer handmatig"-instructie, knop weer aan; (E) `finishApprove`, timeout maar alsnog
+geland - geen fout; (F) `finishSquadsExecute`, timeout en nooit geland - gooit. Alle zes
+gedroegen zich exact zoals bedoeld. Daarnaast `node --check` op beide `<script>`-blokken,
+server herstart vanuit de main-werkboom, en bevestigd tegen de daadwerkelijk uitgeserveerde
+pagina (`curl`) dat de nieuwe `PAGE_BUILD` en functies aanwezig zijn.
+
+### Wat dinsdag moet gebeuren - vastgelegd, niet aan het geheugen overgelaten
+
+- **Niet vóór `2026-08-26T18:17:32Z`** - dat is het vroegst mogelijke uitvoermoment, hierboven
+  onafhankelijk bevestigd (proposal-status-timestamp = `e7pH1CnK`'s eigen `blockTime`).
+- **Vlak vóór het klikken op "4. Uitvoeren":** `scripts/checkWorstCaseAccountSafety.ts`
+  opnieuw draaien en bevestigen dat er nul BRUIKBARE `SessionKeyAccount`s zijn (sectie 83's
+  bijgewerkte definitie: bruikbaar = `data.length >= 421` ÉN `expiry_slot > current_slot` -
+  niet "niet-verlopen" alleen, dat zou op de drie inerte zombies uit sectie 86/88 kunnen
+  blijven hangen). Gemeten op `2026-08-23`: 0 bruikbaar (2 gesloten, 3 inert) - dit moet
+  opnieuw, niet op deze meting vertrouwd worden, want het is een momentopname.
+- **Direct na het uitvoeren, dezelfde vijf verificaties als bij voorstel #10 (sectie 80):**
+  1. De uitvoertransactie zelf: geslaagd, `err: null`, gelogd programma-upgrade-bericht.
+  2. Programma-hash: het gedeployde programma (na upgrade) vergelijken met de buffer-hash
+     (`62b450001e384805944c31d4da50fa3357f29a0b03012935f6f3f14e83cbfb4a`) - zelfde
+     lengte-precisie-aandachtspunt als sectie 80 (`ProgramData`'s accountgrootte krimpt niet
+     mee bij een kleinere binary).
+  3. Buffer (`728EpFN...`) bestaat niet meer, saldo van de vault gestegen met exact wat de
+     buffer ervoor bevatte (`3,28075608` SOL).
+  4. Upgrade-authority ongewijzigd: nog steeds de vault (`89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`).
+  5. Voorstel #11's status: `Executed`.
+
+Niets gepusht - de push-hold loopt door tot deze upgrade live en geverifieerd is
+(SECURITY.md).

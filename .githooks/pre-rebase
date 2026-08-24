@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Weigert 'main' te rebasen op iets anders dan origin/main. Reden: STATUS.md sectie 92 -
+# op 2026-08-21T14:43:28Z werd `git pull --rebase origin active-defense-phase1` per ongeluk
+# gedraaid terwijl main hier stond uitgecheckt, wat main's HEAD stil liet verschuiven en
+# active-defense-phase1's commits in main's geschiedenis trok. Sectie 81's aparte worktree
+# voorkomt dat de twee branches dezelfde map delen, maar niet dat iemand vanuit main's eigen
+# map het verkeerde commando tikt - deze hook dekt dat gat.
+#
+# Bewuste, expliciete ontsnapping: `git rebase --no-verify` (empirisch bevestigd dat dit
+# werkt, zie sessie-transcript / STATUS.md sectie 92-93-context).
+current_branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
+if [[ "$current_branch" == "main" ]]; then
+    upstream_commit="$(git rev-parse "$1" 2>/dev/null)"
+    origin_main_commit="$(git rev-parse origin/main 2>/dev/null)"
+    if [[ -n "$upstream_commit" && "$upstream_commit" != "$origin_main_commit" ]]; then
+        echo "GEWEIGERD: 'main' rebasen op iets anders dan origin/main is geblokkeerd." >&2
+        echo "  upstream-argument: $1 -> $upstream_commit" >&2
+        echo "  origin/main is:                $origin_main_commit" >&2
+        echo "Bedoel je 'git pull --rebase origin main'? Zo niet: git rebase --no-verify." >&2
+        exit 1
+    fi
+fi
+exit 0

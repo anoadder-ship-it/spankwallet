@@ -7748,3 +7748,92 @@ pagina (`curl`) dat de nieuwe `PAGE_BUILD` en functies aanwezig zijn.
 
 Niets gepusht - de push-hold loopt door tot deze upgrade live en geverifieerd is
 (SECURITY.md).
+
+## 92. Correctie op sectie 81: de "structurele fix" verhinderde de tweede rebase niet - die gebeurde alsnog, en bleef tot vandaag onopgemerkt
+
+Aanleiding: een losse, alleen-lezen security-doorlichting van de scheiding tussen deze
+werkboom en `spankwallet-active-defense` (op verzoek, met het oog op voorstel #11's
+bescherming tot dinsdag). Bevinding: sectie 81's slotconclusie - "Met de aparte worktree
+hierboven kan dat structureel niet meer gebeuren" - **is onjuist gebleken.**
+
+**Wat de reflog laat zien, in volgorde:**
+1. `2026-08-20T23:18:08+0200`: eerste ongeluk, gedocumenteerd in sectie 81 -
+   `git pull --rebase origin active-defense-phase1` gedraaid terwijl `main` hier stond
+   uitgecheckt → `cbe7cd1`.
+2. `2026-08-21T01:19:26+0200`: herstel, gedocumenteerd in sectie 81 - `git reset --hard
+   f650942`, plus de aparte worktree als structurele maatregel (dezelfde run maakte
+   `/home/michel/projects/spankwallet-active-defense` aan, bevestigd via bestands-mtimes
+   daar van `01:18`).
+3. **`2026-08-21T14:43:28+0200` - dertien uur later, NIET gedocumenteerd: exact hetzelfde
+   commando nogmaals gedraaid, opnieuw met `main` hier uitgecheckt** → `pull --rebase
+   origin active-defense-phase1 (finish): refs/heads/main onto f17e073...` → `3fe44c7`.
+   Dit keer is het nooit teruggedraaid.
+
+**Waarom de worktree dit niet tegenhield:** de aparte worktree voorkomt dat `main` en
+`active-defense-phase1` ooit dezelfde map delen op hetzelfde moment - dat werkt, en heeft
+sindsdien geen tweede symptoom-1-achtig incident (verkeerde branch uitgecheckt) meer
+gegeven. Maar hij verhindert niet dat iemand, terwijl hij gewoon in `main`'s eigen map zit,
+per ongeluk `git pull --rebase origin active-defense-phase1` intikt in plaats van `git pull
+--rebase origin main`. Dat is precies wat hier gebeurde: geen gedeelde map dit keer, gewoon
+het verkeerde commando in de juiste map.
+
+**Gevolg, bevestigd:** huidig `main`-HEAD (`6841a80` op het moment van schrijven) heeft
+`d6d1033`..`f17e073` (active-defense's eerste zeven commits) als voorouder
+(`git merge-base --is-ancestor d6d1033 HEAD` → `YES`), en `programs/active-defense/` staat
+gewoon getrackt in de boom, met `Cargo.toml`'s workspace-members-regel erop wijzend. Alle
+dertig commits van sectie 82 t/m 91 zijn hier bovenop gebouwd. `origin/main` staat
+onveranderd op `b6793f7` - niets hiervan is ooit gepusht, de schade is opnieuw puur lokaal.
+
+Zie sectie 93 voor waarom voorstel #11 hier niet door geraakt is, en de vervolgstappen.
+
+## 93. Voorstel #11 staat los van de contaminatie uit sectie 92, en vier vervolgstappen
+
+### Waarom voorstel #11's buffer niet geraakt is
+
+De buffer (`728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET`, sectie 91) is gebouwd uit commit
+`1fb3134` in een geïsoleerde `git worktree` (`scripts/build-devnet-buffer.sh 1fb3134`), met
+`cargo-build-sbf --arch v3 --manifest-path programs/spankwallet/Cargo.toml` - dat compileert
+uitsluitend de `spankwallet`-crate en zijn dependencies, nooit een sibling-workspace-member.
+Twee onafhankelijke builds gaven dezelfde sha256
+(`62b450001e384805944c31d4da50fa3357f29a0b03012935f6f3f14e83cbfb4a`), identiek aan wat
+on-chain in de buffer staat (sectie 91). **De aanwezigheid van `active-defense` als
+workspace-member in `1fb3134`'s `Cargo.toml` verandert hier niets aan:** het bepaalt alleen
+wélke crates cargo als deel van het workspace ZIET, niet welke crates een
+`--manifest-path`-gescopede build daadwerkelijk compileert. Er zit geen active-defense-code
+in de gedeployde `.so`.
+
+**Vastgelegd voor de toekomst:** zodra stap 2 hieronder is uitgevoerd, wijkt `main`'s HEAD
+af van `1fb3134` (active-defense verdwijnt uit de boom). Elke toekomstige herverificatie
+van déze specifieke upgrade (voorstel #11) moet daarom tegen commit **`1fb3134`** gebeuren,
+niet tegen `HEAD` - het gedeployde binary is en blijft precies wat `1fb3134` opleverde,
+ongeacht hoe `main` zich daarna verder ontwikkelt.
+
+### Vier vervolgstappen
+
+1. **NU, vóór dinsdag:** `.claude/settings.local.json`'s brede `Bash(solana program *)`
+   versmallen naar alleen de read-only subcommando's (`show`, `dump`) auto-goedgekeurd;
+   alles wat staat kan wijzigen (`deploy`/`upgrade`/`close`/`extend`/`write-buffer`/
+   `set-*-authority`) vraagt weer om bevestiging. Status: voorgesteld aan de gebruiker, nog
+   niet toegepast. Noot: de buffer zelf bewijst dat scoping werkt - de authority is de
+   vault-PDA, niet `id.json`, dus zelfs het bestaande brede commando kon de buffer nooit
+   sluiten. Dit is verdediging in de diepte, geen reactie op een gevonden gat.
+2. **NA dinsdag, pas na live + geverifieerd:** `main` opschonen met een gewone voorwaartse
+   commit - `programs/active-defense/` uit de tree, uit `Cargo.toml`, uit `Cargo.lock`;
+   `scripts/build-and-deploy.sh`'s `WORKSPACE_PROGRAMS`-array en `declare_id!`-trap terug
+   naar uitsluitend `spankwallet`. **Geen rebase, geen filter-branch, geen reset** - de
+   zeven active-defense-commits (`d6d1033`..`f17e073`) blijven gewoon in de geschiedenis
+   staan, ze zijn er echt geweest. Status: voorbereid, nog niet uitgevoerd - de boom
+   verandert pas na expliciete opdracht.
+3. **Structurele maatregel tegen herhaling:** een `pre-rebase`-hook in deze werkboom die
+   weigert zodra iemand `main` probeert te rebasen op iets anders dan `origin/main`.
+   Status: voorgesteld (zie sessie-transcript voor het volledige script), bouw pas na
+   akkoord.
+4. **Te melden aan de sessie die aan `active-defense-phase1` werkt (niet hier op te
+   lossen):** drie verschillende programma-adressen voor hetzelfde active-defense-programma
+   zwerven daar rond - gecommit in `lib.rs` (`9W3CGKhd7hgywf3xfP8snNmB2AgmzwQ3rdDFDV3hUurK`),
+   de huidige (ongecommitte) working tree (`8vPFH4YYVzRr2euemkXDHRz2McH58BBKfwJtQUumc8x5`),
+   en het daadwerkelijk live devnet-programma
+   (`G1D5ckPj3ZMBeYNfEz24dGhvPExqNP6Y3SFNx3V7RbK5`, bevestigd via de ongecommitte
+   `test-verify.js`/`test-transfer-hook.js`).
+
+Push-hold ongewijzigd: niets naar `origin/main` tot voorstel #11 live en geverifieerd is.

@@ -7837,3 +7837,45 @@ ongeacht hoe `main` zich daarna verder ontwikkelt.
    `test-verify.js`/`test-transfer-hook.js`).
 
 Push-hold ongewijzigd: niets naar `origin/main` tot voorstel #11 live en geverifieerd is.
+
+## 94. Pre-flight gat: de timelock zelf werd niet gecontroleerd - een uitvoerpoging kwam een dag te vroeg
+
+Op `2026-08-25` liet een pre-flight (sessies, voorstelstatus, buffer, adminpagina - alle
+vier "goed") de gebruiker geloven dat uitvoeren via knop 4 kon. Dat klopte niet: de 72u-
+timelock (gestart `2026-08-23T18:17:32Z`, dus pas verstreken `2026-08-26T18:17:32Z`) was
+niet zelf gemeten - de vier controles bevestigden alles BEHALVE de ene voorwaarde die op
+dat moment het uitvoeren blokkeerde. De uitvoerpoging werd correct geweigerd door de
+adminpagina's eigen `executableAt`-check (`wallet-signer.html` regel 930-937) - maar dat
+is een tweede vangnet, geen vervanging voor een sluitende pre-flight. Er is niets
+ondertekend.
+
+**Fix: `scripts/checkProposalTimelock.ts`, nieuwe, expliciete EERSTE stap van de pre-
+flight, hard falend (non-zero exit) zolang de timelock niet verstreken is.** Rekent niet
+met een eerder genoteerde datum - meet bij elke draai opnieuw rechtstreeks van de keten:
+`timeLock` (u32, seconden) uit het Multisig-account, de goedkeuringstimestamp uit het
+Proposal-account (`status.timestamp`, alleen geldig als status `Approved` is), en de
+actuele tijd uit de **Clock-sysvar** (`SysvarC1ock111...`, veld `unix_timestamp`) - bewust
+niet lokale `Date.now()` en niet RPC `getBlockTime()`, want de Clock-sysvar is letterlijk
+wat het Squads-programma zelf leest via `Clock::get()?.unix_timestamp` op het moment dat
+het de timelock toetst bij uitvoering, dus de enige "actuele tijd" die er echt toe doet.
+
+Geen nieuwe `@sqds/multisig`-dependency in het hoofdproject (zelfde reden als
+`checkWorstCaseAccountSafety.ts`): alle byte-offsets rechtstreeks overgenomen uit die
+package's eigen gegenereerde `beet`-structuurdefinities
+(`generated/accounts/{Multisig,Proposal}.ts`) en PDA-seeds uit `src/pda.ts`, niet
+aangenomen. Proposal-PDA zelf lokaal met `findProgramAddressSync` afgeleid en vergeleken
+met de eerder (sectie 91) via de SDK gevonden PDA - identiek.
+
+**Getest tegen devnet, `2026-08-25T19:16:54Z`:** `timeLock=259200s` (exact 72,00u),
+goedgekeurd `2026-08-23T18:17:32Z` (identiek aan sectie 91), dus uitvoerbaar vanaf
+`2026-08-26T18:17:32Z` - exact de bekende datum. Clock-sysvar-tijd op het moment van
+draaien: `2026-08-25T19:16:54Z`, dus correct `NIET UITVOEREN` gemeld met ~23,01u resterend,
+exit code 1.
+
+**Voor morgen (na `2026-08-26T18:17:32Z`): alle vier controles opnieuw draaien, inclusief
+de sessiemeting** - de meting van `2026-08-25` is een momentopname en telt niet meer, er
+gaat een dag overheen. Volgorde vanaf nu: (1) `checkProposalTimelock.ts` - moet slagen
+(exit 0) voordat de overige drie zin hebben, (2) sessie-bruikbaarheid, (3) voorstel/
+buffer-status, (4) adminpagina/`findCanonicalProposal()`.
+
+Push-hold ongewijzigd: niets naar `origin/main` tot voorstel #11 live en geverifieerd is.

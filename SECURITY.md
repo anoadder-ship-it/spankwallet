@@ -37,7 +37,13 @@ gefixt, blijven de fix zelf, de bijbehorende bewijs-tests (die precies laten zie
 kwetsbaarheid te misbruiken is) en de beschrijving ervan lokaal gecommit maar **ongepusht**
 totdat de bijbehorende upgrade daadwerkelijk is uitgevoerd en onafhankelijk geverifieerd -
 pushen vóór dat moment zou de exploit-details publiceren terwijl het kwetsbare programma nog
-live staat.
+live staat. Dit beleid blijft van kracht voor elke volgende ronde.
+
+**Meest recente toepassing:** de hold die op 2026-08-20 inging voor de B1-B7-fixes
+(STATUS.md secties 76-77, waaronder H-1/H-2) is op 2026-08-27 vervallen - de bijbehorende
+upgrade (voorstel #11) is live en onafhankelijk geverifieerd (STATUS.md sectie 95), waarna
+de opgehoopte lokale commits gepusht zijn (sectie 97). Geen kwetsbaarheidsdetails stonden
+op enig moment publiek terwijl het kwetsbare programma nog live was.
 
 ## Wat te verwachten
 

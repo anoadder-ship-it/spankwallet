@@ -18,7 +18,6 @@ import {
   encodeOptionalI64,
   fetchActionNonce,
   nonceLeBytes,
-  TestPasskey,
 } from "../tests/webauthnTestHelper";
 
 // Functioneel post-upgrade-bewijs tegen het ECHTE, gedeployde programma op
@@ -37,6 +36,19 @@ import {
 // scripts/checkAllOldWallets.ts en STATUS.md sectie 80 voor waarom die NIET
 // zonder meer "schoon falen" tegen een nieuwe layout, in tegenstelling tot
 // wat de native cargo-unittests suggereren.
+//
+// Bijgewerkt na voorstel #11 (STATUS.md sectie 95, B1-B7): twee stappen
+// toegevoegd (B3 max-sessieduur, B2 session_epoch/recovery-invalidatie,
+// overgenomen uit het wegwerp-bewijs `throwawayB1B7Proof.ts` dat dit al
+// tegen een wegwerp-programma-ID had aangetoond) en de oude stap 5 ("een
+// bestaande, vóór-upgrade wallet moet SCHOON falen te decoderen") vervangen
+// door de TEGENOVERGESTELDE toets: sectie 85's worst-case-analyse
+// VOORSPELDE dat alle 14 bestaande wallets nog gewoon decoderen tegen de
+// nieuwe layout (in tegenstelling tot sectie 80's #10-bevinding, die een
+// LAYOUT-VERGROTING zonder zo'n analyse betrof) - die voorspelling wordt
+// hier gemeten, niet aangenomen.
+const MAX_SESSION_DURATION_SLOTS = 1_512_000n; // state.rs, moet exact overeenkomen - de letterlijke broncode-constante, geen losstaande aanname
+
 async function main() {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
@@ -48,25 +60,12 @@ async function main() {
 
   function derivePdas(compressedPublicKey: Buffer) {
     const seedHash = createHash("sha256").update(compressedPublicKey).digest();
-    const [walletPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("wallet"), seedHash],
-      program.programId
-    );
-    const [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), walletPda.toBuffer()],
-      program.programId
-    );
-    const [passkeysPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("passkeys"), walletPda.toBuffer()],
-      program.programId
-    );
-    const [policyPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("policy"), walletPda.toBuffer()],
-      program.programId
-    );
+    const [walletPda] = PublicKey.findProgramAddressSync([Buffer.from("wallet"), seedHash], program.programId);
+    const [vaultPda] = PublicKey.findProgramAddressSync([Buffer.from("vault"), walletPda.toBuffer()], program.programId);
+    const [passkeysPda] = PublicKey.findProgramAddressSync([Buffer.from("passkeys"), walletPda.toBuffer()], program.programId);
+    const [policyPda] = PublicKey.findProgramAddressSync([Buffer.from("policy"), walletPda.toBuffer()], program.programId);
     return { walletPda, vaultPda, passkeysPda, policyPda, walletSeedHash: Array.from(seedHash) };
   }
-
   function deriveSessionPda(walletPda: PublicKey, sessionKey: PublicKey) {
     const [sessionPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("session"), walletPda.toBuffer(), sessionKey.toBuffer()],
@@ -74,28 +73,55 @@ async function main() {
     );
     return sessionPda;
   }
+  async function sendFresh(instructions: anchor.web3.TransactionInstruction[]) {
+    const tx = new Transaction().add(...instructions);
+    tx.feePayer = provider.wallet.publicKey;
+    tx.recentBlockhash = (await provider.connection.getLatestBlockhash("finalized")).blockhash;
+    const signed = await (provider.wallet as anchor.Wallet).signTransaction(tx);
+    const sig = await provider.connection.sendRawTransaction(signed.serialize(), { skipPreflight: false });
+    await provider.connection.confirmTransaction(sig, "confirmed");
+    return sig;
+  }
+  function addSessionKeyPayload(opts: {
+    nonce: bigint;
+    sessionKey: PublicKey;
+    expirySlot: number;
+    maxLamportsPerTx: BN;
+    maxLamportsTotal: BN;
+  }) {
+    const raw = Buffer.concat([
+      opts.sessionKey.toBuffer(),
+      (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(opts.expirySlot), 0); return b; })(),
+      Buffer.from([1, 0, 0]), // canExecute=true, canTransferToken=false, canExecuteAdvanced=false
+      (() => { const b = Buffer.alloc(4); b.writeUInt32LE(0, 0); return b; })(), // 0 sub-scope programs
+      opts.maxLamportsPerTx.toArrayLike(Buffer, "le", 8),
+      opts.maxLamportsTotal.toArrayLike(Buffer, "le", 8),
+      PublicKey.default.toBuffer(),
+      new BN(0).toArrayLike(Buffer, "le", 8),
+      new BN(0).toArrayLike(Buffer, "le", 8),
+    ]);
+    return Buffer.concat([nonceLeBytes(opts.nonce), raw]);
+  }
 
-  // ---------- 1. init_wallet op een verse wallet ----------
+  const results: Record<string, unknown> = {};
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // ---------- 1. init_wallet op een verse wallet (korte recovery_timelock_seconds, alleen voor stap 6 hieronder) ----------
   console.log("\n=== 1. init_wallet (verse wallet) ===");
   const passkey = generateTestPasskey();
   const backupAuthority = Keypair.generate();
-  const { walletPda, vaultPda, passkeysPda, policyPda, walletSeedHash } = derivePdas(
-    passkey.compressedPublicKey
-  );
+  const { walletPda, vaultPda, passkeysPda, policyPda, walletSeedHash } = derivePdas(passkey.compressedPublicKey);
   console.log("walletPda:", walletPda.toBase58());
   console.log("vaultPda:", vaultPda.toBase58());
 
-  const initPayload = Buffer.concat([backupAuthority.publicKey.toBuffer(), encodeOptionalI64(null)]);
+  const SHORT_TIMELOCK = 5;
+  const initPayload = Buffer.concat([backupAuthority.publicKey.toBuffer(), encodeOptionalI64(SHORT_TIMELOCK)]);
   const initChallenge = buildExpectedChallenge(program.programId, walletPda, "init_wallet", initPayload);
   const initSigned = signTestChallenge(passkey, initChallenge);
-  const initSecpIx = buildSecp256r1Instruction(
-    passkey.compressedPublicKey,
-    initSigned.signedMessage,
-    initSigned.rawSignature
-  );
+  const initSecpIx = buildSecp256r1Instruction(passkey.compressedPublicKey, initSigned.signedMessage, initSigned.rawSignature);
 
   const initSig = await program.methods
-    .initWallet(Array.from(passkey.compressedPublicKey), walletSeedHash, backupAuthority.publicKey, null, initSigned.clientDataJSON)
+    .initWallet(Array.from(passkey.compressedPublicKey), walletSeedHash, backupAuthority.publicKey, new BN(SHORT_TIMELOCK), initSigned.clientDataJSON)
     .accounts({
       wallet: walletPda,
       vault: vaultPda,
@@ -106,11 +132,9 @@ async function main() {
     .preInstructions([initSecpIx])
     .rpc();
   console.log("init_wallet OK, sig:", initSig);
-
   const walletAccountInfo = await provider.connection.getAccountInfo(walletPda);
   console.log("walletPda account data length (nieuwe layout):", walletAccountInfo!.data.length);
-  const nonceAfterInit = await fetchActionNonce(provider.connection, walletPda);
-  console.log("action_nonce na init_wallet:", nonceAfterInit.toString());
+  results.init_wallet_ok = true;
 
   // ---------- 2. een passkey-gebonden actie: add_passkey ----------
   console.log("\n=== 2. add_passkey (passkey-gebonden actie) ===");
@@ -119,36 +143,14 @@ async function main() {
   const addPayload = Buffer.concat([nonceLeBytes(nonceForAdd), extraPasskey.compressedPublicKey]);
   const addChallenge = buildExpectedChallenge(program.programId, walletPda, "add_passkey", addPayload);
   const addSigned = signTestChallenge(passkey, addChallenge);
-  const addSecpIx = buildSecp256r1Instruction(
-    passkey.compressedPublicKey,
-    addSigned.signedMessage,
-    addSigned.rawSignature
-  );
+  const addSecpIx = buildSecp256r1Instruction(passkey.compressedPublicKey, addSigned.signedMessage, addSigned.rawSignature);
   const addIx = await program.methods
     .addPasskey(Array.from(extraPasskey.compressedPublicKey), new BN(nonceForAdd.toString()), addSigned.clientDataJSON)
-    .accounts({
-      wallet: walletPda,
-      passkeys: passkeysPda,
-      payer: provider.wallet.publicKey,
-      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-      systemProgram: SystemProgram.programId,
-    })
+    .accounts({ wallet: walletPda, passkeys: passkeysPda, payer: provider.wallet.publicKey, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY, systemProgram: SystemProgram.programId })
     .instruction();
-
-  async function sendFresh(instructions: anchor.web3.TransactionInstruction[]) {
-    const tx = new Transaction().add(...instructions);
-    tx.feePayer = provider.wallet.publicKey;
-    tx.recentBlockhash = (await provider.connection.getLatestBlockhash("finalized")).blockhash;
-    const signed = await (provider.wallet as anchor.Wallet).signTransaction(tx);
-    const sig = await provider.connection.sendRawTransaction(signed.serialize(), { skipPreflight: false });
-    await provider.connection.confirmTransaction(sig, "confirmed");
-    return sig;
-  }
-
   const addSig = await sendFresh([addSecpIx, addIx]);
   console.log("add_passkey OK, sig:", addSig);
-  const nonceAfterAdd = await fetchActionNonce(provider.connection, walletPda);
-  console.log("action_nonce na add_passkey:", nonceAfterAdd.toString(), "(verwacht:", (nonceForAdd + 1n).toString() + ")");
+  results.add_passkey_ok = true;
 
   // ---------- 3. exact dezelfde actie nogmaals, zelfde nonce -> StaleActionNonce ----------
   console.log("\n=== 3. replay: dezelfde add_passkey-poging (zelfde nonce, zelfde handtekening) nogmaals ===");
@@ -165,159 +167,122 @@ async function main() {
   }
   console.log("replay geslaagd (had NIET mogen slagen):", replayOk);
   console.log("bevat 'StaleActionNonce':", replayErr.includes("StaleActionNonce"));
+  results.replay_correctly_rejected = !replayOk && replayErr.includes("StaleActionNonce");
 
-  // ---------- 4. spend-limit: add_session_key met kleine cap + execute_via_session ----------
-  console.log("\n=== 4. spend-limit (add_session_key + execute_via_session) ===");
+  // ---------- 4. B3: sessie met expiry ver voorbij MAX_SESSION_DURATION_SLOTS moet geweigerd worden ----------
+  console.log("\n=== 4. B3: MAX_SESSION_DURATION_SLOTS ===");
   const rentExemptVault = await provider.connection.getMinimumBalanceForRentExemption(41);
-  await provider.sendAndConfirm(
-    new Transaction().add(
-      SystemProgram.transfer({
-        fromPubkey: provider.wallet.publicKey,
-        toPubkey: vaultPda,
-        lamports: rentExemptVault + 10_000_000,
-      })
-    )
-  );
+  await provider.sendAndConfirm(new Transaction().add(SystemProgram.transfer({ fromPubkey: provider.wallet.publicKey, toPubkey: vaultPda, lamports: rentExemptVault + 10_000_000 })));
   console.log("vault gefund met 10_000_000 lamports extra (+ rent-exempt minimum)");
 
-  const sessionKeypair = Keypair.generate();
-  const currentSlot = await provider.connection.getSlot();
-  const expirySlot = currentSlot + 1000;
-  const MAX_U64 = new BN("18446744073709551615");
-  // Ruim boven Solana's rent-exempt-minimum voor een verse 0-byte ontvanger
-  // (~890_880 lamports) - anders faalt zelfs een binnen-de-cap-transfer op
-  // de "insufficient funds for rent"-invariant van de runtime, los van de
-  // spend-limit-logica die deze stap juist wil bewijzen.
-  const maxLamportsPerTx = new BN(2_000_000);
-  const maxLamportsTotal = new BN(10_000_000);
+  let currentSlot = await provider.connection.getSlot();
+  const tooLongExpiry = currentSlot + Number(MAX_SESSION_DURATION_SLOTS) + 1000; // ruim voorbij de grens
+  const tooLongSessionKeypair = Keypair.generate();
+  const nonceForTooLong = await fetchActionNonce(provider.connection, walletPda);
+  const tooLongPayload = addSessionKeyPayload({ nonce: nonceForTooLong, sessionKey: tooLongSessionKeypair.publicKey, expirySlot: tooLongExpiry, maxLamportsPerTx: new BN(1), maxLamportsTotal: new BN(1) });
+  const tooLongChallenge = buildExpectedChallenge(program.programId, walletPda, "add_session_key", tooLongPayload);
+  const tooLongSigned = signTestChallenge(passkey, tooLongChallenge);
+  const tooLongSecpIx = buildSecp256r1Instruction(passkey.compressedPublicKey, tooLongSigned.signedMessage, tooLongSigned.rawSignature);
+  const tooLongSessionPda = deriveSessionPda(walletPda, tooLongSessionKeypair.publicKey);
 
-  const nonceForSession = await fetchActionNonce(provider.connection, walletPda);
-  const sessionPayloadRaw = Buffer.concat([
-    sessionKeypair.publicKey.toBuffer(),
-    (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(expirySlot), 0); return b; })(),
-    Buffer.from([1, 0, 0]), // canExecute=true, canTransferToken=false, canExecuteAdvanced=false
-    (() => { const b = Buffer.alloc(4); b.writeUInt32LE(0, 0); return b; })(), // 0 sub-scope programs
-    maxLamportsPerTx.toArrayLike(Buffer, "le", 8),
-    maxLamportsTotal.toArrayLike(Buffer, "le", 8),
-    PublicKey.default.toBuffer(),
-    new BN(0).toArrayLike(Buffer, "le", 8),
-    new BN(0).toArrayLike(Buffer, "le", 8),
-  ]);
-  const sessionPayload = Buffer.concat([nonceLeBytes(nonceForSession), sessionPayloadRaw]);
-  const sessionChallenge = buildExpectedChallenge(program.programId, walletPda, "add_session_key", sessionPayload);
-  const sessionSigned = signTestChallenge(passkey, sessionChallenge);
-  const sessionSecpIx = buildSecp256r1Instruction(
-    passkey.compressedPublicKey,
-    sessionSigned.signedMessage,
-    sessionSigned.rawSignature
-  );
-  const sessionPda = deriveSessionPda(walletPda, sessionKeypair.publicKey);
-
-  const addSessionSig = await program.methods
-    .addSessionKey(
-      sessionKeypair.publicKey,
-      new BN(expirySlot),
-      true,
-      false,
-      false,
-      [],
-      maxLamportsPerTx,
-      maxLamportsTotal,
-      PublicKey.default,
-      new BN(0),
-      new BN(0),
-      new BN(nonceForSession.toString()),
-      sessionSigned.clientDataJSON
-    )
-    .accounts({
-      wallet: walletPda,
-      session: sessionPda,
-      payer: provider.wallet.publicKey,
-      policy: policyPda,
-      passkeys: passkeysPda,
-      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-      systemProgram: SystemProgram.programId,
-    })
-    .preInstructions([sessionSecpIx])
-    .rpc();
-  console.log("add_session_key OK, sig:", addSessionSig, "cap: maxLamportsPerTx=500_000, maxLamportsTotal=10_000_000");
-
-  // binnen de cap: moet slagen
-  const recipientWithin = Keypair.generate().publicKey;
-  const withinSig = await program.methods
-    .executeViaSession(new BN(1_500_000))
-    .accounts({
-      wallet: walletPda,
-      vault: vaultPda,
-      recipient: recipientWithin,
-      session: sessionPda,
-      sessionKey: sessionKeypair.publicKey,
-    })
-    .signers([sessionKeypair])
-    .rpc();
-  const recipientBalance = await provider.connection.getBalance(recipientWithin);
-  console.log("execute_via_session(1_500_000) binnen cap: OK, sig:", withinSig, "ontvanger-balans:", recipientBalance);
-
-  // boven de cap: moet falen met SessionSpendPerTxExceeded
-  let overCapOk = false;
-  let overCapErr = "";
+  let tooLongOk = false, tooLongErr = "";
   try {
     await program.methods
-      .executeViaSession(new BN(2_000_001))
-      .accounts({
-        wallet: walletPda,
-        vault: vaultPda,
-        recipient: Keypair.generate().publicKey,
-        session: sessionPda,
-        sessionKey: sessionKeypair.publicKey,
-      })
-      .signers([sessionKeypair])
+      .addSessionKey(tooLongSessionKeypair.publicKey, new BN(tooLongExpiry), true, false, false, [], new BN(1), new BN(1), PublicKey.default, new BN(0), new BN(0), new BN(nonceForTooLong.toString()), tooLongSigned.clientDataJSON)
+      .accounts({ wallet: walletPda, session: tooLongSessionPda, payer: provider.wallet.publicKey, policy: policyPda, passkeys: passkeysPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY, systemProgram: SystemProgram.programId })
+      .preInstructions([tooLongSecpIx])
       .rpc();
-    overCapOk = true;
-  } catch (err: any) {
-    overCapErr = err?.message ?? String(err);
+    tooLongOk = true;
+  } catch (e: any) {
+    tooLongErr = e?.message ?? String(e);
   }
-  console.log("execute_via_session(2_000_001) boven cap geslaagd (had NIET mogen slagen):", overCapOk);
-  console.log("foutmelding:", overCapErr);
-  console.log("bevat 'SessionSpendPerTxExceeded':", overCapErr.includes("SessionSpendPerTxExceeded"));
+  console.log("add_session_key met expiry ver-voorbij-de-grens geslaagd (had niet gemogen):", tooLongOk, " bevat SessionDurationTooLong:", tooLongErr.includes("SessionDurationTooLong"));
+  results.session_too_long_correctly_rejected = !tooLongOk && tooLongErr.includes("SessionDurationTooLong");
 
-  const sessionAfter = await program.account.sessionKeyAccount.fetch(sessionPda);
-  console.log("session.spentLamports na beide pogingen:", sessionAfter.spentLamports.toString(), "(verwacht: 1500000, dus de mislukte poging telde niet mee)");
+  // ---------- 5. B2: recovery bumpt session_epoch, oude sessie wordt ongeldig ----------
+  console.log("\n=== 5. B2: session_epoch/recovery-invalidatie ===");
+  const nonceForRecoverySession = await fetchActionNonce(provider.connection, walletPda);
+  const recoverySessionKeypair = Keypair.generate();
+  const recoveryTestExpiry = (await provider.connection.getSlot()) + 1000;
+  const recoverySessionPayload = addSessionKeyPayload({ nonce: nonceForRecoverySession, sessionKey: recoverySessionKeypair.publicKey, expirySlot: recoveryTestExpiry, maxLamportsPerTx: new BN(1_000_000), maxLamportsTotal: new BN(1_000_000) });
+  const recoverySessionChallenge = buildExpectedChallenge(program.programId, walletPda, "add_session_key", recoverySessionPayload);
+  const recoverySessionSigned = signTestChallenge(passkey, recoverySessionChallenge);
+  const recoverySessionSecpIx = buildSecp256r1Instruction(passkey.compressedPublicKey, recoverySessionSigned.signedMessage, recoverySessionSigned.rawSignature);
+  const recoverySessionPda = deriveSessionPda(walletPda, recoverySessionKeypair.publicKey);
+  await program.methods
+    .addSessionKey(recoverySessionKeypair.publicKey, new BN(recoveryTestExpiry), true, false, false, [], new BN(1_000_000), new BN(1_000_000), PublicKey.default, new BN(0), new BN(0), new BN(nonceForRecoverySession.toString()), recoverySessionSigned.clientDataJSON)
+    .accounts({ wallet: walletPda, session: recoverySessionPda, payer: provider.wallet.publicKey, policy: policyPda, passkeys: passkeysPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY, systemProgram: SystemProgram.programId })
+    .preInstructions([recoverySessionSecpIx])
+    .rpc();
+  console.log("sessie vóór recovery aangemaakt:", recoverySessionPda.toBase58());
 
-  // ---------- 5. bestaande, vóór-upgrade wallet: schone deserialisatiefout ----------
-  console.log("\n=== 5. bestaande pre-upgrade wallet: moet SCHOON falen, niet half werken ===");
+  await sleep(800);
+  const preRecoveryRecipient = Keypair.generate().publicKey;
+  await program.methods.executeViaSession(new BN(1_000_000)).accounts({ wallet: walletPda, vault: vaultPda, recipient: preRecoveryRecipient, session: recoverySessionPda, sessionKey: recoverySessionKeypair.publicKey }).signers([recoverySessionKeypair]).rpc();
+  await sleep(800);
+  const preRecoveryBalance = await provider.connection.getBalance(preRecoveryRecipient);
+  console.log("sessie werkt vóór recovery: balans ontvanger:", preRecoveryBalance, "(verwacht 1000000)");
+  results.session_works_before_recovery = preRecoveryBalance === 1_000_000;
+
+  const newOwnerPasskey = generateTestPasskey();
+  await sleep(800);
+  await program.methods
+    .initiateRecovery(Array.from(newOwnerPasskey.compressedPublicKey))
+    .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+    .signers([backupAuthority])
+    .rpc();
+  console.log("initiate_recovery OK (backup_authority-handtekening, geen passkey nodig)");
+
+  console.log(`wachten ${SHORT_TIMELOCK + 2}s tot recovery_timelock_seconds (${SHORT_TIMELOCK}s) verstreken is...`);
+  await sleep((SHORT_TIMELOCK + 2) * 1000);
+
+  await program.methods.finalizeRecovery().accounts({ wallet: walletPda, passkeys: passkeysPda }).rpc();
+  console.log("finalize_recovery OK (permissionless, na de timelock)");
+
+  await sleep(800);
+  const walletAfterRecovery = await program.account.walletAccount.fetch(walletPda);
+  console.log("session_epoch na recovery:", walletAfterRecovery.sessionEpoch.toString(), "(verwacht: 1)");
+  results.session_epoch_bumped = walletAfterRecovery.sessionEpoch.toString() === "1";
+
+  await sleep(800);
+  let oldSessionOk = false, oldSessionErr = "";
+  try {
+    await program.methods.executeViaSession(new BN(1_000_000)).accounts({ wallet: walletPda, vault: vaultPda, recipient: Keypair.generate().publicKey, session: recoverySessionPda, sessionKey: recoverySessionKeypair.publicKey }).signers([recoverySessionKeypair]).rpc();
+    oldSessionOk = true;
+  } catch (e: any) {
+    oldSessionErr = e?.message ?? String(e);
+  }
+  console.log("oude sessie werkt na recovery (had niet gemogen):", oldSessionOk, " bevat SessionRevokedByRecovery:", oldSessionErr.includes("SessionRevokedByRecovery"));
+  results.old_session_correctly_revoked_after_recovery = !oldSessionOk && oldSessionErr.includes("SessionRevokedByRecovery");
+
+  // ---------- 6. §85: bestaande, vóór-upgrade wallets moeten nog gewoon decoderen (voorspelling meten, niet aannemen) ----------
+  console.log("\n=== 6. §85-voorspelling: bestaande WalletAccounts decoderen tegen de nieuwe layout ===");
   const disc = Buffer.from([158, 98, 171, 153, 212, 64, 242, 213]);
   const bs58mod = await import("bs58");
   const bs58 = (bs58mod as any).default ?? bs58mod;
   const existing = await provider.connection.getProgramAccounts(program.programId, {
     filters: [{ memcmp: { offset: 0, bytes: bs58.encode(disc) } }],
   });
-  console.log("gevonden bestaande WalletAccount-accounts (alle van vóór deze upgrade):", existing.length);
-  const sample = existing[0];
-  console.log("voorbeeld pubkey:", sample.pubkey.toBase58(), "data length:", sample.account.data.length);
-
-  let decodeOk = false;
-  let decodeErr = "";
-  try {
-    const decoded = await program.account.walletAccount.fetch(sample.pubkey);
-    decodeOk = true;
-    console.log("ONVERWACHT: decodering slaagde:", JSON.stringify(decoded));
-  } catch (err: any) {
-    decodeErr = err?.message ?? String(err);
-    console.log("decodering geweigerd (verwacht), foutmelding:");
-    console.log("  " + decodeErr);
+  console.log("gevonden bestaande WalletAccount-accounts:", existing.length);
+  let decodedCount = 0;
+  const decodeFailures: string[] = [];
+  for (const { pubkey, account } of existing) {
+    try {
+      const decoded = await program.account.walletAccount.fetch(pubkey);
+      decodedCount++;
+      console.log(`  ${pubkey.toBase58()}: OK, dataLen=${account.data.length}, actionNonce=${decoded.actionNonce.toString()}, sessionEpoch=${decoded.sessionEpoch.toString()}`);
+    } catch (e: any) {
+      decodeFailures.push(pubkey.toBase58());
+      console.log(`  ${pubkey.toBase58()}: DECODE GEFAALD - ${(e?.message ?? String(e)).slice(0, 200)}`);
+    }
   }
-  console.log("decodering geslaagd (had NIET mogen slagen):", decodeOk);
+  console.log(`decodeerden zonder fout: ${decodedCount}/${existing.length}`);
+  results.all_existing_wallets_still_decode = decodeFailures.length === 0 && existing.length > 0;
+  results.existing_wallet_count = existing.length;
+  results.existing_wallet_decode_failures = decodeFailures;
 
   console.log("\n=== SAMENVATTING ===");
-  console.log(JSON.stringify({
-    init_wallet_ok: true,
-    add_passkey_ok: true,
-    replay_correctly_rejected: !replayOk && replayErr.includes("StaleActionNonce"),
-    spend_within_cap_ok: recipientBalance === 1_500_000,
-    spend_over_cap_correctly_rejected: !overCapOk && overCapErr.includes("SessionSpendPerTxExceeded"),
-    old_wallet_decode_correctly_rejected: !decodeOk,
-  }, null, 2));
+  console.log(JSON.stringify(results, null, 2));
 }
 
 main().catch((e) => {

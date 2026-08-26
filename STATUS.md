@@ -7879,3 +7879,118 @@ gaat een dag overheen. Volgorde vanaf nu: (1) `checkProposalTimelock.ts` - moet 
 buffer-status, (4) adminpagina/`findCanonicalProposal()`.
 
 Push-hold ongewijzigd: niets naar `origin/main` tot voorstel #11 live en geverifieerd is.
+
+## 95. Voorstel #11 uitgevoerd: vijf verificaties, functioneel bewijs op het echte programma, §85's voorspelling gemeten (klopte)
+
+Alle vier de pre-flight-controles uit sectie 94 opnieuw gedraaid nadat de timelock
+verstreken was, alle vier groen (`checkProposalTimelock.ts` exit 0, 0 bruikbare sessies,
+buffer/voorstel-status on-chain herbevestigd, `findCanonicalProposal()`-logica los
+gerepliceerd tegen de live keten - `uncertain: false`, precies één open kandidaat, #11).
+
+**Uitvoertransactie:** `YMC1bqbY1mdA7aYjkTejojTGZW5jT9xgxmA9hg1bMnE6NpdFwpR4VyRzAwZeXrvwkqQAW5M5JmVNrAEpWYWBpyz`,
+slot `488465385`, blockTime `2026-08-26T18:42:49Z`, `err: null`, programlog `Upgraded
+program 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`.
+
+**Vijf verificaties (zelfde methode als sectie 80/91), allemaal geslaagd:**
+1. Transactie: hierboven.
+2. Programma-hash: eerste 471.208 bytes (buffer-lengte) van `ProgramData` hashen naar
+   `62b450001e384805944c31d4da50fa3357f29a0b03012935f6f3f14e83cbfb4a` - komt overeen,
+   resterende 283.640 bytes bevestigd 100% nul-padding. `lastDeploySlot` van `ProgramData`
+   = exact de uitvoerslot.
+3. Buffer (`728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET`) bestaat niet meer; vault-delta
+   (3.280.756.080 lamports) komt exact overeen met de buffer-pre-balance.
+4. Upgrade authority ongewijzigd: nog steeds de vault.
+5. Voorstel #11: status `Executed`, timestamp exact gelijk aan de uitvoerblockTime;
+   `multisig.transactionIndex` nog op 11.
+
+**Functioneel bewijs op het echte, geüpgradede programma** (`scripts/
+devnetPostUpgradeProof.ts`, uitgebreid met de B2/B3-stappen uit `throwawayB1B7Proof.ts`,
+verse testwallet `FSGNLavhzEvCtk948Y3jEFw2hEgV7GvPQnutp5ZnKs2R`): `init_wallet` OK,
+`add_passkey` OK, replay geweigerd (`StaleActionNonce`), B3 (`add_session_key` met expiry
+voorbij `MAX_SESSION_DURATION_SLOTS`) geweigerd (`SessionDurationTooLong`), B2 (sessie van
+vóór een recovery) geweigerd na de recovery (`SessionRevokedByRecovery`), nieuwe sessie ná
+de recovery werkt gewoon.
+
+**Sectie 85's voorspelling gemeten, niet aangenomen - klopte:** 17 bestaande
+`WalletAccount`s (16 van vóór deze ronde + de 1 die dit script zelf aanmaakte) decoderen
+allemaal zonder fout tegen de nieuwe (247-byte) layout. Zijaantekening: wallet
+`3Ape3ge72...` (al bekend met een absurde `actionNonce` sinds sectie 80) toont nu óók een
+niet-nul `sessionEpoch` - zelfde stale-bytes-verklaring, uitgebreid naar het nieuwe veld.
+
+**Sectie 91's timeout-fix, eerste keer echt in actie:** bevestiging duurde >30s, pagina
+meldde correct dat ze de ketenstatus zelf controleerde i.p.v. een schijnbare mislukking te
+suggereren.
+
+Build vóór deze verificatieronde eerst opnieuw gedaan (`anchor build -p spankwallet`) omdat
+`target/idl/spankwallet.json` een stale wegwerpadres bleek te bevatten (`4ywru3z...`,
+restant van een eerdere lokale run) - geen wijziging aan gecommitte broncode, alleen
+build-output.
+
+Push-hold blijft staan tot de active-defense-verhuizing (secties 96+) is afgerond.
+
+## 96. Active-defense verhuisd naar een eigen repo, opschoning hier, en het B1-B7-referentiepunt
+
+### Wat er weg is
+
+`programs/active-defense/` (5 bestanden), de workspace-membership in `Cargo.toml`, de
+bijbehorende 11 regels in `Cargo.lock`, en `build-and-deploy.sh`'s `WORKSPACE_PROGRAMS`/
+`CRATE_NAME` (terug naar uitsluitend `spankwallet` - alle lussen in dat script itereren al
+generiek over die array, dus de declare_id!-restore-trap volgt vanzelf mee, geen andere
+code hoefde aangepast). Eén voorwaartse commit, geen rebase/reset - de zeven oorspronkelijke
+active-defense-commits (`d6d1033`..`f17e073`) en de twee latere op
+`active-defense-phase1` (`626ad73`, `f2face6`) blijven gewoon in de geschiedenis staan.
+
+### Waar het nu leeft
+
+Eigen, privé GitHub-repo: `github.com/anoadder-ship-it/active-defense`. Vers begonnen
+(geen geschiedenis meegenomen - de 9 oude commits waren klein en al niet meer synchroon met
+wat on-chain stond). Eigen canonieke devnet-identiteit
+(`FzeAZmQzcGgwizWdg1y2hpTr1E6JEXeMQTyDXWQrYkzK`, keypair buiten de repo, tweevoudig
+gebackupt), eigen `STATUS.md`, schoon gebouwd en gedeployed bewezen vanaf een verse kloon
+vóórdat hier iets verwijderd werd. Volledige inventarisatie, adressenverwarring (vier oude,
+verwarde adressen rechtgezet naar wegwerp) en de twee openstaande punten (gedupliceerde
+spankwallet-layoutconstanten, tests die nog tegen het echte programma draaien) staan in die
+repo's eigen `STATUS.md`, niet hier herhaald.
+
+### Geverifieerd na de opschoning
+
+- `cargo check --workspace`: schoon (dezelfde twee onschuldige `cfg`-warnings als vóór de
+  verwijdering, geen nieuwe).
+- Volledige testsuite tegen een echte lokale validator (`solana-test-validator`,
+  `build-and-deploy.sh` + `anchor test --skip-local-validator --skip-build --skip-deploy`):
+  **80 passing, 2 pending, 0 failing** - identiek aantal aan de laatst bekende schone run
+  van vóór deze opschoning, dus geen regressie. Verwacht, want active-defense had nooit een
+  Cargo-dependency op de spankwallet-crate.
+- `npx tsc --noEmit -p tsconfig.json`: **niet schoon**, ~250 regels fouten in
+  `tests/*.ts` - maar geverifieerd dat dit een PRE-BESTAAND gat is, niet door deze
+  opschoning veroorzaakt: exact dezelfde fouten, in exact dezelfde bestanden, kwamen ook uit
+  een losse `git worktree` op de vorige commit (`c2fa36b`, vóór de active-defense-verwijdering).
+  Geen van de bestanden die deze fouten geven is door deze opschoning aangeraakt. Dit
+  project draait kennelijk nooit `tsc --noEmit` als eigen gate (`anchor test` gebruikt
+  `ts-mocha`, dat losser is) - een bestaand, apart op te lossen punt, hier alleen
+  vastgesteld en niet aangeraakt om de opschoningscommit scoped te houden.
+
+### B1-B7-referentiepunt: voortaan commit `1fb3134`, niet `HEAD`
+
+Al vastgelegd in sectie 93, hier herbevestigd nu het daadwerkelijk relevant wordt: de
+buffer voor voorstel #11 is gebouwd uit commit `1fb3134` (`scripts/build-devnet-buffer.sh
+1fb3134`, geïsoleerde worktree, `cargo-build-sbf --manifest-path
+programs/spankwallet/Cargo.toml` - compileert uitsluitend de `spankwallet`-crate). Met deze
+opschoning wijkt `main`'s `HEAD` nu af van `1fb3134` (`programs/active-defense/` is weg,
+`Cargo.toml`/`Cargo.lock` zijn anders) - de daadwerkelijk gedeployde `.so` is en blijft
+precies wat `1fb3134` opleverde, ongeacht hoe `main` zich verder ontwikkelt. **Elke
+toekomstige herverificatie van déze specifieke upgrade (voorstel #11) moet daarom tegen
+commit `1fb3134` gebeuren, niet tegen `HEAD`.**
+
+### Wat nog niet is opgeruimd - bewust
+
+De worktree `/home/michel/projects/spankwallet-active-defense` en de branch
+`active-defense-phase1` zijn met deze verhuizing overbodig geworden, maar zijn hier NIET
+verwijderd. Er werkte tot voor kort nog een tweede sessie in die worktree; die is inmiddels
+klaar en het werk is veiliggesteld (bundle + kopie buiten beide repo's, zie de
+active-defense-repo se eigen `STATUS.md`), maar het opruimen van de worktree/branch zelf is
+bewust aan de gebruiker gelaten, niet hier automatisch gedaan.
+
+Push-hold blijft staan: eerst laten zien wat er precies naar `origin/main` zou gaan
+(commits, bestanden, bevestiging dat active-defense er niet meer in zit), pas daarna pushen
+op expliciete opdracht.

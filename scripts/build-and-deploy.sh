@@ -90,8 +90,8 @@ RPC_URL="${RPC_URL:-http://127.0.0.1:8899}"
 # op een andere machine overleven. XDG_CONFIG_HOME gerespecteerd voor wie dat
 # zet; anders de standaard ~/.config-conventie.
 KEYPAIR_STORE="${XDG_CONFIG_HOME:-$HOME/.config}/spankwallet/program-keypairs"
-WORKSPACE_PROGRAMS=(spankwallet active-defense)
-declare -A CRATE_NAME=([spankwallet]=spankwallet [active-defense]=active_defense)
+WORKSPACE_PROGRAMS=(spankwallet)
+declare -A CRATE_NAME=([spankwallet]=spankwallet)
 
 cd "$PROJECT_ROOT"
 

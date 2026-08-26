@@ -3,17 +3,6 @@
 version = 4
 
 [[package]]
-name = "active-defense"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
- "anchor-spl",
- "solana-instructions-sysvar",
- "solana-keccak-hasher",
- "solana-sha256-hasher",
-]
-
-[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

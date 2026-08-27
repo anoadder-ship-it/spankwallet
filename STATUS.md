@@ -8513,3 +8513,106 @@ gemeten, en dat blijft het enige onbeantwoorde deel van deze vraag.
    bytekosten, BUITEN de poort (zelfde reden als de andere intrekkende acties: een
    verdedigende actie mag nooit geblokkeerd worden door de toestand waartegen hij
    verdedigt).
+
+## 100. Opschoningsronde stap 2/3: Dependabot en CodeQL - de high-severity rustls-webpki-fix bleek een ongebruikte dependency te zijn, geen major-upgrade
+
+### Dependabot - wat via een gewone versiebump is opgelost
+
+`client/package.json`: `vite` `^5.4.0` -> `^6.4.3` (sleept `esbuild` transitief mee naar
+0.25.12). Sluit GHSA-fx2h-pf6j-xcff (high, #6), GHSA-v6wh-96g9-6wx3 (#7), GHSA-4w7w-66w2-
+5vf9 (#5, alle drie al twee keer eerder onderzocht en uitgesteld - secties 20/45 - toen op
+basis van een aangenomen `vite@8.2.1`-vereiste die de huidige alerts niet blijken te
+stellen) en GHSA-67mh-4wv8-2f99 (esbuild-CORS, #4). `npm audit`: 0. Getest: dev-server
+(`host: false`-mitigatie intact, geen `Network:`-binding) en `vite build` slagen beide; de
+pre-bestaande, losstaande tsc-fout in `client`'s build-script (sectie 45) is ongewijzigd.
+
+`desktop/package.json`: dezelfde `jayson`->`uuid`-override die `client`/root al hadden,
+toegevoegd. Sluit #10. `tsc --noEmit`: schoon.
+
+### rustls-webpki (high, #18 + gerelateerde low #15/#16) - de vierde weg: een ongebruikte dependency verwijderen, niet upgraden
+
+Aanvankelijke analyse: `rustls-webpki 0.101.7` zat vast via `solana-client 2.3.13 ->
+tokio-tungstenite 0.20.1 -> rustls 0.21.12`, geen gepatchte versie binnen die 0.101.x-lijn
+- de enige upstream-fix leek een `solana-client`-major-upgrade (2.x -> 4.2.1, Agave sloeg
+3.x over), een omvangrijk, risicovol traject dat rechtstreeks de transactie-ondertekenende
+Rust-backend raakt.
+
+**Vraag vooraf gesteld, niet aangenomen: heeft `desktop/src-tauri` `solana-client` eigenlijk
+wel nodig?** Nagelopen (`grep -rn "solana_client" src/`): de enige aanroep in de hele
+crate is `solana_client::rpc_client::RpcClient` (`rpc.rs`), met de methodes `get_account`,
+`get_balance`, `get_latest_blockhash`, `send_and_confirm_transaction`, `request_airdrop` -
+allemaal gewone JSON-RPC-aanroepen, GEEN websocket-pubsub, GEEN TPU/QUIC. Bevestigd via
+`solana-client`'s eigen upstream `Cargo.toml`/`lib.rs` (agave v2.3.13,
+`raw.githubusercontent.com`): dat is een ONGECONDITIONEERDE umbrella-crate
+(`solana-pubsub-client`, `solana-tpu-client`, `solana-quic-client`, `quinn`, geen
+feature-vlaggen om dat uit te zetten) - en `solana_client::rpc_client` zelf is LETTERLIJK
+niets anders dan `pub use solana_rpc_client::rpc_client::*;`, een pure re-export. De
+websocket/TPU/QUIC-keten (en daarmee `tokio-tungstenite`/`rustls 0.21`/`webpki 0.101.7`)
+werd dus volledig meegesleept voor functionaliteit die nergens gebruikt wordt.
+
+**Fix: `solana-client = "2"` vervangen door `solana-rpc-client = "2"`** (zelfde
+versielijn, zelfde type - geen API-diff, want het is dezelfde onderliggende
+implementatie), `rpc.rs`'s import aangepast naar `solana_rpc_client::rpc_client::RpcClient`.
+Dit is geen CVE-upgrade maar een verwijdering van aanvalsoppervlak: de hele
+websocket/TPU/QUIC-stack verdwijnt uit de dependency-boom van precies het onderdeel dat
+transacties ondertekent en verzendt.
+
+**Geverifieerd, niet aangenomen:**
+- `cargo check`: schoon.
+- `cargo tree`: `rustls` komt nu nog maar in ÉÉN versie voor (0.23.43), `rustls-webpki`
+  idem (0.103.14) - de oude 0.21.12/0.101.7-lijn is volledig weg.
+  `tokio-tungstenite`/`solana-pubsub-client`/`solana-quic-client`/`solana-tpu-client`: 0
+  treffers, allemaal verdwenen.
+- `cargo test` (hele desktop-crate): 8 passing, 0 failing - inclusief de bestaande
+  Stronghold-fee-payer-roundtrip-test, ongewijzigd geslaagd.
+- Live, functioneel bewijs tegen echte devnet-RPC (niet alleen "compileert"): een
+  tijdelijke, genegeerde test riep `rpc_client().get_latest_blockhash()` en
+  `.get_balance(&SysvarC1ock...)` aan tegen de daadwerkelijke devnet-endpoint - beide
+  slaagden met een echt blockhash en een echt lamport-bedrag terug. Test na verificatie
+  weer verwijderd (geen permanent netwerkafhankelijk testartefact toegevoegd zonder
+  gevraagd te zijn).
+
+Sluit #18 (high) en #15/#16 (low, dezelfde `rustls-webpki`-lijn).
+
+**Wat dit NIET oplost - apart, kleiner residu, andere oorzaak:** `rand 0.7.3`/
+`curve25519-dalek 3.2.0`/`ed25519-dalek 1.0.1` (low #13/#17, medium #12) komen via een
+VOLLEDIG ANDERE keten - `solana-sdk -> solana-keypair -> ed25519-dalek-bip32 ->
+ed25519-dalek 1.0.1` - en blijven dus staan, ongeacht de `solana-client`-verwijdering
+hierboven; een fix daarvoor zou `solana-sdk` zelf moeten raken, niet onderzocht in deze
+ronde. `glib` (medium #14) komt via de tauri/gtk-stack, `atty` (low #11) via
+`solana-logger` - beide evenmin geraakt door deze wijziging, en `atty` heeft sowieso geen
+gepubliceerde patch (GHSA vermeldt geen `first_patched_version`). Van de zes oorspronkelijk
+genoemde medium-alerts zijn er nu vier gesloten (uuid, vite x2, esbuild) en twee nog open
+(glib, ed25519-dalek) - géén meelift-effect voor die laatste twee, andere pakketten,
+andere oorzaak.
+
+### CodeQL - vier permanent openstaande alerts, drie gesloten met reden, één echt gefixt
+
+Drie `rust/hard-coded-cryptographic-value`-alerts in `desktop/src-tauri` bevestigd als
+test-only literals, elk gedismissed op GitHub met een reden die naar de exacte regel
+verwijst:
+- `challenge.rs:74` - `Pubkey::new_from_array([0x11u8; 32])`, een testvector die een
+  TS-referentie-implementatie matcht (`client/src/challenge.ts`).
+- `fee_payer.rs:288` - `"correct horse battery staple"`, het bekende XKCD-voorbeeld-
+  wachtwoord, uitsluitend KDF-invoer in een test-only Stronghold-roundtrip.
+- `fee_payer.rs:318` - `"totaal ander wachtwoord"`, bewust een AFWIJKEND dummy-wachtwoord
+  om de "verkeerd wachtwoord wordt geweigerd"-testcase te bewijzen.
+
+Geen van de drie is echt sleutelmateriaal; alle drie leven in `#[cfg(test)] mod tests`.
+
+Het vierde, echte alert (`js/clear-text-storage-of-sensitive-data`,
+`admin/wallet-signer.html:304`) - het redesign daarvoor staat los beschreven (zie
+gesprek), nog niet gebouwd op het moment van dit schrijven.
+
+### Stale Dependabot-PR #2 gesloten, niet gemerged
+
+PR #2 (`dependabot/npm_and_yarn/desktop/...`, geopend 2026-08-19) bleek te dateren van
+vóór zowel sectie 98 (Tauri-hardening, verwijderde `@tauri-apps/plugin-opener`) als de
+`uuid`-override hierboven - mergen had beide stilzwijgend teruggedraaid. Uitgezocht,
+niet aangenomen: de branch bevatte ook `tauri-plugin-webauthn-api@^0.2.0`, een op het
+eerste gezicht onbekende toevoeging - bleek bij het doorzoeken van de git-geschiedenis
+GEEN nieuwe/verdachte dependency te zijn, maar een legitieme, later bewust verwijderde
+(vervangen door `ctap-hid-fido2`, sectie 75) die nog in de geschiedenis van vóór die
+vervanging zat op het moment dat Dependabot deze branch aanmaakte. Gesloten met een
+geschreven reden in de PR zelf, niet gemerged; PR #1 (client) was al eerder automatisch
+gesloten door Dependabot (superseded).

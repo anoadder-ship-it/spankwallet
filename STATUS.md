@@ -8244,10 +8244,19 @@ sessiesleutels ooit concreet wordt), niet de eerste versie.
 **Binnen** (verplaatst waarde, of breidt uit wat waarde kan verplaatsen):
 `execute`, `transfer_token`, `execute_advanced`, `execute_via_session`,
 `transfer_token_via_session`, `execute_advanced_via_session`. **`hunt` erbij, bewust niet
-op magnitude uitgezonderd** - verplaatst wél lamports (`to_user` naar een door de
-ondertekenaar gekozen `rent_destination`, geen bovengrens op de token-balans die verbrand
-wordt) onder passkey-autoriteit; "meestal klein" is geen garantie, en dit document hanteert
-zelf al de regel "beoordeel de worst case, niet de huidige toestand".
+op magnitude uitgezonderd, besloten (niet langer open):** verplaatst wél lamports
+(`to_user` naar een door de ondertekenaar gekozen `rent_destination`, geen bovengrens op de
+token-balans die verbrand wordt) onder passkey-autoriteit; "meestal klein" is geen
+garantie, en dit document hanteert zelf al de regel "beoordeel de worst case, niet de
+huidige toestand" - dit is bovendien de instructie met de minst omkeerbare gevolgen
+(verbranden), geen reden om 'm lichter te behandelen dan de expliciete
+verplaatsingsinstructies. **`add_session_key` erbij, eveneens besloten:** dit is precies
+de instructie die het OFFLINE BRUIKBARE geheim aanmaakt (de kale Ed25519-sessiesleutel,
+zie het vaste-vensterbezwaar hierboven) - de dreigingsklasse waar deze poort aantoonbaar
+tegen helpt zit 'm in het BESTAAN van dat geheim, niet alleen in het gebruik ervan via
+`execute_via_session`. Een gekaapte ceremonie die een sessiesleutel plant tijdens een
+gesloten venster zou anders een geheim achterlaten dat gewoon wacht tot het venster weer
+opengaat - gating van `add_session_key` zelf sluit dat af.
 
 **Buiten, categorisch, per instructie beargumenteerd:**
 - `initiate_recovery` - geautoriseerd door `backup_authority` (los Ed25519-sleutel,
@@ -8276,13 +8285,24 @@ zelf al de regel "beoordeel de worst case, niet de huidige toestand".
   gewone instructie al draagt (B4, sectie 76) - geen wallet-configuratiewijziging tijdens een
   lopende recovery, dat is een orthogonale, al bestaande regel, geen onderdeel van dit
   voorstel.
-
-**Open gelaten, bewust niet beslist hier (buiten de expliciet gevraagde "wat verplaatst
-waarde"-scope):** `add_passkey` en `add_session_key` verplaatsen zelf geen waarde, maar
-BREIDEN uit wie/wat dat later kan - een gekaapte ceremonie zou een van beide kunnen
-gebruiken om een blijvende achterdeur te planten (een aanvaller-passkey, of een
-sessiesleutel met ruime caps) in plaats van direct te stelen. Of dat een reden is om ze
-toch te gaten, is een aparte afweging die deze notitie niet zelf trekt.
+- `disarm_wallet` (nieuw, besloten toe te voegen) - buiten de poort, zelfde argument als
+  de intrekkende instructies hierboven: een verdedigende actie (het venster vroegtijdig
+  sluiten omdat de eigenaar iets onverwachts opmerkt) mag nooit geblokkeerd worden door de
+  toestand waartegen hij zelf verdedigt (een open venster). Kost 0 extra bytes - geen
+  nieuw veld, zet het bestaande `time_gate_unlock_until` terug op `0`, dezelfde
+  `recovery_state.is_none()`-constraint als `arm_wallet`.
+- `add_passkey` (besloten, was open gelaten) - een verdedigende, redundantie-verhogende
+  actie (een extra authenticatiemiddel toevoegen), zelfde categorie als
+  `remove_passkey`/`remove_session_key`/`remove_allowed_program` hierboven: gating zou de
+  eigenaar kunnen belemmeren zijn authenticatie te versterken precies wanneer dat nodig is
+  (bijv. na verlies van een ander apparaat). Het achterdeur-plant-scenario (een gekaapte
+  ceremonie die een AANVALLER-passkey toevoegt) wordt door gating niet opgelost - een
+  tijdpoort helpt sowieso niet tegen ceremonie-kaping (zie "Eerlijke grens" hierboven:
+  bewapenen vereist dezelfde live ceremonie als de actie zelf), dus dat blijft een apart,
+  orthogonaal dreigingsmodel, ongeacht waar `add_passkey` geplaatst wordt. Bewust ANDERS
+  behandeld dan `add_session_key` (zie Binnen hierboven): een sessiesleutel is een
+  zelfstandig, offline bruikbaar geheim; een extra passkey is dat niet - elk gebruik blijft
+  hoe dan ook een WebAuthn-ceremonie vereisen.
 
 ### Klokafwijking en minimale vensterbreedte
 
@@ -8300,6 +8320,20 @@ een structureel voordeel boven een vast klokgezicht-venster: de grens is relatie
 bewapeningsmoment, niet aan een vaste seconde-op-de-klok, dus drift beïnvloedt begin EN
 einde van het venster gelijk, niet de vraag "was het echt al 16:15:00".
 
+**Correctie op de vorige versie van deze redenering:** de absolute afwijking tussen
+ketenklok en een externe (NTP-)referentie doet er bij arm-to-open NIET toe.
+`unlock_until` wordt bij bewapening berekend UIT dezelfde ketenklok (`now +
+duration_seconds`) als waartegen de latere controle leest (`now <= unlock_until`) - een
+CONSTANTE offset tegen de buitenwereld valt daarmee volledig weg. Wat overblijft is alleen
+hoeveel de ketenklok, TEN OPZICHTE VAN ECHT VERSTREKEN TIJD, kan versnellen of vertragen
+BINNEN de duur van het venster zelf. En dat is asymmetrisch, tegengesteld aan de intuïtie:
+een ketenklok die TRAGER loopt dan de werkelijke tijd (bijv. tijdens congestie/tragere
+sloties) laat het venster in ECHTE tijd LANGER openstaan dan de eigenaar bedoelde - niet
+korter. Dat is geen gebruiksongemak maar een veiligheidsvraag: het venster blijft langer
+kwetsbaar dan afgesproken. Een ketenklok die juist SNELLER loopt sluit het venster te
+vroeg - vervelend, maar fail-safe (minder blootstelling, niet meer). Zie de herziene
+meting verderop in deze sectie voor wat hierover daadwerkelijk is vastgesteld.
+
 ### Wat gebeurt er bij het sluiten van het venster
 
 - **Lopende recovery:** onaangeroerd - recovery loopt via `backup_authority`, buiten de
@@ -8316,6 +8350,11 @@ einde van het venster gelijk, niet de vraag "was het echt al 16:15:00".
   is, rolt de HELE transactie terug, geen gedeeltelijke uitvoering, geen fondsen in gevaar.
   De gebruiker ziet een duidelijke fout (bijv. `TimeGateClosed`) en probeert opnieuw binnen
   het (volgende) venster - vervelend aan de randen, geen veiligheidsprobleem.
+- **Handmatig gesloten (`disarm_wallet`, nieuw, besloten toe te voegen - zie hieronder):**
+  identiek gedrag aan natuurlijk verlopen - zet `time_gate_unlock_until` terug op `0`, alle
+  bovenstaande gevolgen (recovery onaangeroerd, sessie ongewijzigd geldig, halfafgeronde
+  actie atomisch teruggerold) gelden hier evengoed. Geen apart pad nodig; de tegenhanger
+  van bewapenen is precies zo goedkoop als bewapenen zelf.
 
 ### Bytekosten en marge - past, maar krap
 
@@ -8335,7 +8374,7 @@ verliest hier van de ander. **Vóór een echt voorstel: `checkWorstCaseAccountSa
 opnieuw draaien tegen de daadwerkelijke nieuwe `LEN`, niet op deze notitie's rekenwerk
 vertrouwen** - zelfde discipline als sectie 83-88.
 
-### Aanbeveling over timing: niet los, samen met het pending-withdrawal-ontwerp
+### Aanbeveling over timing: samenvoegen, met een expliciete grens op wat dat betekent, en een derde optie eerlijk meegewogen
 
 Geen bytedwang (8 van de 16-24 beschikbare bytes past ruim), wel een proceskeuze: dit
 voorstel en het al-geplande "pending withdrawal" (timelock + drempel-tweede-passkey)
@@ -8343,11 +8382,45 @@ pakken hetzelfde gat aan (de ONBEGRENSDE directe paden) en overlappen dus inhoud
 uitvoeren betekent twee keer een `WalletAccount`-layoutwijziging, twee keer een verse
 worst-case-analyse tegen dezelfde 14 accounts, twee keer een 72u-timelock-voorstel, met het
 risico dat de TWEEDE wijziging de dan-nog-resterende 8/16 bytes niet meer haalt zonder dat
-dat vooraf bekend was. **Aanbevolen: samen ontwerpen (mogelijk zelfs samengesteld - kleine
-bedragen alleen de poort, grote bedragen poort + tweede passkey), één layoutwijziging, één
-timelock-cyclus.** Legitiem alternatief als er een concrete, actuele dreiging is die niet op
-de pending-withdrawal-planning kan wachten: dit apart en eerder uitvoeren - dan wel bewust
-de 8 bytes die dan overblijven meenemen als harde beperking voor het latere ontwerp.
+dat vooraf bekend was. **Besloten: samenvoegen.**
+
+**Expliciete grens op wat dat betekent:** "samenvoegen" mag geen synoniem worden voor
+"uitstellen tot onbepaald". Zolang beide op de plank liggen - dit voorstel niets gebouwd,
+pending-withdrawal nog niet uitgewerkt - blijven de directe paden ONBEGRENSD, exact het
+gat dat "Weegt het op..." hierboven al vaststelde. Dat is vanaf nu de bewuste,
+GEACCEPTEERDE tussentoestand, geen vergeten gat: een latere sessie die dit document leest
+moet dit zien als een actieve keuze, niet als een openstaand punt dat toevallig nog
+niemand heeft opgepakt.
+
+**Derde optie, eerlijk meegewogen naast de eerste twee (niet eerder uitgewerkt):** een
+gewone bestedingscap op de directe paden, in dezelfde vorm als sessies al hebben
+(`max_lamports_per_tx`/`max_lamports_total`, nu alleen op `SessionKeyAccount`, hier
+toegepast op `WalletAccount` zelf). Drie opties, geen ervan a priori de winnaar:
+
+- **Tijdpoort (dit voorstel):** begrenst WANNEER, niet HOEVEEL. Structureel voordeel tegen
+  het sessiesleutel-dreigingsmodel (onvoorspelbaar venster); GEEN voordeel tegen
+  ceremonie-kaping (zie "Eerlijke grens" hierboven - bewapenen vereist dezelfde live
+  ceremonie als de actie zelf). Kost 8 bytes.
+- **Pending withdrawal + drempel-tweede-passkey:** begrenst HOEVEEL zonder vertraging
+  (onder de drempel) en voegt een VETO-moment toe boven de drempel (timelock, net als
+  recovery). Beste dekking tegen één enkele grote diefstal; voegt een volledige
+  timelock-cyclus toe aan legitiem groot gebruik (dezelfde UX-kost als recovery, nu ook op
+  het uitgavenpad) en doet niets tegen herhaalde diefstal ONDER de drempel.
+- **Vaste bestedingscap (hier voor het eerst genoemd):** begrenst HOEVEEL, permanent,
+  zonder timelock-cyclus - het meest directe antwoord op "vandaag geen enkele limiet", en
+  het patroon (twee velden, zelfde vorm als `SessionKeyAccount`) is al bewezen in dit
+  programma, dus laag risico. Geen bescherming tegen ceremonie-kaping (een aanvaller met
+  een gekaapte live ceremonie trekt gewoon tot de cap, net als bij de andere twee opties -
+  geen van de drie primitieven lost dát dreigingsmodel op, dat is orthogonaal). Ook geen
+  bescherming tegen herhaald, legitiem-ogend gebruik dat de cap keer op keer net niet
+  overschrijdt - precies waar een timelock+drempel-ontwerp wél iets aan doet.
+
+Geen van de drie is strikt dominant - ze sluiten elkaar niet uit en kunnen gecombineerd
+worden (bijv. cap + tijdpoort, of cap onder de drempel + timelock erboven), maar elke
+extra laag kost bytes (al krap, zie hierboven) en complexiteit (nog een
+worst-case-analyse, sectie 83-88-stijl). Deze notitie beveelt geen specifieke combinatie
+aan als DE oplossing - dat is een afweging voor de eigenaar, met deze drie hier eerlijk
+naast elkaar gezet in plaats van er twee uit te werken en de derde te laten liggen.
 
 ### Verworpen/uitgesteld, en waarom
 
@@ -8365,58 +8438,80 @@ de 8 bytes die dan overblijven meenemen als harde beperking voor het latere ontw
   het soort marge-verbruik dat sectie hierboven al krap noemt; een vaste constante (voorstel:
   15 minuten, aanpasbaar vóór lancering) volstaat voor een eerste versie.
 
-### Klokdrift empirisch gemeten (`scripts/measureClockDrift.ts`, nieuw, bewaard voor hergebruik)
+### Klokdrift empirisch gemeten (`scripts/measureClockDrift.ts`, nieuw, bewaard voor hergebruik) - herzien, eerste versie beantwoordde de verkeerde vraag
 
-Antwoord op openstaande vraag 3 hieronder. Meet `Clock::get()?.unix_timestamp` (via de
-`SysvarC1ock1111...`-account, rechtstreeks gedecodeerd, geen RPC-methode die zelf al
-rondt) tegen de lokale klok (bevestigd NTP-gesynchroniseerd: `timedatectl show -p
-NTPSynchronized` -> `yes`), midpoint van request-RTT als lokale referentie.
+**Correctie:** de eerste versie van deze sectie vergeleek de ketenklok met een externe
+NTP-referentie en concludeerde dat de ABSOLUTE afwijking (~1-2s) ruim binnen de 2-5
+minuten ondergrens paste. Dat is de verkeerde vraag - bij arm-to-open valt een constante
+offset tegen de buitenwereld volledig weg (zie de correctie in "Klokafwijking en minimale
+vensterbreedte" hierboven), dus de absolute afwijking is irrelevant. De juiste vraag: hoeveel
+VERANDERT die afwijking binnen de duur van één venster, en welke kant werkt dat op (een
+tragere ketenklok verlengt het venster in echte tijd, geen verkorting - zie diezelfde
+correctie).
 
-**Gemeten, gezonde clusters, ~1-2 minuten sampling:**
-- devnet, 20 samples/3s: delta_min=-1784ms, delta_max=-634ms, mean=-1118ms, spread=1150ms
-- mainnet-beta, 40 samples/3s: delta_min=-2031ms, delta_max=-890ms, mean=-1495ms,
-  spread=1142ms
+Meet `Clock::get()?.unix_timestamp` (via de `SysvarC1ock1111...`-account, rechtstreeks
+gedecodeerd) tegen de lokale klok (bevestigd NTP-gesynchroniseerd:
+`timedatectl show -p NTPSynchronized` -> `yes`), midpoint van request-RTT als lokale
+referentie. De ruwe data is niet weggegooid - dezelfde opeenvolgende samples geven,
+herberekend, een RUWE schatting van de drift-SNELHEID (verandering per reële seconde),
+ook al was de meting daar aanvankelijk niet voor opgezet:
 
-Chain-klok loopt op beide clusters consistent 1-2s ACHTER op de lokale NTP-klok, met een
-karakteristiek zaagtandpatroon (geleidelijk oplopende delta binnen een gemeten venster,
-dan een sprong van ~1s) - een meetartefact van `unix_timestamp`'s heel-getal-seconden-
-resolutie gecombineerd met een niet-exact-3000ms lokaal interval, GEEN aanwijzing voor
-onderliggende sub-seconde instabiliteit. De relevante grootheid voor deze vraag is de
-grootte van de afwijking, niet het teken of het zaagtandpatroon: max. geobserveerde
-|delta| = 2031ms.
+- devnet, 20 samples/3s (~57s totaal): spread 1150ms over 57s -> **~20ms/s (~2%)**
+- mainnet-beta, 40 samples/3s (~118s totaal): spread 1142ms over 118s -> **~10ms/s (~1%)**
 
-**Ruim binnen de voorgestelde 2-5 minuten ondergrens:** 2031ms is ~60-150x kleiner dan
-120000-300000ms. Zelfs met een royale veiligheidsmarge (10x de gemeten waarde, voor
-meetruis en de korte sampleduur) blijft er meer dan een orde van grootte over.
+Lineair doorgetrokken naar een venster van 15 minuten (900s), met alle voorbehoud die een
+lineaire extrapolatie van een 1-2 minuten meting verdient: een gezonde-cluster-venster zou
+hiermee in het slechtste geval binnen DEZE meting ~9-18 seconden LANGER openstaan dan de
+ingestelde `duration_seconds` - richting afhankelijk van of de ketenklok in dat venster
+gemiddeld trager of sneller liep dan de lokale klok (het zaagtandpatroon in de ruwe samples
+wisselt zelf van richting tussen metingen).
 
-**Wat dit NIET dekt, bewust genoemd i.p.v. verzwegen:** dit is een gezond-cluster-
-baseline over ~1-2 minuten, niet een worst-case-congestiemeting. Solana's
-`unix_timestamp` is een stake-gewogen schatting die historisch merkbaar méér is gaan
-afwijken tijdens ernstige netwerkcongestie/trage sloties (gedocumenteerde incidenten met
-minuten-schaal afwijking op mainnet-beta tijdens eerdere congestieperiodes) - dit is
-precies het scenario waarin een aanvaller een tijdgebonden venster zou willen misbruiken
-(cluster onder druk, timing lastiger te vertrouwen). Deze meting weerlegt dat risico niet,
-ze bevestigt alleen dat er in de NORMALE staat geen verborgen sub-minuut-drift is die de
-2-5 minuten ondergrens in gevaar zou brengen. De 2-5 minuten marge (60-150x de gezonde-
-staat-afwijking) is bedoeld om ook een flink verslechterd-maar-niet-extreem congestie-
-scenario op te vangen, maar is niet empirisch getoetst tegen een daadwerkelijke
-congestieperiode - dat vereist ofwel een historische her-run tegen een archiefnode tijdens
-een bekend congestie-incident, ofwel wachten op een volgende live gelegenheid. Blijft dus
-een aanname, geen gemeten garantie, en hoort als zodanig in een eventueel implementatie-
-voorstel te staan.
+**Wat dit wél en niet vaststelt:**
+- Wél: onder GEZONDE clusteromstandigheden ligt de venster-verlenging in de orde van
+  seconden op 900 seconden (~1-2%), geen minuten.
+- Niet gemeten, en dat is nu de kern van de vraag: de drift-SNELHEID tijdens ECHTE
+  congestie/trage sloties, niet in rust. Precies hier telt de asymmetrie het meest - de
+  vraag is niet "wat is de drift" maar "hoe lang kan het venster onder druk langer
+  openblijven dan bedoeld". Twee gezonde clusters over 1-2 minuten zeggen daar niets over.
+- Ook niet gemeten: drift-snelheid over de VOLLE 15 minuten aaneengesloten (deze meting was
+  1-2 minuten, geëxtrapoleerd, niet doorgemeten tot 900s).
+
+**Resterende, scherper gestelde open vraag (vervangt de oude vraag 3 hieronder):** hoeveel
+kan de drift-snelheid oplopen tijdens een reële congestieperiode, en is de
+venster-verlenging die daaruit volgt nog acceptabel (seconden? tientallen seconden? meer?)
+- en zo niet, accepteren we dat risico expliciet, of nemen we een mitigatie mee in het
+ontwerp (`disarm_wallet`, hieronder besloten, werkt hier als handmatige noodrem als de
+eigenaar merkt dat het venster onverwacht lang open lijkt te staan, maar lost het
+onderliggende meetprobleem niet op)? Vereist een her-run tegen een archiefnode tijdens een
+bekend congestie-incident, of een live meting bij de volgende gelegenheid - niet
+aangenomen, niet beslist hier.
 
 ### Openstaande vragen
 
-1. Hoort `hunt` echt binnen de poort, of is dat te streng voor een puur opruimende actie? (
-   Deze notitie beveelt "binnen" aan, op basis van worst-case-redenering, geen zekerheid.)
-2. Horen `add_passkey`/`add_session_key` ook gated te worden tegen het
-   achterdeur-plant-scenario (een gekaapte ceremonie die een BLIJVENDE toegang plant i.p.v.
-   een eenmalige diefstal)? Niet beslist hier - buiten de letterlijk gevraagde scope.
-3. ~~Exacte `MAX_ARM_DURATION_SECONDS`/ondergrens~~ - empirisch gemeten (zie hierboven):
-   gezonde-cluster-drift ~1-2s, ruim binnen de 2-5 minuten ondergrens. Wat WEL open blijft:
-   gedrag tijdens ernstige congestie is niet gemeten, alleen beargumenteerd als
-   waarschijnlijk gedekt door de bestaande marge.
-4. Los uitvoeren of samenvoegen met het pending-withdrawal-ontwerp - deze notitie
-   adviseert samenvoegen, de beslissing is aan de eigenaar.
-5. Moet er een handmatige `disarm_wallet()`/vroegtijdig-sluiten-instructie bijkomen (geen
-   bytekosten, wel een extra instructie), of volstaat gewoon laten verlopen?
+1. ~~Hoort `hunt` echt binnen de poort?~~ - besloten: ja. Verplaatst lamports onder
+   passkey-autoriteit, onomkeerbaar verbrand; "meestal klein" is geen garantie, en het is
+   de instructie met de minst omkeerbare gevolgen van allemaal.
+2. ~~Horen `add_passkey`/`add_session_key` gated te worden?~~ - besloten, gesplitst, geen
+   blanco antwoord voor beide: `add_session_key` BINNEN de poort (het is precies de
+   instructie die het offline bruikbare geheim aanmaakt - de dreigingsklasse waar de poort
+   aantoonbaar tegen helpt). `add_passkey` BUITEN de poort (een verdedigende,
+   redundantie-verhogende actie, zelfde categorie als de al-buiten-gezette intrekkende
+   instructies). Zie "Welke instructies binnen/buiten" hierboven voor de volledige
+   redenering per instructie.
+3. **Herzien - was verkeerd gesteld.** Niet "wat is de absolute klokdrift" (die valt weg
+   bij arm-to-open, want bewapenings- en controlemoment lezen dezelfde ketenklok), maar:
+   hoeveel kan de drift VERANDEREN binnen één venster van 15 minuten, en accepteren we dat
+   een tragere ketenklok het venster in echte tijd LANGER laat openstaan dan bedoeld (niet
+   korter)? Zie "Klokdrift empirisch gemeten" hierboven: gezonde-cluster-schatting ~9-18s
+   verlenging op 900s, congestiescenario nog niet gemeten - dat blijft het onbeantwoorde
+   deel.
+4. ~~Los uitvoeren of samenvoegen met het pending-withdrawal-ontwerp?~~ - besloten:
+   samenvoegen, met een expliciete grens (zie "Aanbeveling over timing" hierboven,
+   herzien): zolang beide op de plank liggen blijven de directe paden onbegrensd - een
+   bewuste, geaccepteerde tussentoestand, geen vergeten gat. Nieuw in de weging: een gewone
+   bestedingscap op de directe paden (zelfde vorm als sessies al hebben), als derde,
+   eerlijk meegewogen optie naast tijdpoort en pending-withdrawal.
+5. ~~Moet er een handmatige `disarm_wallet()` bijkomen?~~ - besloten: ja, toevoegen, 0
+   bytekosten, BUITEN de poort (zelfde reden als de andere intrekkende acties: een
+   verdedigende actie mag nooit geblokkeerd worden door de toestand waartegen hij
+   verdedigt).

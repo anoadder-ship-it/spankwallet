@@ -53,7 +53,55 @@ async function measure(label: string, rpcUrl: string, samples: number, intervalM
   );
 }
 
+// Directe venstermeting (STATUS.md sectie 99, tweede correctie): het zaagtandpatroon in
+// `measure()` hierboven is heel-getal-secondenkwantisatie, GEEN accumulerende drift - die
+// lineair naar 900s extrapoleren was fout (kwantisatieruis blijft begrensd op ±1s, ongeacht
+// meetduur). De juiste vraag: hoeveel schuift de ketenklok ten opzichte van echt verstreken
+// tijd over EXACT de venstergrootte die er echt toe doet? Eén meting aan het begin, één aan
+// het eind van een venster van `windowSeconds`, geen extrapolatie nodig - bij 900s is de
+// ±1s kwantisatie nog maar ~0,1% van het gemeten interval, verwaarloosbaar in de ruis.
+async function measureWindow(label: string, rpcUrl: string, windowSeconds: number) {
+  const connection = new Connection(rpcUrl, "confirmed");
+
+  async function readClock() {
+    const t0 = Date.now();
+    const info = await connection.getAccountInfo(CLOCK_SYSVAR);
+    const t1 = Date.now();
+    if (!info) throw new Error("geen Clock-sysvar-data");
+    const { unixTimestamp } = decodeClock(info.data);
+    return { unixTimestamp, midpoint: (t0 + t1) / 2, rtt: t1 - t0 };
+  }
+
+  const start = await readClock();
+  console.log(
+    `  [${label}] start: chain_unix=${start.unixTimestamp} local_midpoint=${start.midpoint.toFixed(0)}ms rtt=${start.rtt}ms - wacht nu ${windowSeconds}s...`
+  );
+  await new Promise((r) => setTimeout(r, windowSeconds * 1000));
+  const end = await readClock();
+
+  const chainElapsedSeconds = Number(end.unixTimestamp - start.unixTimestamp);
+  const realElapsedSeconds = (end.midpoint - start.midpoint) / 1000;
+  const extensionSeconds = realElapsedSeconds - chainElapsedSeconds;
+
+  console.log(
+    `  [${label}] eind: chain_unix=${end.unixTimestamp} local_midpoint=${end.midpoint.toFixed(0)}ms rtt=${end.rtt}ms`
+  );
+  console.log(
+    `  [${label}] SAMENVATTING chain_elapsed=${chainElapsedSeconds}s real_elapsed=${realElapsedSeconds.toFixed(3)}s ` +
+      `venster-verlenging=${extensionSeconds.toFixed(3)}s (positief = venster blijft LANGER open dan bedoeld; negatief = sluit vroeger)`
+  );
+}
+
 async function main() {
+  if (process.argv[2] === "window") {
+    const target = process.argv[3] ?? "devnet";
+    const rpcUrl = process.argv[4] ?? "https://api.devnet.solana.com";
+    const windowSeconds = Number(process.argv[5] ?? 900);
+    console.log(`Venstermeting tegen ${target} (${rpcUrl}), venster ${windowSeconds}s`);
+    await measureWindow(target, rpcUrl, windowSeconds);
+    return;
+  }
+
   const target = process.argv[2] ?? "devnet";
   const rpcUrl = process.argv[3] ?? "https://api.devnet.solana.com";
   const samples = Number(process.argv[4] ?? 20);

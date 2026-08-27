@@ -8438,53 +8438,48 @@ naast elkaar gezet in plaats van er twee uit te werken en de derde te laten ligg
   het soort marge-verbruik dat sectie hierboven al krap noemt; een vaste constante (voorstel:
   15 minuten, aanpasbaar vóór lancering) volstaat voor een eerste versie.
 
-### Klokdrift empirisch gemeten (`scripts/measureClockDrift.ts`, nieuw, bewaard voor hergebruik) - herzien, eerste versie beantwoordde de verkeerde vraag
+### Klokdrift empirisch gemeten (`scripts/measureClockDrift.ts`, nieuw, bewaard voor hergebruik) - tweede correctie, nu direct gemeten in plaats van geëxtrapoleerd
 
-**Correctie:** de eerste versie van deze sectie vergeleek de ketenklok met een externe
-NTP-referentie en concludeerde dat de ABSOLUTE afwijking (~1-2s) ruim binnen de 2-5
-minuten ondergrens paste. Dat is de verkeerde vraag - bij arm-to-open valt een constante
-offset tegen de buitenwereld volledig weg (zie de correctie in "Klokafwijking en minimale
-vensterbreedte" hierboven), dus de absolute afwijking is irrelevant. De juiste vraag: hoeveel
-VERANDERT die afwijking binnen de duur van één venster, en welke kant werkt dat op (een
-tragere ketenklok verlengt het venster in echte tijd, geen verkorting - zie diezelfde
-correctie).
+**Eerste correctie (hierboven al gedaan):** absolute afwijking tegen een externe klok is
+irrelevant bij arm-to-open, alleen de VERANDERING binnen één venster telt.
 
-Meet `Clock::get()?.unix_timestamp` (via de `SysvarC1ock1111...`-account, rechtstreeks
-gedecodeerd) tegen de lokale klok (bevestigd NTP-gesynchroniseerd:
-`timedatectl show -p NTPSynchronized` -> `yes`), midpoint van request-RTT als lokale
-referentie. De ruwe data is niet weggegooid - dezelfde opeenvolgende samples geven,
-herberekend, een RUWE schatting van de drift-SNELHEID (verandering per reële seconde),
-ook al was de meting daar aanvankelijk niet voor opgezet:
+**Tweede correctie, op de eigen vervolgmeting:** de daarop volgende versie van deze sectie
+gebruikte de spread van het zaagtandpatroon (1150ms/1142ms over ~1-2 minuten) als
+drift-SNELHEID en trok die lineair door naar 900s (~9-18s "verlenging"). Dat was zelf ook
+fout: het zaagtandpatroon is heel-getal-secondenKWANTISATIE, geen accumulerende drift -
+kwantisatieruis blijft begrensd op ±1s, hoe lang je ook meet; hem als een per-seconde snelheid
+behandelen en extrapoleren rekt een meetartefact op tot een getal dat niets betekent.
 
-- devnet, 20 samples/3s (~57s totaal): spread 1150ms over 57s -> **~20ms/s (~2%)**
-- mainnet-beta, 40 samples/3s (~118s totaal): spread 1142ms over 118s -> **~10ms/s (~1%)**
+**De juiste, en veel eenvoudigere meting:** één keer, over een volledig venster van exact
+900 seconden, meten hoeveel de ketenklok is opgeschoven ten opzichte van hoeveel echte tijd
+er verstreken is - geen extrapolatie nodig, en bij 900s is de ±1s kwantisatie nog maar
+~0,1% van het gemeten interval, verwaarloosbaar in de ruis. Uitgevoerd
+(`measureClockDrift.ts window <cluster> <rpcUrl> 900`, één lezing bij start, één na 900s
+wachten):
 
-Lineair doorgetrokken naar een venster van 15 minuten (900s), met alle voorbehoud die een
-lineaire extrapolatie van een 1-2 minuten meting verdient: een gezonde-cluster-venster zou
-hiermee in het slechtste geval binnen DEZE meting ~9-18 seconden LANGER openstaan dan de
-ingestelde `duration_seconds` - richting afhankelijk van of de ketenklok in dat venster
-gemiddeld trager of sneller liep dan de lokale klok (het zaagtandpatroon in de ruwe samples
-wisselt zelf van richting tussen metingen).
+- devnet: chain_elapsed=900s, real_elapsed=900,192s -> **venster-verlenging 0,192s**
+- mainnet-beta: chain_elapsed=900s, real_elapsed=900,481s -> **venster-verlenging 0,481s**
+
+Beide positief (ketenklok liep in dit venster iets trager dan de lokale NTP-klok, dus het
+venster zou in echte tijd 0,2-0,5s langer openstaan dan bedoeld) en, belangrijker, van een
+totaal andere orde van grootte dan de vorige (foutieve) extrapolatie: sub-seconde op 900
+seconden, geen 9-18 seconden.
 
 **Wat dit wél en niet vaststelt:**
-- Wél: onder GEZONDE clusteromstandigheden ligt de venster-verlenging in de orde van
-  seconden op 900 seconden (~1-2%), geen minuten.
-- Niet gemeten, en dat is nu de kern van de vraag: de drift-SNELHEID tijdens ECHTE
-  congestie/trage sloties, niet in rust. Precies hier telt de asymmetrie het meest - de
-  vraag is niet "wat is de drift" maar "hoe lang kan het venster onder druk langer
-  openblijven dan bedoeld". Twee gezonde clusters over 1-2 minuten zeggen daar niets over.
-- Ook niet gemeten: drift-snelheid over de VOLLE 15 minuten aaneengesloten (deze meting was
-  1-2 minuten, geëxtrapoleerd, niet doorgemeten tot 900s).
+- Wél: onder GEZONDE clusteromstandigheden is de venster-verlenging over een echte 15
+  minuten verwaarloosbaar (sub-seconde), niet "seconden" zoals de vorige, foutieve
+  extrapolatie beweerde.
+- Niet gemeten: hetzelfde nog een keer tijdens ECHTE congestie/trage sloties. Eén meting
+  per cluster (nu, rustige toestand) is geen garantie voor het gedrag onder druk - de
+  asymmetrie (een tragere ketenklok verlengt het venster, nooit verkort het) blijft de reden
+  waarom dit scenario specifiek telt, niet de rustige-toestand-uitkomst hierboven.
 
-**Resterende, scherper gestelde open vraag (vervangt de oude vraag 3 hieronder):** hoeveel
-kan de drift-snelheid oplopen tijdens een reële congestieperiode, en is de
-venster-verlenging die daaruit volgt nog acceptabel (seconden? tientallen seconden? meer?)
-- en zo niet, accepteren we dat risico expliciet, of nemen we een mitigatie mee in het
-ontwerp (`disarm_wallet`, hieronder besloten, werkt hier als handmatige noodrem als de
-eigenaar merkt dat het venster onverwacht lang open lijkt te staan, maar lost het
-onderliggende meetprobleem niet op)? Vereist een her-run tegen een archiefnode tijdens een
-bekend congestie-incident, of een live meting bij de volgende gelegenheid - niet
-aangenomen, niet beslist hier.
+**Resterende, scherp gestelde open vraag (vervangt de oude vraag 3 hieronder):** hoeveel kan
+de venster-verlenging oplopen tijdens een reële congestieperiode - dezelfde
+900s-vóór/na-meting, maar dan tegen een archiefnode tijdens een bekend congestie-incident,
+of een live meting bij de volgende gelegenheid. Bij gezonde clusters is het antwoord nu
+hard vastgesteld (sub-seconde, verwaarloosbaar); bij congestie is het nog steeds niet
+gemeten, en dat blijft het enige onbeantwoorde deel van deze vraag.
 
 ### Openstaande vragen
 
@@ -8498,12 +8493,15 @@ aangenomen, niet beslist hier.
    redundantie-verhogende actie, zelfde categorie als de al-buiten-gezette intrekkende
    instructies). Zie "Welke instructies binnen/buiten" hierboven voor de volledige
    redenering per instructie.
-3. **Herzien - was verkeerd gesteld.** Niet "wat is de absolute klokdrift" (die valt weg
-   bij arm-to-open, want bewapenings- en controlemoment lezen dezelfde ketenklok), maar:
-   hoeveel kan de drift VERANDEREN binnen één venster van 15 minuten, en accepteren we dat
-   een tragere ketenklok het venster in echte tijd LANGER laat openstaan dan bedoeld (niet
-   korter)? Zie "Klokdrift empirisch gemeten" hierboven: gezonde-cluster-schatting ~9-18s
-   verlenging op 900s, congestiescenario nog niet gemeten - dat blijft het onbeantwoorde
+3. **Tweemaal herzien - was tweemaal verkeerd gesteld/gemeten.** Niet "wat is de absolute
+   klokdrift" (die valt weg bij arm-to-open, want bewapenings- en controlemoment lezen
+   dezelfde ketenklok), maar: hoeveel kan de drift VERANDEREN binnen één venster van 15
+   minuten, en accepteren we dat een tragere ketenklok het venster in echte tijd LANGER laat
+   openstaan dan bedoeld (niet korter)? Zie "Klokdrift empirisch gemeten" hierboven: een
+   eerste antwoord (extrapolatie van kwantisatieruis, ~9-18s) bleek zelf een meetfout;
+   direct gemeten over een echt 900s-venster is de venster-verlenging 0,19-0,48s bij
+   gezonde clusters - verwaarloosbaar. Congestiescenario nog niet gemeten - dat blijft het
+   enige onbeantwoorde
    deel.
 4. ~~Los uitvoeren of samenvoegen met het pending-withdrawal-ontwerp?~~ - besloten:
    samenvoegen, met een expliciete grens (zie "Aanbeveling over timing" hierboven,

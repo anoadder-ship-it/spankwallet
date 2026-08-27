@@ -5,6 +5,13 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "allow-setup-fee-payer",
+    "allow-unlock-fee-payer",
+    "allow-fee-payer-exists",
+    "allow-request-fee-payer-airdrop",
+    "allow-prepare-execute-challenge",
+    "allow-execute-action",
+    "allow-register-passkey",
+    "allow-sign-with-passkey"
   ]
 }

@@ -8365,6 +8365,46 @@ de 8 bytes die dan overblijven meenemen als harde beperking voor het latere ontw
   het soort marge-verbruik dat sectie hierboven al krap noemt; een vaste constante (voorstel:
   15 minuten, aanpasbaar vóór lancering) volstaat voor een eerste versie.
 
+### Klokdrift empirisch gemeten (`scripts/measureClockDrift.ts`, nieuw, bewaard voor hergebruik)
+
+Antwoord op openstaande vraag 3 hieronder. Meet `Clock::get()?.unix_timestamp` (via de
+`SysvarC1ock1111...`-account, rechtstreeks gedecodeerd, geen RPC-methode die zelf al
+rondt) tegen de lokale klok (bevestigd NTP-gesynchroniseerd: `timedatectl show -p
+NTPSynchronized` -> `yes`), midpoint van request-RTT als lokale referentie.
+
+**Gemeten, gezonde clusters, ~1-2 minuten sampling:**
+- devnet, 20 samples/3s: delta_min=-1784ms, delta_max=-634ms, mean=-1118ms, spread=1150ms
+- mainnet-beta, 40 samples/3s: delta_min=-2031ms, delta_max=-890ms, mean=-1495ms,
+  spread=1142ms
+
+Chain-klok loopt op beide clusters consistent 1-2s ACHTER op de lokale NTP-klok, met een
+karakteristiek zaagtandpatroon (geleidelijk oplopende delta binnen een gemeten venster,
+dan een sprong van ~1s) - een meetartefact van `unix_timestamp`'s heel-getal-seconden-
+resolutie gecombineerd met een niet-exact-3000ms lokaal interval, GEEN aanwijzing voor
+onderliggende sub-seconde instabiliteit. De relevante grootheid voor deze vraag is de
+grootte van de afwijking, niet het teken of het zaagtandpatroon: max. geobserveerde
+|delta| = 2031ms.
+
+**Ruim binnen de voorgestelde 2-5 minuten ondergrens:** 2031ms is ~60-150x kleiner dan
+120000-300000ms. Zelfs met een royale veiligheidsmarge (10x de gemeten waarde, voor
+meetruis en de korte sampleduur) blijft er meer dan een orde van grootte over.
+
+**Wat dit NIET dekt, bewust genoemd i.p.v. verzwegen:** dit is een gezond-cluster-
+baseline over ~1-2 minuten, niet een worst-case-congestiemeting. Solana's
+`unix_timestamp` is een stake-gewogen schatting die historisch merkbaar méér is gaan
+afwijken tijdens ernstige netwerkcongestie/trage sloties (gedocumenteerde incidenten met
+minuten-schaal afwijking op mainnet-beta tijdens eerdere congestieperiodes) - dit is
+precies het scenario waarin een aanvaller een tijdgebonden venster zou willen misbruiken
+(cluster onder druk, timing lastiger te vertrouwen). Deze meting weerlegt dat risico niet,
+ze bevestigt alleen dat er in de NORMALE staat geen verborgen sub-minuut-drift is die de
+2-5 minuten ondergrens in gevaar zou brengen. De 2-5 minuten marge (60-150x de gezonde-
+staat-afwijking) is bedoeld om ook een flink verslechterd-maar-niet-extreem congestie-
+scenario op te vangen, maar is niet empirisch getoetst tegen een daadwerkelijke
+congestieperiode - dat vereist ofwel een historische her-run tegen een archiefnode tijdens
+een bekend congestie-incident, ofwel wachten op een volgende live gelegenheid. Blijft dus
+een aanname, geen gemeten garantie, en hoort als zodanig in een eventueel implementatie-
+voorstel te staan.
+
 ### Openstaande vragen
 
 1. Hoort `hunt` echt binnen de poort, of is dat te streng voor een puur opruimende actie? (
@@ -8372,9 +8412,10 @@ de 8 bytes die dan overblijven meenemen als harde beperking voor het latere ontw
 2. Horen `add_passkey`/`add_session_key` ook gated te worden tegen het
    achterdeur-plant-scenario (een gekaapte ceremonie die een BLIJVENDE toegang plant i.p.v.
    een eenmalige diefstal)? Niet beslist hier - buiten de letterlijk gevraagde scope.
-3. Exacte `MAX_ARM_DURATION_SECONDS`/ondergrens: 15 minuten/2-5 minuten zijn voorstellen,
-   geen gemeten conclusie - klokdrift van dit cluster is niet empirisch vastgesteld in deze
-   sessie.
+3. ~~Exacte `MAX_ARM_DURATION_SECONDS`/ondergrens~~ - empirisch gemeten (zie hierboven):
+   gezonde-cluster-drift ~1-2s, ruim binnen de 2-5 minuten ondergrens. Wat WEL open blijft:
+   gedrag tijdens ernstige congestie is niet gemeten, alleen beargumenteerd als
+   waarschijnlijk gedekt door de bestaande marge.
 4. Los uitvoeren of samenvoegen met het pending-withdrawal-ontwerp - deze notitie
    adviseert samenvoegen, de beslissing is aan de eigenaar.
 5. Moet er een handmatige `disarm_wallet()`/vroegtijdig-sluiten-instructie bijkomen (geen

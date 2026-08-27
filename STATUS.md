@@ -8616,3 +8616,94 @@ GEEN nieuwe/verdachte dependency te zijn, maar een legitieme, later bewust verwi
 vervanging zat op het moment dat Dependabot deze branch aanmaakte. Gesloten met een
 geschreven reden in de PR zelf, niet gemerged; PR #1 (client) was al eerder automatisch
 gesloten door Dependabot (superseded).
+
+## 101. Opschoningsronde stap 3, laatste alert: wallet-signer.html's Solflare-deep-link-geheim overleeft de 72u-timelock niet meer
+
+### Het uitgangspunt, en waarom het klopt
+
+Correctie op het eerdere ontwerp (sectie 100's alert #1, `js/clear-text-storage-of-
+sensitive-data`, `wallet-signer.html:304`): `dappSecretKey`/`sharedSecret` mochten
+BEWUST de volle 72u-timelock (in de praktijk 8 dagen) overleven, omdat propose/approve/
+execute één gedeelde sessie hergebruikten - een aparte klik op "1b. Verbinden" volstond
+voor alle drie. Nieuw uitgangspunt: het geheim mag de timelock NOOIT overleven, punt.
+Concreet: elk van de drie stappen doet zijn EIGEN verse Solflare-connect vlak vóór het
+daadwerkelijke ondertekenverzoek, en het geheim wordt onmiddellijk gewist zodra een actie
+succesvol afrondt. De prijs (drie keer app-wisselen op mobiel i.p.v. één keer) is geen
+kosten maar een verduidelijking, gegeven dat die drie stappen sowieso dagen uit elkaar
+liggen (propose/approve typisch dezelfde sessie, execute pas na de timelock) - er was nooit
+een reëel UX-voordeel bij het hergebruiken van een dagenoude sessie, alleen een
+verborgen kostenpost (het geheim zelf).
+
+### Wat er concreet is gebouwd
+
+- **Twee gescheiden `localStorage`-sleutels**, niet één: `DEEPLINK_STORAGE_KEY` (het
+  geheim - `dappSecretKey`/`sharedSecret`/`session`, vervaltermijn nu 30 minuten i.p.v.
+  8 dagen - uitsluitend een vangnet tegen een AFGEBROKEN rondje, geen ontwerpgrens meer)
+  en `DEEPLINK_LAST_WALLET_KEY` (uitsluitend het PUBLIEKE adres, geen geheim, geen
+  vervaltermijn nodig - puur voor UI-continuïteit: knoppen tonen als bruikbaar, "verbonden
+  als X" tonen over paginaherladingen/dagen heen).
+- **`beginFreshDeeplinkConnect(queuedAction)`** - vervangt de oude, kale
+  connect-knop-handler: genereert ALTIJD een nieuw `nacl.box.keyPair()` en start een
+  verse Solflare-connect, ongeacht of er nog een (niet-verlopen) sessie bestaat.
+  `queuedAction` is `null` voor een handmatige klik op "1b. Verbinden" (alleen
+  lidmaatschap tonen), of `"propose"`/`"approve"`/`"execute"` wanneer een actieknop dit
+  aanroept.
+- **`runProposeAction()`/`runApproveAction()`/`runExecuteAction()`** - de bestaande
+  controle+bouw+verzend-logica van elke actie, ONGEWIJZIGD, alleen verplaatst uit de
+  klik-handler naar een losse, herbruikbare functie. Voor het synchrone
+  wallet-extensiepad (`mode !== "deeplink"`) roept de klik-handler deze nog altijd
+  rechtstreeks aan - daar verandert niets.
+- **Klik-handlers propose/approve/execute**: voor `mode === "deeplink"` roepen ze nu
+  NOOIT meer rechtstreeks de oude sessie aan - altijd eerst
+  `beginFreshDeeplinkConnect(actionName)`. `resumeDeeplinkIfNeeded()` rondt, zodra de
+  connect terugkeert met een verse `sharedSecret`, de oorspronkelijk bedoelde actie
+  automatisch af (`queuedAction` gelezen uit de state, dan `runProposeAction()` etc. i.p.v.
+  het oude `finishConnectUI()`) - één klik, twee zichtbare app-wissels (eerst verbinden,
+  dan ondertekenen), geen tweede handmatige actie nodig.
+- **`clearDeeplinkSecretState()`** - toegevoegd aan het einde van elk succesvol
+  `finishPropose`/`finishApprove`/`finishSquadsExecute`-pad (inclusief het vroege
+  return-pad in `finishPropose` voor "bleek al geland"). Wist het geheim volledig,
+  onafhankelijk van de 30-minuten-vervaltermijn.
+- **`restoreDeeplinkSessionIfPresent()`** herschreven: leest nu de NIET-geheime marker
+  i.p.v. de geheime state, om de UI te herstellen zonder een geheim te hoeven bewaren.
+
+### Geverifieerd, niet aangenomen
+
+`node --check` op de geëxtraheerde module-inhoud: schoon. Live in Chrome tegen de
+bestaande `admin/https-server.js` (zelfondertekend cert, zelfde als eerdere sessies):
+- Verse pagina-load zonder voorafgaande staat: geen JS-fouten, "geen eerder-opgeslagen
+  Solflare-deep-link-sessie" correct gelogd.
+- Niet-geheime marker met een gefabriceerd (maar geldig gevormd) publiek adres
+  vooraf in `localStorage` gezet, pagina herladen: `restoreDeeplinkSessionIfPresent()`
+  herstelde `connectedWallet` correct uit de marker, `finishConnectUI()` deed een ECHTE
+  devnet-RPC-aanroep (haalde de daadwerkelijke multisig-leden op), en verwierp het
+  gefabriceerde adres terecht als "GEEN geregistreerd lid" - knoppen bleven uit. Bewijst
+  de marker-leesroute end-to-end tegen een live RPC, met een correct fail-closed-resultaat
+  voor een niet-geregistreerd adres.
+- Klik op "1b. Verbinden": `localStorage` bevatte na afloop precies de verwachte, verse
+  vorm (`pendingAction: "connect", queuedAction: null`, nieuw `dappSecretKey`/
+  `dappPublicKey`), navigatie ging naar `solflare.com` (zelfde gedrag als vóór deze
+  wijziging - geen regressie in de connect-URL zelf).
+- Knop "2. Voorstel indienen" (met `connectedWallet.mode` handmatig op `"deeplink"`
+  gezet, om de knop-gate heen voor deze test): bevestigd dat de klik NIET de oude sessie
+  hergebruikte, maar `beginFreshDeeplinkConnect("propose")` aanriep -
+  `localStorage` toonde exact `pendingAction: "connect", queuedAction: "propose"` na
+  afloop.
+
+**Wat NIET getest is, en niet getest kón worden in deze omgeving:** een echte
+Solflare-mobiel-app-rondtrip (de daadwerkelijke `nacl.box`-decryptie van een geldig
+Solflare-antwoord, en de daaropvolgende automatische `runProposeAction()`/
+`runApproveAction()`/`runExecuteAction()`-afhandeling na een ECHTE reconnect). Dat vereist
+fysieke hardware (zelfde beperking als section 98's Tauri-ACL-test). De code is
+zorgvuldig nagelopen (geen nieuwe cryptografie, alleen een her-sequencing van wanneer
+bestaande, ongewijzigde bouw-en-verstuur-logica draait) en syntactisch/functioneel
+gedeeltelijk bewezen zoals hierboven, maar een volledige propose->approve->execute-cyclus
+via een echt mobiel toestel is nog niet gedaan sinds deze wijziging.
+
+### CodeQL-alert #1 gedismisst, niet stilzwijgend "gefixt"
+
+Gedismisst als `mitigated` (niet `false positive` - de onderliggende constatering van de
+regel, geheim-in-localStorage, klopt nog steeds; het risico is nu alleen drastisch
+verkleind, niet weggenomen). `localStorage` blijft nodig ondanks de kortere levensduur -
+MIUI/HyperOS killt `sessionStorage` bij een app-switch, en elke connect-dan-onderteken-
+cyclus IS zo'n app-switch, ook al duurt hij nu maar minuten.

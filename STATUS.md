@@ -8143,3 +8143,239 @@ bevestigingskaart is het echte achtervangmechanisme daartegen, niet de ACL. Voor
 wallet-app die third-party dependencies bundelt (`@solana/web3.js`) is Tauri's
 isolation-pattern (een gesandboxte validatielaag tussen webview en IPC) een optie die een
 volgende ronde onderzoek verdient - nu niet gebouwd, wel genoteerd.
+
+## 99. Ontwerpnotitie: tijdgebonden transactievenster - vast venster afgewezen, arm-to-open aanbevolen, niets gebouwd
+
+Gevraagd: kan de eigenaar instellen dat transacties alleen binnen een venster mogelijk zijn
+(bijv. 16:15-16:20 lokale tijd), wallet daarbuiten alleen leesbaar. Twee varianten
+tegen elkaar afgewogen, tegen de daadwerkelijke `programs/spankwallet/src/instructions.rs`/
+`state.rs`-code, niet in het abstracte. **Niets van onderstaande is gebouwd.**
+
+### Het vaste-vensterbezwaar klopt, en is groter dan aanvankelijk gesteld
+
+Twee onafhankelijke redenen, geen van beide weerlegd door nader onderzoek:
+
+1. **Publieke voorspelbaarheid is geen theoretisch bezwaar, het is een concreet
+   aanvalsvoordeel - maar alleen voor ÉÉN specifieke dreigingsklasse.** Een `WalletAccount`
+   is een gewone PDA; `getAccountInfo` leest 'm voor iedereen. Voor een aanvaller die een
+   LIVE, gekaapte passkey-ceremonie nodig heeft (het dreigingsmodel uit sectie 72 e.v.: een
+   gecompromitteerde extensie die een echte ondertekeningspoging van de eigenaar kaapt) voegt
+   een vast venster NIETS toe - de eigenaar's eigen legitieme gebruik IS het moment waarop de
+   poort al open staat, ongeacht of dat venster vast of willekeurig is; de aanvaller hoeft
+   niets te voorspellen, hij hoeft alleen te wachten tot de eigenaar zelf tekent. Voor een
+   aanvaller die een STANDALONE, offline te gebruiken geheim heeft - een geëxfiltreerde
+   **sessiesleutel** (`SessionKeyAccount.session_key`, een kale Ed25519-sleutel, ondertekent
+   rechtstreeks, geen WebAuthn-ceremonie nodig, zie `execute_via_session` in
+   `instructions.rs:2088`) - is een vast, publiek venster wél een reëel cadeau: een script kan
+   zonder enige onzekerheid precies op tijd vuren, elke dag, onbemand, voor altijd (tot
+   intrekking). Het bezwaar is dus niet overschat; het is zelfs specifieker dan "een
+   aanvaller kan plannen" - het geldt VOORAL voor het sessiesleutel-dreigingsmodel, niet
+   (of nauwelijks) voor het ceremonie-kaping-dreigingsmodel.
+2. **Tijdzone/DST-drift is een apart, reëel probleem, niet alleen een implementatiedetail.**
+   Solana's `Clock::get()?.unix_timestamp` is kale UTC-seconden - geen tijdzonedatabase on-
+   chain (bevestigd: geen enkele bestaande tijdscontrole in dit programma, `finalize_recovery`
+   incluis, doet iets anders dan een rauwe `i64`-vergelijking). Een venster "16:15-16:20
+   lokale tijd" moet dus als vaste UTC-seconden worden opgeslagen, omgerekend door de client
+   - maar CET/CEST verschuift twee keer per jaar. Zonder een instructie die de eigenaar
+   proactief opnieuw laat indienen rond elke DST-overgang, schuift het opgeslagen venster in
+   lokale-tijd-betekenis stilzwijgend een uur op, tot iemand het handmatig corrigeert. Dat is
+   geen edge case, het gebeurt gegarandeerd twee keer per jaar, met een reëel gevolg: de
+   eigenaar denkt dat zijn venster open is en het is dat (nog) niet, of andersom.
+
+### Tegenvoorstel arm-to-open: lost beide op, maar beschermt eerlijk gezegd een kleiner deel dan het lijkt
+
+Eén veld, `wallet.time_gate_unlock_until: i64` (unix-timestamp, geen tijdzone-omrekening
+nodig - relatief aan het moment van bewapenen, niet aan een klokgezicht). `0` = functie
+nooit geactiveerd (bestaande wallets, na de upgrade stilzwijgend `0` via dezelfde
+altijd-nul-padding als `action_nonce`/`session_epoch` destijds - zie sectie 84/85 - nieuwe
+wallets zetten 'm EXPLICIET op `0` in `init_wallet`, zelfde stijl als `deposit_authority =
+None`). Elke waarde `> 0` betekent "functie actief"; `now <= unlock_until` betekent "open",
+anders "dicht". Eén nieuwe instructie, `arm_wallet(duration_seconds)`, met exact hetzelfde
+challenge/nonce/passkey-verificatiepatroon als `execute` (`build_expected_challenge`,
+`verify_passkey_signature_multi`, `consume_action_nonce`) en `unlock_until = now +
+min(duration_seconds, MAX_ARM_DURATION_SECONDS)` (dat maximum een programmaconstante, geen
+per-wallet-veld - scheelt bytes, zie hieronder). Lost sectie "vaste-vensterbezwaar" punt 1 en
+2 allebei op: geen opgeslagen klokgezicht-waarde (geen DST-drift mogelijk), en geen
+voorspelbaar moment voor een sessiesleutel-aanvaller (die moet nu 24/7 on-chain-state
+pollen EN racen tegen de eigenaar's eigen, gelijktijdige transactie om er nog iets van te
+maken - een structureel hogere drempel dan "wacht tot 16:15").
+
+**Eerlijke grens, met de klem die de vraag zelf al vroeg:** tegen het ceremonie-kapings-
+dreigingsmodel (waar deze hele Tauri-migratie/gelaagde-privileges-lijn al meermaals op
+terugkomt) beschermt `arm_wallet` NIET beter dan het vaste venster - bewapenen vereist
+DEZELFDE live passkey-ceremonie als de actie zelf, dus een aanvaller die die ceremonie kan
+kapen, kaapt net zo goed de bewapening (of wacht gewoon tot de eigenaar zelf allebei doet).
+Het echte, aantoonbare voordeel zit specifiek bij de sessiesleutel-dreiging (zie hierboven),
+niet bij de directe-passkey-paden.
+
+### Weegt het op tegen de complexiteit, gegeven challenge-binding en spend-limits?
+
+Eerlijk antwoord, niet gerelativeerd: voor de **sessie-paden** (`execute_via_session`,
+`transfer_token_via_session`, `execute_advanced_via_session`) is de marginale winst reëel
+maar klein - `max_lamports_per_tx`/`max_lamports_total`/`expiry_slot` (max ~7 dagen,
+`MAX_SESSION_DURATION_SLOTS`) begrenzen het schadebedrag en de blootstellingsduur al. Een
+tijdpoort verandert "aanvaller kan tot de cap trekken, wanneer dan ook binnen 7 dagen" in
+"aanvaller kan tot de cap trekken, maar alleen tijdens een door de eigenaar bepaald,
+onvoorspelbaar venster" - een verbetering, geen doorbraak. Voor de **directe paden**
+(`execute`, `transfer_token`, `execute_advanced`, `hunt`) is de winst niet marginaal: deze
+hebben VANDAAG helemaal GEEN bestedingslimiet (geverifieerd: `execute`/`transfer_token`
+verplaatsen elk bedrag tot de volledige vault-balans in één ondertekende aanroep,
+`execute_advanced` voert willekeurige CPI's uit met de vault als signer tegen elk
+programma op de allowlist) - hier is de tijdpoort de EERSTE verdedigingslaag, niet een
+extra laag bovenop iets dat al begrensd was. Dat maakt 'm relevanter voor precies het pad
+dat het al-geplande "pending withdrawal"-ontwerp (timelock + drempel-tweede-passkey, zie
+hierboven in dit document, na sectie 72's afsluiting) ook probeert te begrenzen - twee
+ontwerpen die hetzelfde gat aanpakken, zie de timingaanbeveling onderaan.
+
+### Derde vorm overwogen: atomisch bewapenen+uitvoeren, geen opgeslagen staat
+
+Zou het "aanvaller race tegen een openstaand venster"-risico volledig kunnen elimineren:
+eis via de bestaande `instructions_sysvar`-introspectie (dezelfde truc die de
+passkey-precompile-verificatie al gebruikt) dat een `arm`-instructie in DEZELFDE transactie
+staat als de bestedingsinstructie - dan hoeft `unlock_until` nooit persistent te bestaan,
+dus 0 extra bytes op `WalletAccount`. **Afgewezen voor een eerste versie, niet principieel
+afgewezen:** dit sluit precies het gebruikspatroon uit dat de vraag zelf noemt (bewapenen,
+dan een paar minuten lang meerdere dingen doen) - atomisch bewapenen+uitvoeren staat alleen
+één actie per bewapening toe. Een reële latere verfijning (met name als het racerisico bij
+sessiesleutels ooit concreet wordt), niet de eerste versie.
+
+### Welke instructies binnen de poort, welke buiten - per instructie, niet als groep
+
+**Binnen** (verplaatst waarde, of breidt uit wat waarde kan verplaatsen):
+`execute`, `transfer_token`, `execute_advanced`, `execute_via_session`,
+`transfer_token_via_session`, `execute_advanced_via_session`. **`hunt` erbij, bewust niet
+op magnitude uitgezonderd** - verplaatst wél lamports (`to_user` naar een door de
+ondertekenaar gekozen `rent_destination`, geen bovengrens op de token-balans die verbrand
+wordt) onder passkey-autoriteit; "meestal klein" is geen garantie, en dit document hanteert
+zelf al de regel "beoordeel de worst case, niet de huidige toestand".
+
+**Buiten, categorisch, per instructie beargumenteerd:**
+- `initiate_recovery` - geautoriseerd door `backup_authority` (los Ed25519-sleutel,
+  `instructions.rs:1531`), NIET door een passkey. Dit is het kanaal voor precies het
+  scenario "alle passkeys kwijt/gecompromitteerd" - een tijdpoort op het passkey-gebonden
+  wallet-gedrag mag dit kanaal nooit raken, anders is recovery zelf tijdgebonden geworden,
+  wat de vraag zelf al als hard vereiste stelde.
+- `cancel_recovery` - vereist wél een huidige geldige passkey ("veto door een van de HUIDIGE
+  geldige passkeys", `instructions.rs:1608` e.o.), specifiek om een DOOR EEN AANVALLER (met
+  een gestolen `backup_authority`) geïnitieerde recovery te kunnen vetoën binnen het 72u-
+  venster. Gating zou de eigenaar precies tijdens een actieve aanval buiten zijn eigen veto
+  kunnen zetten - het cost-imposing-delay-risico dat de vraag zelf al noemt, nu toegepast op
+  een instructie waar het onherstelbaar zou zijn.
+- `finalize_recovery` - permissionless, al begrensd door zijn eigen 72u-timelock
+  (`recovery_timelock_seconds`); een tweede, ongerelateerde gate bovenop een al-bewust-trage
+  instructie voegt niets toe en kan een al lang wachtende recovery nodeloos verder vertragen.
+- `remove_passkey`, `remove_session_key`, `remove_allowed_program` - stuk voor stuk
+  verdedigende/intrekkende acties (een verdachte sleutel/programma weghalen). Gating zou
+  betekenen dat de eigenaar een gecompromitteerde passkey/sessie NIET kan intrekken tot het
+  venster toevallig opengaat - het venster zou dan zelf de aanvaller beschermen, het
+  omgekeerde van de bedoeling.
+- `add_allowed_program`, `close_session`, `close_expired_session` - verplaatsen geen waarde;
+  gating voegt uitsluitend frictie toe zonder een aanwijsbaar dreigingsmodel dat het afdekt.
+- `arm_wallet` zelf - triviaal buiten de eigen poort (zou anders nooit te openen zijn), wel
+  onderworpen aan dezelfde `recovery_state.is_none()`-constraint die vrijwel elke andere
+  gewone instructie al draagt (B4, sectie 76) - geen wallet-configuratiewijziging tijdens een
+  lopende recovery, dat is een orthogonale, al bestaande regel, geen onderdeel van dit
+  voorstel.
+
+**Open gelaten, bewust niet beslist hier (buiten de expliciet gevraagde "wat verplaatst
+waarde"-scope):** `add_passkey` en `add_session_key` verplaatsen zelf geen waarde, maar
+BREIDEN uit wie/wat dat later kan - een gekaapte ceremonie zou een van beide kunnen
+gebruiken om een blijvende achterdeur te planten (een aanvaller-passkey, of een
+sessiesleutel met ruime caps) in plaats van direct te stelen. Of dat een reden is om ze
+toch te gaten, is een aparte afweging die deze notitie niet zelf trekt.
+
+### Klokafwijking en minimale vensterbreedte
+
+Solana's `Clock::get()?.unix_timestamp` is een per-slot, stake-gewogen schatting, geen
+NTP-gesynchroniseerde klok - de bestaande `finalize_recovery`-check (`elapsed >=
+recovery_timelock_seconds`, 72 uur) negeert drift volledig omdat een paar seconden op 72
+uur verwaarloosbaar is. Bij een venster van minuten is dat niet meer zo vanzelfsprekend.
+**Niet met zekerheid vast te stellen zonder meting:** de exacte drift-bandbreedte van dit
+cluster is niet opgezocht/gemeten in deze sessie - dat moet empirisch (`Clock::get()`
+tegen een NTP-referentie over meerdere slots) vóór een definitieve ondergrens wordt
+vastgelegd, niet aangenomen. Voorlopig, conservatief: geen `duration_seconds` onder de
+~2-5 minuten toestaan (`MAX_ARM_DURATION_SECONDS`-stijl ONDERGRENS, niet alleen een
+bovengrens) - ruim boven elke plausibele per-slot-drift. Arm-to-open heeft hier overigens
+een structureel voordeel boven een vast klokgezicht-venster: de grens is relatief aan het
+bewapeningsmoment, niet aan een vaste seconde-op-de-klok, dus drift beïnvloedt begin EN
+einde van het venster gelijk, niet de vraag "was het echt al 16:15:00".
+
+### Wat gebeurt er bij het sluiten van het venster
+
+- **Lopende recovery:** onaangeroerd - recovery loopt via `backup_authority`, buiten de
+  poort (zie hierboven), sluiten van het venster raakt `recovery_state` op geen enkele
+  manier.
+- **Lopende sessie:** de `SessionKeyAccount` zelf blijft ongewijzigd geldig (eigen
+  `expiry_slot`/`epoch`); alleen de `_via_session`-instructies falen vanaf het moment van
+  sluiten, bij ELKE aanroep opnieuw gecontroleerd (geen cache) - exact hetzelfde patroon
+  als de bestaande `session.epoch == wallet_session_epoch`-check (`instructions.rs:2094`).
+  Geen speciale afhandeling nodig, het "werkt vanzelf" omdat de check per-aanroep is, niet
+  per-sessie-aanmaak.
+- **Halfafgeronde actie:** Solana-transacties zijn atomisch - een `require!` die faalt
+  omdat het venster inmiddels (tussen client-constructie en on-chain-verwerking) gesloten
+  is, rolt de HELE transactie terug, geen gedeeltelijke uitvoering, geen fondsen in gevaar.
+  De gebruiker ziet een duidelijke fout (bijv. `TimeGateClosed`) en probeert opnieuw binnen
+  het (volgende) venster - vervelend aan de randen, geen veiligheidsprobleem.
+
+### Bytekosten en marge - past, maar krap
+
+Huidige, al gemeten marge (sectie 85, `scripts/checkWorstCaseAccountSafety.ts`): bereikbare
+worst case 215 bytes tegen fysiek toegekende 231/239 bytes -> **16/24 bytes marge**, exact
+de getallen uit de vraag, bevestigd, niet gecorrigeerd. Eén niet-Option `i64`-veld
+(`time_gate_unlock_until`) kost **8 bytes vlak** - bewust GEEN `Option<...>`: dit
+programma heeft al een gedocumenteerde tijdbom rond `Option`-velden en hun bereikbare-vs-
+volledige worst case (`deposit_authority`, sectie 85) - een tweede, state-afhankelijk
+Option-veld zou die analyse opnieuw en complexer maken. Een vlak veld draagt altijd exact 8
+bytes bij, ongeacht staat: nieuwe bereikbare worst case 215 + 8 = **223 bytes**, marge na
+deze wijziging: 231-223 = **8 bytes** / 239-223 = **16 bytes**. Nog steeds veilig, GEEN
+migratie nodig voor de bestaande 14 wallets - maar dit verbruikt de HELFT van de kleinste
+bestaande marge. Ter vergelijking: het vaste-vensterontwerp (twee `u32`, sentinel-
+gecodeerd i.p.v. een aparte bool) kost identiek 8 bytes - geen van beide varianten wint of
+verliest hier van de ander. **Vóór een echt voorstel: `checkWorstCaseAccountSafety.ts`
+opnieuw draaien tegen de daadwerkelijke nieuwe `LEN`, niet op deze notitie's rekenwerk
+vertrouwen** - zelfde discipline als sectie 83-88.
+
+### Aanbeveling over timing: niet los, samen met het pending-withdrawal-ontwerp
+
+Geen bytedwang (8 van de 16-24 beschikbare bytes past ruim), wel een proceskeuze: dit
+voorstel en het al-geplande "pending withdrawal" (timelock + drempel-tweede-passkey)
+pakken hetzelfde gat aan (de ONBEGRENSDE directe paden) en overlappen dus inhoudelijk - apart
+uitvoeren betekent twee keer een `WalletAccount`-layoutwijziging, twee keer een verse
+worst-case-analyse tegen dezelfde 14 accounts, twee keer een 72u-timelock-voorstel, met het
+risico dat de TWEEDE wijziging de dan-nog-resterende 8/16 bytes niet meer haalt zonder dat
+dat vooraf bekend was. **Aanbevolen: samen ontwerpen (mogelijk zelfs samengesteld - kleine
+bedragen alleen de poort, grote bedragen poort + tweede passkey), één layoutwijziging, één
+timelock-cyclus.** Legitiem alternatief als er een concrete, actuele dreiging is die niet op
+de pending-withdrawal-planning kan wachten: dit apart en eerder uitvoeren - dan wel bewust
+de 8 bytes die dan overblijven meenemen als harde beperking voor het latere ontwerp.
+
+### Verworpen/uitgesteld, en waarom
+
+- **Vast dagelijks venster (oorspronkelijke vraag):** afgewezen - publieke
+  voorspelbaarheid (specifiek gevaarlijk voor sessiesleutels) en DST-drift, geen enkel
+  aantoonbaar voordeel boven arm-to-open op enige as die is doorgerekend.
+- **Atomisch bewapenen+uitvoeren (0 bytes, geen racerisico):** uitgesteld, niet afgewezen -
+  sluit het "bewapen dan doe meerdere dingen"-gebruikspatroon uit dat de vraag zelf wilde;
+  bewaren als latere verfijning.
+- **Cooldown/rate-limit zonder tijd-van-de-dag-concept:** afgewezen als vervanging - lost
+  een ander probleem op (herhaalde pogingen vertragen), niet "wallet is het grootste deel
+  van de dag potdicht", wat de vraag expliciet wilde.
+- **Per-wallet instelbare bewapeningsduur (i.p.v. één programmaconstante):** uitgesteld,
+  niet afgewezen - kost minimaal 4 extra bytes (een `u32`) bovenop de 8 hierboven, precies
+  het soort marge-verbruik dat sectie hierboven al krap noemt; een vaste constante (voorstel:
+  15 minuten, aanpasbaar vóór lancering) volstaat voor een eerste versie.
+
+### Openstaande vragen
+
+1. Hoort `hunt` echt binnen de poort, of is dat te streng voor een puur opruimende actie? (
+   Deze notitie beveelt "binnen" aan, op basis van worst-case-redenering, geen zekerheid.)
+2. Horen `add_passkey`/`add_session_key` ook gated te worden tegen het
+   achterdeur-plant-scenario (een gekaapte ceremonie die een BLIJVENDE toegang plant i.p.v.
+   een eenmalige diefstal)? Niet beslist hier - buiten de letterlijk gevraagde scope.
+3. Exacte `MAX_ARM_DURATION_SECONDS`/ondergrens: 15 minuten/2-5 minuten zijn voorstellen,
+   geen gemeten conclusie - klokdrift van dit cluster is niet empirisch vastgesteld in deze
+   sessie.
+4. Los uitvoeren of samenvoegen met het pending-withdrawal-ontwerp - deze notitie
+   adviseert samenvoegen, de beslissing is aan de eigenaar.
+5. Moet er een handmatige `disarm_wallet()`/vroegtijdig-sluiten-instructie bijkomen (geen
+   bytekosten, wel een extra instructie), of volstaat gewoon laten verlopen?

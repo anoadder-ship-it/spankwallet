@@ -9418,6 +9418,284 @@ Auto-deploy-op-elke-push-advies: niet apart uitgezocht in deze sessie (geen eerd
 gevonden om op voort te bouwen, zie de correctie bovenaan) - te behandelen in een latere sessie
 als dat nog relevant is.
 
+## 107. Privacy-inventarisatie - zes punten, niets gebouwd, uitsluitend geïnventariseerd
+
+Gevraagd: een op zichzelf staande privacy-ronde, los van de active-defense-bevindingen en
+los van sectie 106's opschoning. Elk punt hieronder met risico-inschatting
+(verwaarloosbaar / de moeite waard om te fixen / urgent) en een concreet voorstel waar dat
+de moeite waard bleek. **Niets gebouwd of gewijzigd** - uitsluitend `grep`/`git log`/directe
+Vercel-API-bevragingen, geen enkel bestand aangepast.
+
+### 1. Uitgaand verkeer - Helius bevestigd als hoofdroute, twee andere endpoints gevonden
+
+Volledige repo doorzocht (`client/src`, `admin/`, `desktop/src` + `desktop/src-tauri/src`)
+op `https?://`, `wss?://`, `fetch(`, `XMLHttpRequest`, `new WebSocket`, `import(`:
+
+- **`client/`**: uitsluitend `https://devnet.helius-rpc.com` (`main.ts:92`). CSP
+  (`client/index.html:7`) staat `connect-src` letterlijk alleen toe naar `'self'` +
+  Helius (http én wss) - browser-afgedwongen, geen CDN-imports (`script-src 'self'`,
+  bevestigd: nul `import()`-treffers). **Verwaarloosbaar.**
+- **`desktop/`**: het Rust-programma praat uitsluitend met Helius devnet
+  (`rpc.rs:8`, enige RPC-constante in de hele crate). De webview-frontend heeft een CSP
+  (`tauri.conf.json`) met `connect-src ipc: http://ipc.localhost` - GEEN extern endpoint
+  toegestaan vanuit de frontend zelf, alle RPC-communicatie loopt via Tauri's
+  `invoke()`-brug naar de Rust-kant. Geen updater-plugin geconfigureerd, geen
+  telemetrie-/analytics-/sentry-achtige dependency in `Cargo.toml` (nul treffers).
+  **Verwaarloosbaar.**
+- **`admin/wallet-signer.html`**: Helius voor RPC (zelfde patroon), plus **twee reeds
+  eerder (sectie 33) bewust geaccepteerde, maar hier opnieuw expliciet vanuit
+  privacy-oogpunt benoemd, zoals gevraagd:**
+  - **`esm.sh`** (`script-src`) - zes losse `import()`-aanroepen voor
+    `@solana/web3.js@1.98.4`, `@sqds/multisig@2.1.4`, `@wallet-standard/app@1.1.0`,
+    `bs58@5.0.0`, `tweetnacl@1.0.3`, `@solana-mobile/wallet-standard-mobile@0.5.3`. Eerder
+    beoordeeld op CSP-veiligheid (geen injectiegat), hier vanuit een ANDERE hoek: esm.sh
+    ziet bij elk bezoek het IP-adres van de signer plus de exacte pakket-/versiestrings die
+    opgevraagd worden - een bezoekpatroon, geen wallet-data, maar wel een derde partij die
+    weet wanneer en met welke tooling dit paneel gebruikt wordt. **De moeite waard om te
+    fixen:** dit zijn zes kleine, stabiele libraries - vendoren (lokaal meebundelen i.p.v.
+    runtime-CDN-imports) verwijdert esm.sh volledig uit het uitgaand-verkeersoppervlak,
+    zonder functionaliteitsverlies.
+  - **`solflare.com/ul/v1/connect` en `/ul/v1/signAndSendTransaction`** - functioneel
+    noodzakelijk voor de deep-link-ondertekenroute zelf (dit IS het protocol). Solflare ziet
+    de dapp-publieke-sleutel en versleutelde payloads (nooit plaintext-geheimen, zie punt 3).
+    **Verwaarloosbaar** - geen alternatief zonder de functie zelf op te geven.
+
+### 2. Lokale opslag (admin-pagina) - per item, noodzaak en levensduur; client/ heeft nul opslag
+
+`client/src` bevat **geen enkel** `localStorage`/`sessionStorage`-gebruik (apart
+gecontroleerd, nul treffers) - alleen `admin/wallet-signer.html` slaat iets op, in twee
+`localStorage`-sleutels:
+
+**`spankwallet_solflare_deeplink_state`** (de sleutel/sessie-state, TTL 30 minuten sinds de
+eerdere CodeQL-#1-fix - `DEEPLINK_SESSION_MAX_AGE_MS = 30 * 60 * 1000`, regel 295):
+
+| veld | nodig? | gevoeligheid | levensduur |
+|---|---|---|---|
+| `dappSecretKey` | ja (crypto) | hoog | logisch dood na 30 min, maar NIET actief gewist door een timer - alleen genegeerd/overschreven bij de eerstvolgende `loadDeeplinkState()`-aanroep. Kan dus langer dan 30 min als ruwe bytes in de browserstorage blijven staan als de pagina niet opnieuw geopend wordt. |
+| `sharedSecret` | ja (crypto, beschermt het hele versleutelde kanaal) | hoog | zelfde lazy-expiry-kanttekening als hierboven |
+| `session` (Solflare) | ja | midden | zelfde |
+| `dappPublicKey`, `walletPublicKey` | ja | laag (publiek) | zelfde |
+| `pendingAction`/`queuedAction`/`queuedRejectTransactionIndex`/`pendingActionTransactionIndex`/`pendingActionStartedAt`/`sessionCreatedAt` | ja (operationeel) | laag | zelfde |
+| **`lastRequestSummary`** | **nee, puur debug** | **midden** (bevat een kopie van `session` plus een 24-tekens-prefix van de geserialiseerde transactie) | zelfde |
+| **`lastButtonClick`** | **nee, puur debug** | laag (knop-id/tekst/tijdstip) | zelfde |
+
+**`spankwallet_solflare_deeplink_last_wallet`** (aparte sleutel, alleen `{walletPublicKey}`):
+**geen enkele TTL** - blijft onbeperkt staan totdat een signer expliciet op "Vastgelopen
+Solflare-deep-link-status wissen" klikt. Inhoud zelf is publiek (een multisig-lid-adres,
+sowieso on-chain zichtbaar), dus laag risico, maar inconsistent met de 30-minuten-norm van
+de zustersleutel.
+
+**Risico-inschatting: de moeite waard om te fixen** (niet urgent - de kern-crypto-velden
+zijn al kort-levend sinds CodeQL #1, en niets hierboven is een geheim dat NOOIT had mogen
+bestaan). Concreet voorstel: (a) `lastRequestSummary` niet meer opslaan, of het `session`-
+veld erin redigeren vóór opslag - het dient uitsluitend troubleshooting, niet de
+functionaliteit zelf; (b) een expliciete `setTimeout`/actieve opruiming toevoegen i.p.v.
+uitsluitend lazy-expiry bij de volgende paginalading; (c) `..._last_wallet` een eigen TTL
+geven, of expliciet documenteren waarom die bewust TTL-loos is.
+
+### 3. Debug-logboek - geen sleutelmateriaal gelogd, wél één plek met het rauwe sessietoken op het scherm
+
+Alle `log(...)`-aanroepen doorzocht op sleutelmateriaal (`secret`/`session`/`signature`/
+`privateKey`/`sharedSecret`/`dappSecretKey`): `dappSecretKey` en `sharedSecret` worden
+NERGENS gelogd (alleen cryptografisch gebruikt) - bevestigd, niet aangenomen. De
+`"Signature: " + signature`-logregels (5 plekken) zijn transactiesignatures - publiek,
+bedoeld om tegen een block explorer op te zoeken, geen geheim.
+
+**Eén reële bevinding:** `requestSummary` (zie punt 2) wordt op **drie plekken**
+(`regel 1279, 1547, 1621`) ook naar het ZICHTBARE scherm-logboek geschreven via
+`JSON.stringify(requestSummary)` - dat object bevat het rauwe Solflare-`session`-token.
+Wie het logboek kopieert (bijv. om een probleem te melden, of tijdens schermdelen) plakt dat
+token dan letterlijk mee. Geen sleutel, geen handtekening - maar wel een token dat, gekoppeld
+aan het `sharedSecret`-kanaal, verzoeken namens die sessie kan autoriseren.
+
+**Combinatie-check (zoals gevraagd, niet alleen losse items):** `"[debug] geregistreerde
+leden: " + memberKeys.join(", ")` (bij elke `checkMembership()`-aanroep) logt alle 3
+multisig-ledenadressen in één regel. Op zichzelf geen nieuwe informatie - de volledige
+ledenlijst is met één `getAccountInfo`-call op de Multisig-PDA sowieso publiek in te zien,
+dus deze combinatie geeft geen niet-publieke informatie prijs.
+
+**Risico-inschatting: de moeite waard om te fixen** (het gelogde sessietoken, niet de
+ledenlijst). Concreet voorstel: `requestSummary` vóór het loggen (niet vóór het opslaan -
+de encryptie zelf heeft het volledige token nodig) het `session`-veld laten vervangen door
+een verkorte/gehashte vorm, zelfde behandeling als de transactie al krijgt
+(`transaction_b58_prefix`).
+
+### 4. Vercel Web Analytics/Speed Insights - beide AAN voor "desktop", nooit een bewuste keuze, en niets verzamelt momenteel iets
+
+Rechtstreeks bij Vercel's REST-API nagevraagd (`GET /v9/projects/desktop`, verse aanroep,
+niet uit cache): `webAnalytics: {"id": "CxiNJRQBx4W9dREkLrAWyGrjI"}`,
+`speedInsights: {"id": "1Aodd759REc7HFpM7mrrhazOVRl", "hasData": false}` - een toegewezen
+`id` betekent dat beide functies AAN staan op projectniveau. **Nooit een bewuste keuze:**
+sectie 106 stelde al vast dat STATUS.md vóór vandaag NUL Vercel-vermeldingen bevatte -
+dit is dus Vercel's eigen standaardgedrag bij het importeren van een project via het
+dashboard, niet iets wat ooit expliciet aan- of uitgezet is.
+
+**Verzamelt momenteel feitelijk niets:** `desktop/package.json` en `desktop/src` bevatten
+geen `@vercel/analytics`/`@vercel/speed-insights`-package of -import (nul treffers) - zonder
+die client-side SDK wordt er niets verstuurd, wat `hasData: false` voor Speed Insights
+bevestigt. **Extra vangnet, los van de Vercel-instelling:** zelfs als iemand die SDK ooit
+toevoegt, blokkeert de Tauri-frontend se eigen CSP (`connect-src ipc: http://ipc.localhost`,
+zie punt 1) elk verzoek naar Vercel's analytics-domein alsnog.
+
+**Wat het WEL zou verzamelen als het ooit geactiveerd wordt:** paginaweergaves, referrer,
+land (via IP-geolocatie, niet als ruw IP bewaard volgens Vercel's eigen documentatie),
+device-/browsertype voor Web Analytics; Core Web Vitals (LCP/INP/CLS/TTFB) per paginalading
+voor Speed Insights - voor een intern testproject met een handvol bekende gebruikers is dat
+weinig waardevolle telemetrie tegenover een extra, ongebruikte derde-partij-toggle.
+
+**Risico-inschatting: de moeite waard om te fixen** (niet urgent - inert, en zelfs bij
+activering CSP-geblokkeerd). Concreet voorstel: beide uitzetten in de projectinstellingen
+voor consistentie met de rest van dit project se aantoonbare voorkeur voor een minimaal
+extern oppervlak (zie punt 1) - kost niets, er is toch geen actief gebruik van.
+
+### 5. Helius-API-sleutel - bevestigd devnet-only en gratis, hardcoded blijft een reëel, maar beperkt risico
+
+STATUS.md (regel 1132, ruim vóór deze sessie) bevestigt de herkomst: "een dedicated, gratis
+Helius-devnet-RPC-account (1M credits/maand gratis tier)". **Eén sleutel, drie plekken,
+letterlijk identiek** (`admin/wallet-signer.html:201`, `desktop/src-tauri/src/rpc.rs:8`,
+`client/src/main.ts:92`) - geen enkele andere Helius-sleutel elders in de repo gevonden.
+**Structureel devnet-only, niet alleen "volgens beleid":** de hostname zelf is
+`devnet.helius-rpc.com` - Helius scheidt devnet/mainnet op subdomeinniveau, dus deze exacte
+sleutel kan tegen mainnet-infrastructuur sowieso niet werken, ongeacht wat er ooit met het
+account gebeurt.
+
+**Is hardcoded-in-een-publieke-repo op zich een probleem, ook al is de sleutel gratis en
+devnet-only?** Ja, in beperkte mate - niet omdat er geld of mainnet-fondsen mee te stelen
+zijn (die blootstelling bestaat niet), maar omdat **iedereen die de sleutel vindt hem kan
+gebruiken alsof het hun eigen quotum is.** Het reële risico is quotum-uitputting: een derde
+die de gratis 1M-credits/maand-limiet opsoupeert (per ongeluk of moedwillig) laat dit
+project se EIGEN devnet-RPC-verkeer vastlopen op rate-limits - een zelf-toegebrachte DoS via
+publieke blootstelling, niet een fondsendiefstal.
+
+**Risico-inschatting: de moeite waard om te fixen** (niet urgent - geen financieel/mainnet-
+risico, wel een reëel quotumrisico). Concreet voorstel: geen directe noodzaak om te
+roteren (geen indicatie van misbruik), maar wél verstandig om 'm op termijn naar een
+env var/build-time-secret te verplaatsen i.p.v. drie keer hardcoded, zodat rotatie ooit
+één regel is i.p.v. drie bestanden - en periodiek (bijv. maandelijks) het Helius-dashboard
+op ongebruikelijk verbruik controleren.
+
+### 6. Git-geschiedenis - twee treffers, waarvan één een persoonlijk e-mailadres dat DEZE sessie zelf heeft vastgelegd
+
+Aparte scan (niet de eerdere sleutelscan) over de VOLLEDIGE geschiedenis, alle branches, op
+e-mailpatronen en IPv4-patronen (`git log --all -p`):
+
+- **`anoadder@gmail.com`** - **dit is jouw eigen, echte Gmail-adres, en het staat er sinds
+  vandaag door mijn eigen toedoen**: sectie 106 hierboven (commit `62f1f35`, al gepusht naar
+  de publieke `anoadder-ship-it/spankwallet`-repo) documenteert de CLI-login met de exacte
+  tekst "ingelogd als `anoadder-1369`/`anoadder@gmail.com`". Dat is een schending van mijn
+  eigen standaardregel (personen aanduiden via rol, nooit via naam/e-mailadres) die ik in
+  dit geval niet heb toegepast. **Geen geheim** (een Gmail-adres geeft geen toegang tot iets,
+  het is geen wachtwoord/token), maar wel onnodig persoonlijk identificerend in een publieke
+  repo, en een fout die ik had moeten vermijden.
+- **`192.168.178.205`** - een privé-LAN-IP-adres (admin-server se bereikbaarheidsadres voor
+  signers, meermaals genoemd in oudere, vóór deze sessie geschreven STATUS.md-secties). Niet
+  internet-routeerbaar, niet uniek identificerend (RFC1918-adressen worden door miljoenen
+  thuisnetwerken gebruikt) - alleen relevant voor wie al op hetzelfde LAN zit, en dan is het
+  toch al via ARP/netwerkscan te vinden.
+- Overige "e-mailachtige" treffers (`128x128@2x.png`, GitHub se eigen
+  `...@users.noreply.github.com`, `noreply@anthropic.com`) zijn geen bevindingen - een
+  bestandsnaam-vals-positief resp. bewust-privacyvriendelijke, verwachte commit-attributie.
+  `i@izs.me` (een npm-deprecatiewaarschuwing die eerder deze sessie in de terminal
+  verscheen) staat NERGENS in een gecommit bestand - geen treffer, puur terminal-ruis.
+
+**Risico-inschatting: `anoadder@gmail.com` - de moeite waard om te fixen** (niet urgent in
+de zin van "acuut misbruikbaar", wel iets om bewust over te beslissen omdat het je eigen
+adres is in een publieke repo). `192.168.178.205` - **verwaarloosbaar**. Concreet voorstel
+voor het e-mailadres: geen actie ondernemen (de geschiedenis is al gepusht; het adres is op
+zich niet gevaarlijk) is een geldige, bewuste keuze - het alternatief (geschiedenis
+herschrijven + force-push over een publieke branch) heeft een eigen kostprijs en risico's die
+waarschijnlijk niet opwegen tegen het blootgestelde adres zelf. Bewust vastleggen welke van
+de twee opties gekozen wordt, in plaats van het stilzwijgend te laten staan.
+
+### Samenvatting
+
+| # | Onderwerp | Risico |
+|---|---|---|
+| 1 | esm.sh-CDN in admin/ | de moeite waard om te fixen (vendoren) |
+| 1 | Helius/Solflare-endpoints overigens | verwaarloosbaar |
+| 2 | localStorage debug-velden + TTL-inconsistentie | de moeite waard om te fixen |
+| 3 | Rauw sessietoken in het zichtbare debug-logboek | de moeite waard om te fixen |
+| 4 | Vercel Web Analytics/Speed Insights aan, ongebruikt | de moeite waard om te fixen |
+| 5 | Helius-sleutel hardcoded (devnet-only, gratis) | de moeite waard om te fixen |
+| 6 | `anoadder@gmail.com` in publieke git-geschiedenis | de moeite waard om te fixen |
+| 6 | Privé-LAN-IP in STATUS.md | verwaarloosbaar |
+
+**Geen enkel punt hierboven kwalificeert als urgent** - geen van de bevindingen is een
+actief misbruikbaar geheim of een lopend datalek; het zijn stuk voor stuk hygiëne- en
+gewoonteverbeteringen. Niets gebouwd of gewijzigd, zoals gevraagd - dit is uitsluitend het
+inventarisatierapport.
+
+### Eindstand - alle zes punten afgehandeld of bewust besloten
+
+**Punt 1 - uitgevoerd en getest.** De zes esm.sh-CDN-imports in `admin/wallet-signer.html`
+lokaal gevendored (esbuild, `--splitting` zodat @solana/web3.js zijn module-instantie deelt
+tussen rechtstreeks gebruik en @sqds/multisig's interne gebruik), `https-server.js` se
+allowlist uitgebreid met de negen vendor/*.mjs-bestanden, CSP se `script-src` bevat geen
+externe origin meer. Onderweg een echte bug gevonden en gefixt (niet aangenomen dat de
+eerste build werkte): `process is not defined` in de browser, veroorzaakt door een
+Node-util-deprecate-achtig patroon diep in @sqds/multisig's dependency-graf - opgelost met
+een esbuild `--inject`-process-shim. Getest met een echte Chrome/Playwright-sessie tegen de
+draaiende server: alle zes imports slagen, nul mislukte requests, alle daadwerkelijk
+gebruikte `multisig.*`-paden apart bevestigd aanwezig. Gecommit: `88c55e4`.
+
+**Punten 2+3 - uitgevoerd en getest, samen gecommit (zelfde code, niet kunstmatig te
+splitsen).** `lastRequestSummary`/`lastButtonClick` niet meer gepersisteerd in localStorage;
+`spankwallet_solflare_deeplink_last_wallet` kreeg dezelfde 30-minuten-TTL als de geheime
+state (was bewust TTL-loos, nu consistent); actieve expiry (`setTimeout`) toegevoegd bovenop
+de bestaande lazy-expiry, dekt het geval dat het tabblad open blijft staan (dekt niet het
+sluiten van het tabblad zelf - daar blijft de lazy-check bij heropening het werkende
+vangnet). Het rauwe Solflare-`session`-token wordt geredigeerd vóór het loggen naar scherm
+én console (een tweede sink, niet eerder benoemd in de oorspronkelijke inventarisatie,
+tijdens het bouwen zelf gevonden). Getest met echte browser-sessies: paginalading blijft
+foutloos, een oud-format state-object wordt stil genegeerd, een verse last-wallet-marker
+wordt hersteld, een 31-minuten-oude marker wordt aantoonbaar verwijderd. Gecommit: `f66ecca`.
+
+**Punt 4 - uitgevoerd (door de gebruiker zelf, `vercel project web-analytics disable` /
+`speed-insights disable`, interactief bevestigd), en uiteindelijk geverifieerd - maar niet
+via de API.** Belangrijke, herbruikbare les: **REST-API-verificatie bleek voor DEZE
+specifieke Vercel-actie structureel onbetrouwbaar, ondanks een geldig CLI-token en
+meermaals herhaald onderzoek.** Drie onafhankelijke sporen onderzocht, geen enkele gaf een
+bevestigend signaal:
+- **REST-object (`GET /v9/projects/desktop`):** `webAnalytics`/`speedInsights`-objecten en
+  het `features.webAnalytics`-veld bleven byte-voor-byte identiek, zowel vóór als ná twee
+  apart bevestigde, succesvolle disable-acties. Geen bruikbaar voor/na-verschil te meten.
+- **Activiteitenlogboek (`vercel activity`):** de eventtypes bestaan wél in Vercel's eigen
+  schema (`project-web-analytics-disabled`, `project-speed-insights-disabled` - bevestigd
+  via `vercel activity types`), maar een ONGEFILTERDE bevraging van de 10 minuten
+  onmiddellijk na de tweede, bevestigd geslaagde actie gaf "No activity events found" - geen
+  vertraging (dat zou althans ANDERE events tonen), maar een aantoonbare afwezigheid. Ter
+  controle dat de zoekmethode zelf werkt: dezelfde aanroep met `--type deployment` vond
+  moeiteloos de echte deployments van vandaag. Conclusie: deze actie wordt kennelijk niet
+  naar de bevraagbare activiteitenfeed geschreven, geen kwestie van propagatietijd.
+  `features.webAnalytics` bleek zelf wél een echt, variabel veld (bevestigd via vergelijking
+  met drie andere projecten), maar zonder een nulmeting van vóór de EERSTE disable-poging kon
+  ik niet vaststellen of de waarde (`false`) door de actie kwam of toevallig al zo stond.
+- **Alternatieve endpoints:** `GET /v1/web-analytics/events` gaf `404` voor zowel "desktop"
+  als een ter controle bevraagd, vermoedelijk nog actief project - geen bruikbaar onderscheid.
+
+**Wat wél werkte: visuele controle van het Vercel-dashboard zelf.** De
+Speed-Insights-instellingenpagina toont een "Get Started"-installatiescherm ("Install our
+package" / "Add the Next.js component" / "Deploy & Visit your Site") i.p.v. een
+metrics-dashboard - dat scherm verschijnt uitsluitend wanneer de functie niet actief is voor
+het project. Rechtstreeks door de gebruiker bevestigd. **Les voor toekomstige Vercel-acties:
+sommige projectinstellingen zijn structureel niet via de REST-API of het activiteitenlogboek
+te verifiëren, ook niet met een geldig, volledig-bevoegd CLI-token - visuele controle van de
+daadwerkelijke instellingenpagina is dan de enige werkende methode, geen tekortkoming in de
+onderzoeksmethode zelf.**
+
+**Punt 5 - bewust besloten, geen openstaand punt.** Geen actie op de Helius-sleutel nu (geen
+indicatie van misbruik, devnet-only/gratis, dus geen financieel/mainnet-risico). Een
+terugkerende herinnering vastgelegd: **controleer maandelijks het Helius-dashboard op
+ongebruikelijk verbruik** (eerstvolgende gelegenheid: begin volgende maand, en daarna
+doorlopend maandelijks). Verplaatsing naar een env var blijft op de lijst staan, zonder
+deadline.
+
+**Punt 6 - bewust besloten, geen openstaand punt.** `anoadder@gmail.com` blijft bewust in de
+publieke git-geschiedenis staan (commit `62f1f35`, al gepusht) - geschiedenis herschrijven
+op een publieke repo met mogelijke externe forks/clones kost meer dan het blootgestelde
+adres zelf waard is; geen geheim, geen toegangsrisico. Het privé-LAN-IP
+(`192.168.178.205`): geen actie, verwaarloosbaar zoals eerder vastgesteld.
+
 ## 108. Vier externe AI-analyses beoordeeld - geen van alle vraagt actie vandaag
 
 **Gevraagd:** vier extern (buiten deze sessie) opgestelde AI-analyses beoordelen - een

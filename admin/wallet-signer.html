@@ -306,17 +306,47 @@
       const DEEPLINK_STORAGE_KEY = "spankwallet_solflare_deeplink_state";
       const DEEPLINK_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minuten - vangnet, geen ontwerpgrens
 
-      // Aparte, NIET-geheime marker (alleen het publieke adres, geen
-      // dappSecretKey/sharedSecret) - uitsluitend voor UI-continuïteit
-      // (propose/approve/execute-knoppen tonen als bruikbaar, "verbonden
-      // als X" tonen) over paginaherladingen/dagen heen, zonder dat daar
-      // een geheim-met-lange-levensduur voor nodig is. Geen expliciete
-      // vervaltermijn nodig - een publiek adres is geen gevoelige waarde,
-      // en elke daadwerkelijke ondertekenactie doet sowieso zijn eigen
-      // verse reconnect (zie hierboven), dus een verouderde marker leidt
-      // hoogstens tot "verkeerd adres getoond, meteen zichtbaar bij de
-      // eerstvolgende actie" - nooit tot een gebruikte, verouderde sleutel.
+      // Aparte marker (alleen het publieke adres, geen dappSecretKey/
+      // sharedSecret) - uitsluitend voor UI-continuïteit (propose/approve/
+      // execute-knoppen tonen als bruikbaar, "verbonden als X" tonen) over
+      // paginaherladingen heen. STATUS.md sectie 107 (punt 2): kreeg
+      // voorheen bewust GEEN vervaltermijn (een publiek adres is geen
+      // gevoelige waarde, en elke daadwerkelijke ondertekenactie doet
+      // sowieso zijn eigen verse reconnect) - nu tóch dezelfde
+      // DEEPLINK_SESSION_MAX_AGE_MS als de geheime state hierboven, puur
+      // voor consistentie tussen de twee localStorage-sleutels van deze
+      // pagina, niet omdat de inhoud zelf gevoeliger werd.
       const DEEPLINK_LAST_WALLET_KEY = "spankwallet_solflare_deeplink_last_wallet";
+
+      // Actieve expiry (STATUS.md sectie 107, punt 2) - bovenop de
+      // bestaande lazy-expiry in loadDeeplinkState() hieronder (die alleen
+      // controleert bij de eerstvolgende lees-/schrijfactie). Zonder dit
+      // blijft het geheim gewoon in localStorage staan, ongewijzigd, zolang
+      // niemand de pagina opnieuw laadt of een knop klikt - een tabblad dat
+      // gewoon open blijft staan triggert nooit een nieuwe check. Deze
+      // timer wist de state actief zodra de 30 minuten verstrijken TERWIJL
+      // de pagina open is. Kan het sluiten van het tabblad zelf niet dekken
+      // (geen JS draait dan meer) - de lazy-check bij de eerstvolgende
+      // opening blijft daarom het echte, altijd-werkende vangnet; dit is
+      // een aanvulling, geen vervanging.
+      let deeplinkExpiryTimer = null;
+
+      function scheduleDeeplinkExpiry(state) {
+        if (deeplinkExpiryTimer !== null) {
+          clearTimeout(deeplinkExpiryTimer);
+          deeplinkExpiryTimer = null;
+        }
+        if (!state || typeof state.sessionCreatedAt !== "number") return;
+        const remainingMs = DEEPLINK_SESSION_MAX_AGE_MS - (Date.now() - state.sessionCreatedAt);
+        if (remainingMs <= 0) {
+          clearDeeplinkSecretState();
+          return;
+        }
+        deeplinkExpiryTimer = setTimeout(() => {
+          log("[debug] deep-link-sessie actief verlopen (30 minuten) - localStorage opgeruimd zonder dat er een nieuwe actie voor nodig was.", "log-debug");
+          clearDeeplinkSecretState();
+        }, remainingMs);
+      }
 
       function loadDeeplinkState() {
         try {
@@ -328,6 +358,7 @@
             localStorage.removeItem(DEEPLINK_STORAGE_KEY);
             return null;
           }
+          scheduleDeeplinkExpiry(state);
           return state;
         } catch (err) {
           return null;
@@ -336,14 +367,22 @@
 
       function saveDeeplinkState(state) {
         localStorage.setItem(DEEPLINK_STORAGE_KEY, JSON.stringify(state));
+        scheduleDeeplinkExpiry(state);
       }
 
       function clearDeeplinkSecretState() {
         localStorage.removeItem(DEEPLINK_STORAGE_KEY);
+        if (deeplinkExpiryTimer !== null) {
+          clearTimeout(deeplinkExpiryTimer);
+          deeplinkExpiryTimer = null;
+        }
       }
 
       function saveLastWalletMarker(walletPublicKeyBase58) {
-        localStorage.setItem(DEEPLINK_LAST_WALLET_KEY, JSON.stringify({ walletPublicKey: walletPublicKeyBase58 }));
+        localStorage.setItem(
+          DEEPLINK_LAST_WALLET_KEY,
+          JSON.stringify({ walletPublicKey: walletPublicKeyBase58, savedAt: Date.now() })
+        );
       }
 
       function loadLastWalletMarker() {
@@ -352,6 +391,11 @@
           if (!raw) return null;
           const marker = JSON.parse(raw);
           if (typeof marker.walletPublicKey !== "string") return null;
+          const age = Date.now() - marker.savedAt;
+          if (typeof marker.savedAt !== "number" || !(age >= 0) || age > DEEPLINK_SESSION_MAX_AGE_MS) {
+            localStorage.removeItem(DEEPLINK_LAST_WALLET_KEY);
+            return null;
+          }
           return marker;
         } catch (err) {
           return null;
@@ -1274,22 +1318,29 @@
         const fullUrl = "https://solflare.com/ul/v1/signAndSendTransaction?" + params.toString();
 
         // Volledig, exact verzoek loggen VOORDAT er weggenavigeerd wordt -
-        // zowel on-page/console (voor het geval de navigatie iets vertraagt)
-        // als in localStorage (overleeft de navigatie zelf, in
-        // tegenstelling tot console/on-page-logs, dus nog te controleren na
-        // terugkomst).
-        const requestSummary = {
+        // on-page/console (voor het geval de navigatie iets vertraagt).
+        // STATUS.md sectie 107 (punt 2/3): NIET meer in localStorage bewaard
+        // (was puur-debug, niet nodig voor de flow zelf - zie
+        // resumeDeeplinkIfNeeded, die dit voorheen na terugkomst opnieuw
+        // logde). Het rauwe Solflare-`session`-token wordt bovendien
+        // geredigeerd VOORDAT dit object gelogd wordt (nooit vóór het
+        // versleutelen hierboven, dat heeft het volledige token nodig) -
+        // zelfde behandeling als de transactie al krijgt
+        // (`transaction_b58_prefix`).
+        const requestSummaryForLog = {
           method: "signAndSendTransaction",
           actionName,
           startedAt,
           dapp_encryption_public_key: bs58.encode(Uint8Array.from(state.dappPublicKey)),
           redirect_link: REDIRECT_URL,
-          payload_plaintext: { session: state.session, transaction_bytes: serialized.length, transaction_b58_prefix: payload.transaction.slice(0, 24) + "..." },
+          payload_plaintext: {
+            session_prefix: state.session ? state.session.slice(0, 8) + "..." : null,
+            transaction_bytes: serialized.length,
+            transaction_b58_prefix: payload.transaction.slice(0, 24) + "...",
+          },
         };
-        state.lastRequestSummary = requestSummary;
-        saveDeeplinkState(state);
-        log("[debug] volledig verzoek (methode + payload-velden, vóór versleuteling): " + JSON.stringify(requestSummary), "log-debug");
-        console.log("[SpankWallet deep-link] verzoek voor '" + actionName + "':", requestSummary, "volledige URL:", fullUrl);
+        log("[debug] volledig verzoek (methode + payload-velden, vóór versleuteling, session geredigeerd): " + JSON.stringify(requestSummaryForLog), "log-debug");
+        console.log("[SpankWallet deep-link] verzoek voor '" + actionName + "' (session geredigeerd):", requestSummaryForLog, "volledige URL:", fullUrl);
 
         log("Doorsturen naar de Solflare-app om te ondertekenen (" + actionName + ") - dit tabblad komt terug na goedkeuring...");
         window.location.href = fullUrl;
@@ -1315,14 +1366,10 @@
             "', element.textContent='" + record.text + "'",
           "log-debug"
         );
-        // Ook persisteren (overleeft de wegnavigatie), zodat dit na
-        // terugkomst nog te vergelijken is met welke actie uiteindelijk
-        // verstuurd/afgehandeld werd.
-        const state = loadDeeplinkState();
-        if (state) {
-          state.lastButtonClick = record;
-          saveDeeplinkState(state);
-        }
+        // STATUS.md sectie 107 (punt 2): NIET meer gepersisteerd - was puur
+        // debug (vergelijken met de uiteindelijk afgehandelde actie na een
+        // paginanavigatie), niet nodig voor de flow zelf. De regel hierboven
+        // logt 'm nog gewoon on-page, alleen niet meer in localStorage.
       }
 
       // Bekende, geaccepteerde beperking (ultrareview, 2026-08-16): de check
@@ -1555,15 +1602,13 @@
               "op een oudere, nooit-afgeronde poging, niet op je meest recente klik.",
             "log-debug"
           );
-          if (state.lastRequestSummary) {
-            log("[debug] bijbehorend verzoek (zoals verstuurd): " + JSON.stringify(state.lastRequestSummary), "log-debug");
-          }
-          if (state.lastButtonClick) {
-            log(
-              "[debug] laatst geregistreerde knopklik (rechtstreeks door de browser, vóór alle andere " +
-                "logica): " + JSON.stringify(state.lastButtonClick), "log-debug"
-            );
-          }
+          // STATUS.md sectie 107 (punt 2): het bijbehorende verzoek/de
+          // laatste knopklik werden hier voorheen opnieuw gelogd uit
+          // localStorage - beide zijn niet meer gepersisteerd (puur debug),
+          // dus niets meer om hier te tonen. De oorspronkelijke, live logs
+          // (bij het versturen zelf, resp. bij de klik zelf) blijven
+          // gewoon zichtbaar in de console-/pagina-geschiedenis van vóór de
+          // wegnavigatie.
           state.pendingAction = null;
           saveDeeplinkState(state);
           history.replaceState({}, "", window.location.pathname);
@@ -1629,8 +1674,7 @@
             const responseData = decryptPayload(params.get("data"), params.get("nonce"), sharedSecret);
             log(
               "[debug] geslaagd antwoord hoort bij actie '" + action + "', gestart om " +
-                (state.pendingActionStartedAt || "onbekend tijdstip") + ". Bijbehorend verzoek: " +
-                JSON.stringify(state.lastRequestSummary || "(niet beschikbaar)"),
+                (state.pendingActionStartedAt || "onbekend tijdstip") + ".",
               "log-debug"
             );
             state.pendingAction = null;

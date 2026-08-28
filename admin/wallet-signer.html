@@ -8,17 +8,28 @@
       tegenstelling tot client/'s strikte CSP (STATUS.md sectie 33+).
       Bewust minder streng dan client/'s CSP: dit blijft doelbewust een
       enkel HTML-bestand met inline <script>/<style> (geen build-stap
-      nodig - moet op elk signer-apparaat direct te openen zijn), dus
-      'unsafe-inline' is hier niet te vermijden zonder de hele opzet te
-      herzien. Wel afgedwongen: geen framing (frame-ancestors 'none'),
-      geen object-embeds, en connect-/script-src beperkt tot precies de
-      origins die deze pagina daadwerkelijk gebruikt (esm.sh voor
-      CDN-imports, Helius voor RPC - geverifieerd door de bestaande
-      import-/fetch-aanroepen in dit bestand na te lopen, niet aangenomen).
+      nodig OM TE DRAAIEN - moet op elk signer-apparaat direct te openen
+      zijn), dus 'unsafe-inline' is hier niet te vermijden zonder de hele
+      opzet te herzien. Wel afgedwongen: geen framing (frame-ancestors
+      'none'), geen object-embeds, en connect-/script-src beperkt tot
+      precies de origins die deze pagina daadwerkelijk gebruikt (Helius
+      voor RPC - geverifieerd door de bestaande import-/fetch-aanroepen in
+      dit bestand na te lopen, niet aangenomen).
+
+      STATUS.md sectie 107/109: de zes CDN-imports die hier eerder via
+      esm.sh liepen zijn lokaal gevendored (`vendor/*.mjs`, eenmalig
+      gebouwd met esbuild - een build-stap om het BUNDEL-BESTAND te
+      PRODUCEREN, niet om de pagina te GEBRUIKEN; signers openen nog
+      steeds gewoon dit ene bestand, zonder toolchain). Reden: esm.sh zag
+      bij elk bezoek het IP-adres van de signer plus de exacte
+      pakket-/versiestrings - een derde partij die weet wanneer/met welke
+      tooling dit paneel gebruikt wordt, zonder functionele noodzaak nu
+      alle zes libraries lokaal meekomen. `script-src` bevat daarom geen
+      externe origin meer.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline' https://esm.sh; style-src 'self' 'unsafe-inline'; connect-src 'self' https://devnet.helius-rpc.com; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://devnet.helius-rpc.com; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'none'"
     />
     <title>SpankWallet upgrade-authority - Squads-ondertekenpagina</title>
     <style>
@@ -117,44 +128,45 @@
       let nacl;
 
       try {
-        const web3 = await import("https://esm.sh/@solana/web3.js@1.98.4");
+        const web3 = await import("./vendor/web3.mjs");
         ({ Connection, PublicKey, TransactionMessage, TransactionInstruction, VersionedTransaction, SYSVAR_RENT_PUBKEY, SYSVAR_CLOCK_PUBKEY } = web3);
-        log("[debug] @solana/web3.js geladen.", "log-debug");
+        log("[debug] @solana/web3.js geladen (lokaal gevendored).", "log-debug");
       } catch (err) {
         log("FOUT: @solana/web3.js kon niet geladen worden: " + err.message);
         throw err;
       }
 
       try {
-        multisig = await import("https://esm.sh/@sqds/multisig@2.1.4");
-        log("[debug] @sqds/multisig geladen.", "log-debug");
+        const multisigMod = await import("./vendor/multisig.mjs");
+        multisig = multisigMod.default;
+        log("[debug] @sqds/multisig geladen (lokaal gevendored).", "log-debug");
       } catch (err) {
         log("FOUT: @sqds/multisig kon niet geladen worden: " + err.message);
         throw err;
       }
 
       try {
-        const walletStandard = await import("https://esm.sh/@wallet-standard/app@1.1.0");
+        const walletStandard = await import("./vendor/wallet-standard-app.mjs");
         getWallets = walletStandard.getWallets;
-        log("[debug] @wallet-standard/app geladen.", "log-debug");
+        log("[debug] @wallet-standard/app geladen (lokaal gevendored).", "log-debug");
       } catch (err) {
         log("FOUT: @wallet-standard/app kon niet geladen worden: " + err.message);
         throw err;
       }
 
       try {
-        const bs58mod = await import("https://esm.sh/bs58@5.0.0");
+        const bs58mod = await import("./vendor/bs58.mjs");
         bs58 = bs58mod.default;
-        log("[debug] bs58 geladen.", "log-debug");
+        log("[debug] bs58 geladen (lokaal gevendored).", "log-debug");
       } catch (err) {
         log("FOUT: bs58 kon niet geladen worden: " + err.message);
         throw err;
       }
 
       try {
-        const naclMod = await import("https://esm.sh/tweetnacl@1.0.3");
+        const naclMod = await import("./vendor/tweetnacl.mjs");
         nacl = naclMod.default;
-        log("[debug] tweetnacl geladen (nodig voor Solflare-deep-link-encryptie).", "log-debug");
+        log("[debug] tweetnacl geladen (lokaal gevendored, nodig voor Solflare-deep-link-encryptie).", "log-debug");
       } catch (err) {
         log("FOUT: tweetnacl kon niet geladen worden: " + err.message);
         throw err;
@@ -173,7 +185,7 @@
       // js/packages/wallet-standard-mobile/src/initialize.ts.
       if (/Android/i.test(navigator.userAgent)) {
         try {
-          const mwaMod = await import("https://esm.sh/@solana-mobile/wallet-standard-mobile@0.5.3");
+          const mwaMod = await import("./vendor/wallet-standard-mobile.mjs");
           const {
             registerMwa,
             createDefaultAuthorizationCache,

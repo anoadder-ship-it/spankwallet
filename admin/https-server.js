@@ -47,8 +47,31 @@ const options = {
 // (key.pem staat binnen ROOT, geen traversal nodig). Een allowlist van
 // precies de benodigde bestandsnamen sluit beide structureel af, ongeacht
 // wat er ooit nog aan bestanden in deze map bijkomt.
+// STATUS.md sectie 107/109: de zes esm.sh-CDN-imports zijn lokaal
+// gevendored (`vendor/*.mjs`, eenmalig gebouwd met esbuild) - dezelfde
+// allowlist-discipline als hierboven beargumenteerd geldt onverkort voor
+// deze nieuwe bestanden: elk exact bij naam toegevoegd, geen
+// directory-wildcard (die zou de hele allowlist-redenering ondermijnen).
 const ALLOWED_FILES = {
   "wallet-signer.html": { file: "wallet-signer.html", contentType: "text/html" },
+  "vendor/web3.mjs": { file: "vendor/web3.mjs", contentType: "text/javascript" },
+  "vendor/multisig.mjs": { file: "vendor/multisig.mjs", contentType: "text/javascript" },
+  "vendor/wallet-standard-app.mjs": { file: "vendor/wallet-standard-app.mjs", contentType: "text/javascript" },
+  "vendor/bs58.mjs": { file: "vendor/bs58.mjs", contentType: "text/javascript" },
+  "vendor/tweetnacl.mjs": { file: "vendor/tweetnacl.mjs", contentType: "text/javascript" },
+  "vendor/wallet-standard-mobile.mjs": { file: "vendor/wallet-standard-mobile.mjs", contentType: "text/javascript" },
+  // De drie chunk-<hash>-bestanden zijn esbuild's automatisch gesplitste,
+  // GEDEELDE modules (bijv. @solana/web3.js zelf, dat zowel web3.mjs als
+  // multisig.mjs rechtstreeks nodig hebben - dezelfde module-instantie,
+  // dus dezelfde PublicKey-klasse, i.p.v. twee losse kopieen die elkaars
+  // `instanceof`-checks zouden breken). De hash verandert bij elke
+  // rebuild - bij een toekomstige `npx esbuild ...`-hertaal van vendor/
+  // (bijv. een libraryversie-bump) MOETEN deze drie regels mee-updaten
+  // naar de nieuwe bestandsnamen, anders serveert deze allowlist een
+  // niet-meer-bestaand chunk-bestand.
+  "vendor/chunk-IYJ5Z2CH.mjs": { file: "vendor/chunk-IYJ5Z2CH.mjs", contentType: "text/javascript" },
+  "vendor/chunk-HDN7WHJK.mjs": { file: "vendor/chunk-HDN7WHJK.mjs", contentType: "text/javascript" },
+  "vendor/chunk-KLMJEOXW.mjs": { file: "vendor/chunk-KLMJEOXW.mjs", contentType: "text/javascript" },
 };
 
 function resolveAllowedFile(pathname) {

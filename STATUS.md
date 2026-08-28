@@ -9417,3 +9417,54 @@ Directory-vraag): **afgesloten** - `desktop/` is correct en met opzet, geen wijz
 Auto-deploy-op-elke-push-advies: niet apart uitgezocht in deze sessie (geen eerdere vastlegging
 gevonden om op voort te bouwen, zie de correctie bovenaan) - te behandelen in een latere sessie
 als dat nog relevant is.
+
+## 108. Vier externe AI-analyses beoordeeld - geen van alle vraagt actie vandaag
+
+**Gevraagd:** vier extern (buiten deze sessie) opgestelde AI-analyses beoordelen - een
+algemeen repo-overzicht, een roadmap-advies (Kani/Trident/audit-fasering), een samenvatting
+van Solana-auditstandaarden, en een overzicht van Solana-netwerkupgrades inclusief
+Alpenglow. Doel: wat klopt, wat is verouderd, wat verdient actie. **Niets gebouwd** - dit is
+uitsluitend de beoordeling, zoals aangeleverd en besloten.
+
+**Gevonden:**
+
+1. **Algemeen repo-overzicht - grotendeels accuraat, één verouderd punt.** Noemde
+   spend-limits voor session keys als "geïmplementeerd, nog niet gedeployed" - achterhaald:
+   die zaten al in voorstel #10, en B1-t/m-B7 (voorstel #11) is inmiddels ook live (zie
+   sectie 95/97). **Les, niet specifiek voor dit document:** externe analyses van dit
+   project moeten altijd tegen de actuele STATUS.md-stand gelegd worden, nooit als bron van
+   waarheid op zichzelf behandeld - ze verouderen zodra dit project verdergaat, wat vaak is.
+2. **Roadmap-advies (Kani-uitbreiding, Trident-flows, gefaseerde audit-opbouw) - inhoudelijk
+   sterk, twee gebreken.** De voorgestelde volgorde ("bewijzen vóór beweren") sluit aan bij
+   hoe dit project al werkt. Gebrek 1: het advies om "spend-limits te deployen" verhult dat
+   het eigenlijke, grotere gat elders zit - `execute`, `transfer_token`, `execute_advanced`
+   en `hunt` hebben nog steeds GEEN enkele bestedingslimiet, al vastgelegd in sectie 99's
+   ontwerp (tijdvenster/pending-withdrawal, nog niet besloten) - het advies richt zich op het
+   kleinere, al-opgeloste gat. Gebrek 2: het advies om Certora/CVLR opnieuw te proberen
+   negeert dat dit al twee keer op infrastructuur is vastgelopen (geen ARM64-ondersteuning,
+   een axiomatiseringsprobleem) - geen open actiepunt, een bekende blokkade die het advies
+   niet meeneemt.
+3. **Samenvatting Solana-auditstandaarden (Neodyme-checklist, laag-model static/fuzz/
+   formal/manual) - feitelijk correct, niets nieuws.** Nuttig als naslagwerk voor een
+   toekomstige `SECURITY_MODEL.md`, maar bevat niets boven wat al bekend was in dit project.
+   Geen actie nu.
+4. **"Gratis pad naar audit-niveau"-advies - bruikbaar, met een expliciete waarschuwing.**
+   Zelf-audit en machine-checkbare bewijzen (Kani/Trident/statische analyse) vervangen geen
+   onafhankelijke externe partij zonder eigen belang bij de uitkomst. Behandelen als
+   aanvulling op een toekomstige externe audit, nooit als vervanging ervoor.
+5. **Netwerkupgrade-overzicht (incl. Alpenglow) - bevestigt onafhankelijk sectie 102/103, en
+   voegt twee nieuwe punten toe.** Bevestiging: Transaction v1, slotduur-drift,
+   `maxSupportedTransactionVersion` - komt overeen met wat sectie 102/103 al vaststelden,
+   een tweede bron die hetzelfde beeld geeft. Nieuw:
+   - **(a) Rent gaat ~90% omlaag via SIMD-0437, gefaseerd** - puur gunstig voor een project
+     met veel kleine PDA's zoals dit. Geen actie nodig, alleen positief.
+   - **(b) Alpenglow (Agave 4.3, gepland ~oktober 2026, SIMD-0326)** vervangt het huidige
+     consensusmechanisme en brengt finality van ~12,8s naar ~150ms. Raakt de
+     recovery-timelock en het sessievenster niet FUNCTIONEEL (beide zijn slot-/tijd-
+     gebonden, niet finality-gebonden), maar is een grotere protocolwijziging dan v1 en
+     verdient een eigen inventarisatieronde zodra hij dichterbij komt - niet nu.
+
+**Besloten:** geen van de vier documenten vraagt actie vandaag - het zijn achtergrondstukken,
+geen nieuwe bevindingen die iets breken. Geen Kani/Trident-uitbreidingsronde nu (weken werk,
+verdient een eigen ongestoorde sessie, en er lopen al meerdere andere taken parallel).
+Alpenglow vastgelegd als toekomstig aandachtspunt, geen ronde nu.

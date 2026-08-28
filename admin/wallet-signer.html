@@ -55,6 +55,11 @@
     </label>
     <button id="approve-btn" disabled>3. Voorstel goedkeuren</button>
     <button id="squads-execute-btn" disabled>4. Uitvoeren (pas mogelijk na de 72u-timelock)</button>
+    <label style="display: block; margin: 0.3rem 0; font-size: 0.9rem;">
+      Voorstel-index om af te wijzen:
+      <input type="number" id="reject-transaction-index-input" min="0" step="1" style="width: 6rem;" />
+    </label>
+    <button id="reject-btn" disabled>5. Voorstel afwijzen (reject-stem)</button>
     <button id="reset-deeplink-state-btn">Vastgelopen Solflare-deep-link-status wissen (alleen gebruiken als een oude, nooit-afgeronde actie in de weg lijkt te zitten)</button>
     <div id="output"></div>
 
@@ -564,6 +569,7 @@
         document.getElementById("propose-btn").disabled = false;
         document.getElementById("approve-btn").disabled = false;
         document.getElementById("squads-execute-btn").disabled = false;
+        document.getElementById("reject-btn").disabled = false;
       }
 
       // Gedeelde afronding na een geslaagde verbinding, ongeacht via welk
@@ -759,6 +765,7 @@
         document.getElementById("propose-btn").disabled = true;
         document.getElementById("approve-btn").disabled = true;
         document.getElementById("squads-execute-btn").disabled = true;
+        document.getElementById("reject-btn").disabled = true;
         log("Solflare-deep-link-status gewist - verbind opnieuw via knop 1b.");
       });
 
@@ -773,7 +780,13 @@
       // eigenlijke actie af met de dan verse sharedSecret - geen aparte
       // tweede klik nodig, wel een tweede, zichtbare app-wissel naar
       // Solflare (eerst verbinden, dan ondertekenen).
-      function beginFreshDeeplinkConnect(queuedAction) {
+      // queuedRejectTransactionIndex (STATUS.md sectie 105): reject werkt,
+      // anders dan propose/approve/execute, op een expliciet ingetypte
+      // voorstel-index i.p.v. een af te leiden "canonieke" waarde - die
+      // moet dus door de volledige paginanavigatie heen overleven, net als
+      // de rest van deze state (vandaar hier opgeslagen, niet in een
+      // gewone JS-variabele).
+      function beginFreshDeeplinkConnect(queuedAction, queuedRejectTransactionIndex) {
         log(
           "[debug] verse Solflare-connect gestart (queuedAction=" + (queuedAction || "geen") +
             ") - vorige sessie/geheim wordt genegeerd/overschreven.",
@@ -788,6 +801,7 @@
           walletPublicKey: null,
           pendingAction: "connect",
           queuedAction: queuedAction || null,
+          queuedRejectTransactionIndex: queuedRejectTransactionIndex || null,
           sessionCreatedAt: Date.now(),
         });
 
@@ -821,8 +835,32 @@
 
       // --- Voorstel bouwen/afronden (gedeeld tussen synchrone en deep-link-paden) ---
 
+      // STATUS.md sectie 104: voorstel #12 was een byte-voor-byte duplicaat
+      // van het al UITGEVOERDE voorstel #11, tegen precies deze BUFFER-
+      // constante - de Upgrade-instructie sluit het buffer-account bij
+      // succesvolle uitvoering, dus na #11 bestond deze BUFFER al niet meer.
+      // Geen veiligheidsgat (de instructie kon toch nooit slagen: het
+      // Squads-programma zelf zou bij uitvoering hard falen op het
+      // ontbrekende account), maar de pagina liet een gegarandeerd-
+      // mislukte transactie wél bouwen en versturen, zonder ooit vooraf te
+      // controleren of BUFFER nog bestaat. Vandaar deze check, VOORDAT er
+      // iets opgebouwd wordt - geen impliciete aanname meer dat BUFFER
+      // (bijgewerkt per stap 1 van admin/README.md) ook daadwerkelijk is
+      // bijgewerkt vóór het indienen.
+      async function checkBufferExists() {
+        const bufferInfo = await connection.getAccountInfo(BUFFER);
+        if (!bufferInfo) {
+          throw new Error(
+            "Deze buffer bestaat niet meer op devnet - waarschijnlijk al verbruikt door een eerdere " +
+              "upgrade. Werk eerst de BUFFER-constante bij."
+          );
+        }
+      }
+
       async function buildProposeTx() {
         log("Voorstel indienen - EEN transactie met TWEE instructies (vaultTransactionCreate + proposalCreate), dus maar EEN handtekening/popup nodig.");
+
+        await checkBufferExists();
 
         const multisigInfo = await fetchMultisig();
         const transactionIndex = BigInt(Number(multisigInfo.transactionIndex) + 1);
@@ -955,9 +993,10 @@
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
         const kind = proposal.status.__kind;
 
-        if (actionName === "approve" && kind !== "Active") {
+        if ((actionName === "approve" || actionName === "reject") && kind !== "Active") {
+          const verb = actionName === "approve" ? "goedkeuring" : "afwijzing";
           throw new Error(
-            "Voorstel #" + transactionIndex + " staat niet meer open voor goedkeuring (status: " + kind + "). " +
+            "Voorstel #" + transactionIndex + " staat niet meer open voor " + verb + " (status: " + kind + "). " +
               (kind === "Approved"
                 ? "Het heeft al de vereiste " + multisigInfo.threshold + " goedkeuringen (goedgekeurd door: " +
                   proposal.approved.map((k) => k.toBase58()).join(", ") + "). Geen actie nodig - wacht de " +
@@ -1051,6 +1090,74 @@
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
         log("SUCCES - voorstel #" + transactionIndex + " status: " + JSON.stringify(proposal.status) + ", goedgekeurd door: " + proposal.approved.map((k) => k.toBase58()).join(", "));
         clearDeeplinkSecretState();
+      }
+
+      // Knop 5 (STATUS.md sectie 104) - stemt AF (proposalReject), niet
+      // "cancel" (het Squads-programma se eigen proposalCancel-instructie
+      // vereist status "Approved", zie de IDL-docs; een nog-"Active"
+      // voorstel zoals #12 kan alleen via genoeg reject-stemmen naar
+      // "Rejected" - dezelfde route als een gewone afwijzing). Bewust GEEN
+      // "canonical proposal for BUFFER"-koppeling zoals bij approve/execute
+      // - reject werkt op een expliciet ingevoerde index, nooit op een
+      // afgeleide "waarschijnlijk bedoelde" index, want dit is precies de
+      // actie die je nooit per ongeluk op het verkeerde voorstel wilt
+      // uitvoeren.
+      async function buildRejectTx(transactionIndex) {
+        const multisigInfo = await fetchMultisig();
+        log("Afwijzen van voorstel #" + transactionIndex.toString());
+        await checkProposalReadyForAction("reject", transactionIndex, multisigInfo);
+
+        const { blockhash } = await connection.getLatestBlockhash();
+        const tx = multisig.transactions.proposalReject({
+          blockhash,
+          feePayer: connectedWallet.publicKey,
+          multisigPda: MULTISIG_PDA,
+          transactionIndex,
+          member: connectedWallet.publicKey,
+        });
+        return { tx, transactionIndex };
+      }
+
+      async function finishReject(signature, transactionIndex) {
+        log("Verstuurd. Signature: " + signature);
+        const result = await awaitConfirmation(signature);
+
+        if (result.timedOut) {
+          if (result.landed && result.err === null) {
+            log("Gecontroleerd: de transactie is alsnog bevestigd geland. Er is niets mis, klik niet opnieuw.");
+          } else if (result.landed && result.err !== null) {
+            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
+          } else {
+            throw new Error(
+              "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
+                "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op " +
+                "'5. Voorstel afwijzen'."
+            );
+          }
+        }
+
+        const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
+        const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
+        log(
+          "SUCCES - voorstel #" + transactionIndex + " status: " + JSON.stringify(proposal.status) +
+            ", afgewezen door: " + proposal.rejected.map((k) => k.toBase58()).join(", ")
+        );
+        clearDeeplinkSecretState();
+      }
+
+      async function runRejectAction(transactionIndex) {
+        if (!(await checkMembership(connectedWallet.publicKey))) {
+          log("FOUT: verbonden account is geen lid van de multisig - zie de melding bij 'Wallet verbinden'.");
+          return;
+        }
+        const { tx, transactionIndex: confirmedIndex } = await buildRejectTx(transactionIndex);
+        if (connectedWallet.mode === "deeplink") {
+          startDeeplinkSignAndSend("reject", tx, confirmedIndex);
+        } else {
+          log("Keur de afwijzing goed in je wallet-extensie...");
+          const { signature } = await connectedWallet.signAndSendTransaction(tx);
+          await finishReject(signature, confirmedIndex);
+        }
       }
 
       async function buildSquadsExecuteTx() {
@@ -1362,6 +1469,32 @@
         }
       });
 
+      document.getElementById("reject-btn").addEventListener("click", async (e) => {
+        logButtonClick(e);
+        if (!connectedWallet) return;
+        try {
+          const raw = document.getElementById("reject-transaction-index-input").value.trim();
+          if (!/^\d+$/.test(raw)) {
+            log("FOUT: vul eerst een geldige, niet-negatieve voorstel-index in bij '5. Voorstel afwijzen'.");
+            return;
+          }
+          // Deep-link: zelfde patroon als propose/approve/execute - altijd
+          // eerst een verse Solflare-connect (nooit de mogelijk verlopen/
+          // oude sessie hergebruiken), die zelf (via resumeDeeplinkIfNeeded)
+          // runRejectAction() aanroept zodra hij terugkeert met een verse
+          // sharedSecret. De ingetypte index gaat mee als tweede argument -
+          // reject heeft, anders dan approve/execute, geen "canonieke
+          // voorstel"-afleiding om na de paginanavigatie op terug te vallen.
+          if (connectedWallet.mode === "deeplink") {
+            beginFreshDeeplinkConnect("reject", raw);
+            return;
+          }
+          await runRejectAction(BigInt(raw));
+        } catch (err) {
+          logFullError("reject-btn-handler", err);
+        }
+      });
+
       // Herstelt UI-status (welk adres, propose/approve/execute-knoppen aan)
       // na een gewone paginareload/dagen later - uit de NIET-geheime
       // walletPublicKey-marker, niet uit een geheime sharedSecret. Elke
@@ -1442,11 +1575,13 @@
             const connectData = decryptPayload(params.get("data"), params.get("nonce"), sharedSecret);
 
             const queuedAction = state.queuedAction || null;
+            const queuedRejectTransactionIndex = state.queuedRejectTransactionIndex || null;
             state.sharedSecret = Array.from(sharedSecret);
             state.session = connectData.session;
             state.walletPublicKey = connectData.public_key;
             state.pendingAction = null;
             state.queuedAction = null;
+            state.queuedRejectTransactionIndex = null;
             saveDeeplinkState(state);
             saveLastWalletMarker(connectData.public_key);
 
@@ -1456,7 +1591,7 @@
               walletName: "Solflare (mobiel, deep-link)",
             };
 
-            // Verse connect vóór propose/approve/execute (zie
+            // Verse connect vóór propose/approve/execute/reject (zie
             // beginFreshDeeplinkConnect): rondt de OORSPRONKELIJK bedoelde
             // actie meteen af met deze verse sharedSecret, i.p.v. hier te
             // stoppen bij "verbonden" - dat vereist een TWEEDE, zichtbare
@@ -1465,6 +1600,16 @@
             if (queuedAction === "propose") await runProposeAction();
             else if (queuedAction === "approve") await runApproveAction();
             else if (queuedAction === "execute") await runExecuteAction();
+            else if (queuedAction === "reject") {
+              if (!queuedRejectTransactionIndex) {
+                throw new Error(
+                  "Kan de afwijzing niet afronden: onbekend welk voorstel het betrof " +
+                    "(queuedRejectTransactionIndex ontbreekt in de bewaarde deep-link-status). " +
+                    "Vul de index opnieuw in bij '5. Voorstel afwijzen' en klik opnieuw."
+                );
+              }
+              await runRejectAction(BigInt(queuedRejectTransactionIndex));
+            }
             else await finishConnectUI();
           } else {
             if (!state.sharedSecret) throw new Error("Geen sharedSecret in localStorage - kan antwoord niet ontsleutelen.");
@@ -1494,6 +1639,17 @@
               await finishApprove(responseData.signature, BigInt(state.pendingActionTransactionIndex));
             }
             else if (action === "execute") await finishSquadsExecute(responseData.signature);
+            else if (action === "reject") {
+              if (!state.pendingActionTransactionIndex) {
+                throw new Error(
+                  "Kan de afwijzing niet afronden: onbekend welk voorstel het betrof " +
+                    "(pendingActionTransactionIndex ontbreekt in de bewaarde deep-link-status - " +
+                    "vermoedelijk een oudere, vóór deze fix gestarte actie). Controleer handmatig on-chain " +
+                    "welk voorstel zojuist afgewezen is."
+                );
+              }
+              await finishReject(responseData.signature, BigInt(state.pendingActionTransactionIndex));
+            }
             else log("[debug] onbekende pendingAction bij terugkeer: " + action, "log-debug");
           }
         } catch (err) {

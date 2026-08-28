@@ -4,7 +4,7 @@ import { showConfirmationCard, escapeHtml } from "./confirmationCard";
 import { readWalletAccount } from "./recovery";
 import { deriveSessionPda, readSessionKeyAccount } from "./sessionKeys";
 import { formatTokenAmount } from "./tokenAmount";
-import { formatDurationEstimate } from "./slotDuration";
+import { formatDurationEstimate, estimateSlotMs } from "./slotDuration";
 
 const LAMPORT_DECIMALS = 9; // 1 SOL = 10^9 lamports - wiskundig identiek aan een token met 9 decimalen
 
@@ -60,10 +60,12 @@ export async function showRemoveSessionKeyPreview(
 
   const currentSlot = BigInt(await connection.getSlot());
   const remainingSlots = session.expirySlot - currentSlot;
+  // STATUS.md sectie 103: live gemeten i.p.v. een hardcoded aanname.
+  const slotMsEstimate = await estimateSlotMs(connection);
   const durationLine =
     remainingSlots <= 0n
       ? "al verlopen (kan nog steeds ingetrokken/opgeruimd worden)"
-      : `nog ${remainingSlots} slot(s) geldig (${formatDurationEstimate(remainingSlots)})`;
+      : `nog ${remainingSlots} slot(s) geldig (${formatDurationEstimate(remainingSlots, slotMsEstimate)})`;
 
   // Alleen opvragen als de sessie uberhaupt token-scope heeft - geen
   // onnodige RPC-call voor een sessie die toch geen tokens mag versturen.

@@ -2177,7 +2177,12 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
   //
   // Was: add_session_key controleerde uitsluitend `expiry_slot >
   // current_slot` - geen bovengrens. Nu (B3): state.rs::MAX_SESSION_
-  // DURATION_SLOTS = 1_512_000 (~7 dagen bij 400ms/slot) legt een harde
+  // DURATION_SLOTS = 1_512_000 (~7 dagen bij Solana's oude "nominale"
+  // 400ms/slot - empirisch achterhaald, zie STATUS.md sectie 103: op
+  // 2026-08-28 mat mainnet-beta ~366ms/slot, devnet ~166ms/slot, dus de
+  // WERKELIJKE duur ligt lager en verandert mee met toekomstige
+  // protocolwijzigingen - het slotaantal zelf, en daarmee deze test, blijft
+  // ongewijzigd en correct) legt een harde
   // bovengrens op. Beide grenzen hieronder scherp getest: de ondergrens is
   // al gedekt door de bestaande "add_session_key faalt als expiry_slot niet
   // in de toekomst ligt (SessionExpirySlotNotInFuture)"-test hierboven

@@ -2,7 +2,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { getMint } from "@solana/spl-token";
 import { showConfirmationCard, escapeHtml, ConfirmationCardField } from "./confirmationCard";
 import { formatTokenAmount, parseTokenAmount, defaultTokenAmountFieldValue } from "./tokenAmount";
-import { formatDurationEstimate } from "./slotDuration";
+import { formatDurationEstimate, estimateSlotMs } from "./slotDuration";
 
 const LAMPORT_DECIMALS = 9; // 1 SOL = 10^9 lamports - wiskundig identiek aan een token met 9 decimalen
 
@@ -99,6 +99,10 @@ export async function showAddSessionKeyPreview(
     }
   }
 
+  // Vooraf gemeten, niet in de synchrone headline-callback hieronder (die
+  // kan niet awaiten) - zie STATUS.md sectie 103, slotDuration.ts.
+  const slotMsEstimate = await estimateSlotMs(connection);
+
   const fields: ConfirmationCardField[] = [
     { id: "durationSlots", label: "Geldigheidsduur (aantal slots)", defaultValue: defaultDurationSlots.toString() },
   ];
@@ -131,7 +135,7 @@ export async function showAddSessionKeyPreview(
       const durationLine =
         durationSlots === null
           ? "(ongeldige duur)"
-          : `${durationSlots} slots (${formatDurationEstimate(durationSlots)})`;
+          : `${durationSlots} slots (${formatDurationEstimate(durationSlots, slotMsEstimate)})`;
 
       let capsLines = "";
       if (canExecute) {

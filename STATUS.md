@@ -9094,3 +9094,326 @@ of het voorgestelde volgorde-voorstel - dit is bevestiging en verscherping met e
 bron, geen nieuwe bevinding die de prioritering omgooit. Niets gebouwd of gewijzigd, zoals
 gevraagd.
 
+## 103. Slotduur-aanname gecorrigeerd: empirisch gemeten i.p.v. Solana's "nominale" 400ms, client dynamisch gemaakt, programmaconstante bewust ongewijzigd
+
+Aanleiding: Helius noemde 2026-08-28 als verwachte overgangsdatum naar 300ms-slots op
+mainnet. Sectie 102's check 5 had al voorspeld dat `client/src/slotDuration.ts:1`
+(`SLOT_MS_ESTIMATE = 400`) en `programs/spankwallet/src/state.rs:347`
+(`MAX_SESSION_DURATION_SLOTS = 1_512_000`, in de code-comment verklaard als "~7 dagen bij
+400ms/slot") allebei op dezelfde, inmiddels achterhaalde aanname draaien.
+
+**Eerst gemeten, niet aangenomen** (`scripts/measureSlotDuration.ts`, nieuw, bewaard voor
+hergebruik - zelfde directe-meting-principe als sectie 99's `measureClockDrift.ts`:
+`getBlockTime` op twee ver uit elkaar liggende slots, geen extrapolatie van
+secondenkwantisatie-ruis). Twee lookback-vensters per cluster, ter controle:
+
+- mainnet-beta: 200.000 slots -> 366,24ms/slot; 50.000 slots -> 365,54ms/slot
+- devnet: 200.000 slots -> 166,33ms/slot; 50.000 slots -> 165,96ms/slot
+
+Geen van beide clusters zit op 400ms, en geen van beide zit op de door Helius genoemde
+300ms - devnet zit er zelfs meer dan een factor 2 onder. **Dat bewijst de kernvraag meteen
+concreet: er bestaat geen enkele hardcoded constante die voor beide netwerken tegelijk
+juist is, laat staan blijft.**
+
+**client/src/slotDuration.ts - dynamisch gemaakt, niet simpelweg naar 300 bijgewerkt.**
+Nieuwe `estimateSlotMs(connection)` meet live via `getRecentPerformanceSamples(1)` (dezelfde
+soort directe meting als het script hierboven, maar de recentste sample i.p.v. een
+handmatig lookback-venster), met de oude constante uitsluitend als laatste terugvaloptie
+als die RPC-aanroep faalt of niets teruggeeft. `formatDurationEstimate()` accepteert nu een
+optionele `slotMsEstimate`-parameter. Beide aanroepers (`addSessionKeyPreview.ts`,
+`removeSessionKeyPreview.ts`) hebben al een `connection` voorhanden, dus geen extra RPC-
+afhankelijkheid geïntroduceerd - `estimateSlotMs()` wordt één keer vooraf uitgevoerd (niet
+in de synchrone `headline`-callback, die niet kan awaiten). `client`'s `tsc --noEmit`: schoon.
+
+**programs/spankwallet/src/state.rs::MAX_SESSION_DURATION_SLOTS - bewust NIET gewijzigd.**
+Dit is een slotAANTAL, geen tijdsduur - de grens werkt hoe dan ook correct (een sessie loopt
+onvoorwaardelijk af na exact dit aantal slots), ongeacht hoe snel het netwerk ze
+daadwerkelijk produceert. **Geen veiligheidsgat**, dus geen reden voor een programma-
+layoutwijziging (nieuwe worst-case-analyse, nieuwe upgrade) - alleen de code-comments
+(`state.rs`, `tests/sessionKeys.ts:2180`) zijn gecorrigeerd van een vaste "~7 dagen"-belofte
+naar een expliciete uitleg dat dit een op dit moment geldige schatting is die meeverandert
+met toekomstige protocolwijzigingen. Bij de huidige mainnet-slottijd (~366ms) is
+1.512.000 slots ~6,4 dagen, niet 7 - en dat getal drift verder mee zodra 300ms (of iets
+anders) daadwerkelijk live gaat. `cargo check -p spankwallet`: schoon (2 pre-bestaande,
+ongerelateerde `unexpected cfg`-warnings).
+
+**"7 dagen" elders nagelopen:** `admin/README.md`'s enige treffer betreft een TLS-
+certificaatgeldigheidsduur (`openssl req ... -days 7`), volledig ongerelateerd aan
+sessieduur - niet aangepast. Geen andere UI-strings noemen een vaste periode; de
+bevestigingskaarten gebruiken al `formatDurationEstimate()` dynamisch (minuten/uren), nooit
+een letterlijke "7 dagen"-tekst.
+
+## 104. Onverwacht voorstel #12: byte-voor-byte duplicaat van het al uitgevoerde #11, buffer-existence-check toegevoegd, reject-knop gebouwd (eerst alleen wallet-extensie)
+
+Aanleiding: tijdens sectie 103's werk kwam onverwacht voorstel #12 binnen op de multisig
+(signature `24DQsXeq...`, 2026-08-28T10:56:56Z). Alle overige taken direct gepauzeerd op
+verzoek, uitsluitend onderzoek, niets goedgekeurd/uitgevoerd/gecanceld totdat begrepen.
+
+**Rechtstreeks van de keten gedecodeerd (`@sqds/multisig`, geen `@sqds/multisig`-dependency
+toegevoegd aan het hoofdproject - los, eenmalig scratchpad-scriptje, zelfde terughoudendheid
+als `checkProposalTimelock.ts`'s eigen commentaar bij een vergelijkbare keuze):**
+`VaultTransactionCreate` (index 12) + `ProposalCreate` in één tx, geslaagd. De VaultTransaction
+bevat één instructie naar `BPFLoaderUpgradeab1e1111...`, opcode 3 (`Upgrade`), target-
+programma = spankwallet's eigen devnet-programma, buffer = `728EpFNqPi96etH3YAhnQVV2twDUygAKDuuaiEQAqTET`.
+**Dat IS letterlijk voorstel #11's buffer** - byte-voor-byte identieke accountKeys en
+instructiedata als #11 (al `Executed`). De buffer bestaat niet meer op devnet (`Upgrade`
+sluit en ledigt het buffer-account bij succesvolle uitvoering - #11 had 'm al verbruikt).
+Indiener: `3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3` (hoofd-pc, een geregistreerd lid,
+geen extern/onbekend adres) - geen aanwijzing voor een gecompromitteerde sleutel.
+Waarschijnlijkste verklaring: `wallet-signer.html`'s `BUFFER`-constante was nooit
+teruggezet na #11's executie, en niets in de pagina controleerde dat vóór het indienen.
+
+**Geen veiligheidsgat** (de instructie kon toch nooit slagen - het ontbrekende buffer-
+account laat `VaultTransactionExecute` hard falen), **maar de pagina liet een gegarandeerd-
+mislukte transactie wél bouwen en versturen.** Structurele fix, dezelfde toolveiligheids-
+klasse als sectie 101's timeout-fix:
+
+- **`checkBufferExists()`** - nieuwe functie, `getAccountInfo(BUFFER)` vóórdat
+  `buildProposeTx()` ook maar iets van de `VaultTransactionCreate`-instructie opbouwt. Geen
+  buffer? Directe, duidelijke weigering ("Deze buffer bestaat niet meer op devnet -
+  waarschijnlijk al verbruikt door een eerdere upgrade. Werk eerst de BUFFER-constante bij.")
+  i.p.v. de transactie sowieso te bouwen en te versturen.
+- **Cancel bleek de verkeerde term.** Squads' eigen `proposalCancel`-instructie eist status
+  `Approved` (bevestigd tegen de officiële IDL-docs) - #12 stond op `Active` (0 stemmen).
+  De juiste route voor een `Active` voorstel is `proposalReject`. Nieuwe **knop 5 "Voorstel
+  afwijzen"**: werkt op een expliciet ingetypte voorstel-index (bewust GEEN "canonieke
+  voorstel voor BUFFER"-afleiding zoals bij approve/execute - dit is precies de actie die
+  nooit per ongeluk op het verkeerde voorstel mag landen). Eerste versie: alleen via
+  wallet-extensie, Solflare-deep-link gaf een expliciete "niet ondersteund"-melding
+  i.p.v. een halfbakken implementatie (zie sectie 105 voor de latere uitbreiding).
+- **Reject-cutoff rechtstreeks uit Squads-Protocol/v4's eigen broncode gehaald, niet
+  aangenomen op basis van de 2/3-approve-drempel:** `Multisig::cutoff() = num_voters(members)
+  - threshold + 1` (`state/multisig.rs`), waarbij `num_voters` alleen leden met de `Vote`-
+  permissiebit (`0b010`) telt (`sdk/multisig/src/types.ts`). Alle 3 spankwallet-leden hebben
+  `permissions.mask = 7` (Initiate|Vote|Execute) -> `num_voters = 3`, `threshold = 2` ->
+  **cutoff = 2 reject-stemmen**. Bron: het publieke Squads-Protocol/v4-GitHub-repo (het
+  officiële upstream-project voor dit programma-ID) - niet de gedeployde bytecode zelf
+  gedecompileerd.
+
+**Uitvoering, met twee tussentijdse incidenten, allebei apart onderzocht en zonder gevolgen
+voor #12's daadwerkelijke, on-chain toestand:**
+1. Hoofd-pc's reject-stem (`2Ddi5UxJTC2GVtZQ7...`) landde geslaagd (2026-08-28T11:30:41Z) -
+   de eerst doorgegeven signatuur bleek zelf corrupt geplakt (82 tekens/60 bytes i.p.v. de
+   vereiste 64), gevonden via de proposal-PDA's eigen signature-geschiedenis, niet aangenomen.
+2. Windows-pc: drie pogingen, geen enkele geland. (a) 30s-timeout, signatuur nooit ergens
+   teruggevonden. (b) Phantom's eigen simulatie faalde ("Proceeding is unsafe") - gebruiker
+   koos terecht "Close", niets ondertekend/verstuurd, dus geen on-chain-artefact om te
+   onderzoeken. (c) een tweede verstuurde poging landde evenmin (afwezig uit
+   `getSignatureStatuses`, `getTransaction`, de proposal-PDA se geschiedenis, EN Windows-pc's
+   eigen volledige transactiegeschiedenis - zelfs geen fee afgeschreven). Saldo bleek geen
+   verklaring: 10,29 SOL vóór een toevallig gelijktijdige eigen top-up naar 20,29 SOL, ruim
+   boven de ~5.495-lamport-fee van zo'n stem. Geen structureel bewijs gevonden (Windows-pc/
+   Phantom-op-Edge had op 2026-08-15 al een geslaagde Squads-transactie, sectie eerder in dit
+   document) - vermoedelijk een samenloop van transiënte oorzaken (verlopen blockhash,
+   RPC-hik, of een Phantom-actief-account-mismatch), niet reproduceerbaar vastgesteld.
+   **Windows-pc bewust links gelaten** tot #12 is afgehandeld en er rustig tijd is voor
+   nader onderzoek - telefoon (het derde lid) gebruikt in plaats daarvan (sectie 105).
+
+Status na deze sectie: voorstel #12 nog `Active`, `rejected: [hoofd-pc]` - 1 van de 2
+benodigde stemmen.
+
+## 105. Reject-knop uitgebreid met Solflare-deep-link, om Windows-pc te omzeilen en de route te testen
+
+Aanleiding: rechtstreeks vervolg op sectie 104 - in plaats van een vierde, ongefundeerde
+Windows-pc-poging, de telefoon (`CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3`) gebruiken
+voor #12's tweede reject-stem. Dat vereist deep-link-ondersteuning voor knop 5, die sectie
+104 bewust had overgeslagen.
+
+**Hergebruikt de bestaande propose/approve/execute-deep-link-infrastructuur, geen aparte
+tweede implementatie:** `startDeeplinkSignAndSend(actionName, versionedTx, transactionIndex)`
+was al volledig generiek (sloeg `transactionIndex` altijd op onder `pendingActionTransactionIndex`,
+ongeacht welke actie) - `runRejectAction()` roept 'm nu net als `runApproveAction()` aan i.p.v.
+de eerdere "niet ondersteund"-fout te gooien. `resumeDeeplinkIfNeeded()`'s tweede tak (na een
+geslaagde handtekening) kreeg een `action === "reject"`-branch die `finishReject()` aanroept,
+één-op-één naar het bestaande `action === "approve"`-patroon.
+
+**Eén echt nieuw stukje state nodig, en dat is meteen de reden dat dit geen kopieerwerk kon
+zijn:** propose/approve/execute hebben na de volledige paginanavigatie van de deep-link-flow
+niets buiten `state` nodig om te weten WELK voorstel het betreft - approve/execute leiden dat
+af via `findCanonicalProposal()` (gekoppeld aan de huidige `BUFFER`-constante). Reject werkt
+bewust op een expliciet ingetypte index (sectie 104's motivatie: nooit per ongeluk het
+verkeerde voorstel). Die ingetypte waarde bestond alleen als een input-veld-string in de DOM,
+die de volledige paginanavigatie niet overleeft. Nieuw veld `queuedRejectTransactionIndex` in
+dezelfde `localStorage`-backed deep-link-state (`beginFreshDeeplinkConnect(queuedAction,
+queuedRejectTransactionIndex)`, tweede parameter), uitgelezen en doorgegeven aan
+`runRejectAction()` zodra de verse `connect`-respons terugkomt - zelfde plek en stijl als de
+bestaande `queuedAction`-dispatch.
+
+**Getest vóór gebruik:** JS-syntaxcheck (`node --check` op het geëxtraheerde modulescript)
+schoon, accolade-balans van beide inline `<script>`-blokken klopt.
+
+**Daarna echt bewezen tegen een fysiek toestel, niet alleen syntactisch.** De telefoon
+(`CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3`) gebruikte knop 5 via de Solflare-deep-link
+voor #12's tweede reject-stem - de eerste keer dat dit specifieke, nieuwe codepad
+daadwerkelijk gedraaid is. Rechtstreeks van de keten geverifieerd, niet aangenomen:
+signatuur `3ExM7naPMYs3CLo9mYHqQKmKxiGytN1LLJ7XABXUm572SxD43jbdaUWDDdTXdMnxPnn4wvPBvPqrZ8jBczZfZdDa`
+geland op slot 489366688 (2026-08-28T12:15:52Z), `err: null`, logregel bevestigt
+`Instruction: ProposalReject` tegen `SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf`. De
+proposal-PDA's eigen signature-geschiedenis toont 'm als derde, laatste entry (na de
+hoofd-pc-stem en de oorspronkelijke aanmaak) - geen inconsistentie tussen bronnen.
+
+**Voorstel #12: `status.__kind` rechtstreeks uitgelezen, niet afgeleid uit de lengte van de
+`rejected`-lijst - staat op `Rejected`** (`timestamp: 6a917bf8` hex, het moment van deze
+tweede stem). `rejected: [hoofd-pc, telefoon]`, `approved: []`, `cancelled: []`. Cutoff
+(sectie 104: 2 van 3, uit de programmacode zelf) is daarmee bereikt - #12 is een
+afgesloten, definitief niet-uitvoerbaar voorstel. Deep-link-reject is hiermee niet alleen
+syntactisch schoon maar functioneel bewezen, aan weerszijden van de flow (aanmaken via
+`beginFreshDeeplinkConnect("reject", ...)` én afronden via `finishReject()` na de
+paginanavigatie terug).
+
+## 106. Vercel-opschoning: active-defense verwijderd, desktop se oude previews opgeruimd, branch bewust ongemoeid - en een correctie op waar dit onderzoek hoorde
+
+**Correctie vooraf, belangrijk voor toekomstig zoeken:** dit werk werd meermaals "sectie 102
+(Vercel-oppervlak)" genoemd tijdens de opdracht. **Sectie 102 gaat nergens over Vercel** - dat
+is de Solana Transaction v1-inventarisatie (zie boven). Grondig nagezocht, met zekerheid, niet
+aangenomen: STATUS.md (dit bestand, volledige geschiedenis, alle branches, alle
+`refs/claude/checkpoint-*`-snapshots) bevat vóór deze sectie **nul** treffers voor "Vercel",
+"Root Directory", "desktop-gray-sigma" of "gedeployde bundel". Ook de aparte, echte
+`active-defense`-repo (`/home/michel/projects/active-defense`) se eigen STATUS.md heeft nul
+Vercel-treffers in zijn volledige geschiedenis. De eerder aangehaalde bevindingen ("Root
+Directory bevestigd op desktop", het auto-deploy-advies) zijn dus **nooit ergens vastgelegd**
+geweest - geen zoekfout, geen overschreven sectie, een echt, nieuw geconstateerd
+documentatiegat. Deze sectie is de eerste keer dat dit onderwerp hier staat.
+
+### Aanleiding: drie taken, allemaal ingehaald door wat het onderzoek zelf blootlegde
+
+Oorspronkelijk gevraagd: (1) het per ongeluk aangemaakte Vercel-project "active-defense"
+(`prj_MQHJv1vdcZP0PB5WtATODtPQ82ds`) volledig verwijderen, (2) de `active-defense-phase1`-
+branch loskoppelen van het "desktop"-Vercel-project, (3) de Root Directory-vraag en het
+auto-deploy-advies vastleggen. Geen van de drie kon zonder meer worden uitgevoerd zoals
+gevraagd - elke stap veranderde het beeld.
+
+### MCP-OAuth-scope: bedoeld gedrag, geen bug - vastgesteld, niet aangenomen
+
+De eerst gekoppelde Vercel-MCP-integratie (`plugin:vercel:vercel`) zag via `list_projects`/
+`get_project` slechts **één** project ("active-defense"), team-breed, ongeacht hoe vaak of op
+welke manier bevraagd (project-ID, projectslug, teamslug - allemaal hetzelfde resultaat,
+reproduceerbaar over meerdere aanroepen). Eerst onderzocht als mogelijke paginering-bug: de
+tool-schema van `list_projects` heeft geen limit/cursor-parameter, dus dat kan het niet zijn.
+**Gevonden verklaring, met bronvermelding, geen gok:** Vercel's eigen documentatie
+(`search_vercel_documentation`, "Example: Register and Install App with Project Scoping")
+beschrijft expliciet dat een OAuth-app bij installatie beperkt kan worden tot specifieke
+projecten (`vercel oauth-apps install --projects prj_a,prj_b`), los van teamlidmaatschap. Dat
+verklaart het symptoom volledig: deze specifieke MCP-koppeling was vermoedelijk destijds
+alleen voor "active-defense" geautoriseerd. **Besluit over toekomstig gebruik:** de MCP-
+verbinding blijft bestaan (nuttig voor read-only werk binnen zijn scope - docs-zoeken,
+runtime-logs/analytics op projecten waar hij wél bij kan), maar wordt niet langer als
+primaire route voor projectbeheer beschouwd. **De Vercel CLI (`vercel`, geïnstalleerd via
+`npm install -g vercel@latest`, ingelogd als `anoadder-1369`/`anoadder@gmail.com` via
+`vercel login` - apart bevestigd met `vercel whoami` vóór enige actie) is voortaan de
+standaardroute voor Vercel-projectbeheer in dit project**, omdat die aantoonbaar wél volledige
+teamtoegang heeft (`vercel project ls` toonde meteen alle 6 projecten: active-defense,
+desktop, cool, noahai-69fa013bab03d928cd773611, noahai-6a0a01ff89dd94ab44ed385c,
+anoadder-ship-it-cool).
+
+### De testfixture-deploy-coïncidentie: onderzocht, geen actief gebruik
+
+Voordat "active-defense" verwijderd werd, eerst gecontroleerd of de recentste productie-
+deployment (commit-boodschap "test: spankwallet testfixture - wegwerp-deploy voor
+test-isolatie") een teken was van actief, bewust Vercel-gebruik door een andere sessie.
+`/home/michel/projects/active-defense/STATUS.md` sectie 5 bevestigt dat dit testfixture-
+patroon echt bestaat - maar volledig on-chain (`solana program deploy` van een throwaway-
+Solana-programma), **zonder enige relatie tot Vercel**. Rechtstreeks bij Vercel nagevraagd
+(`list_deployments`): dit project had **precies één deployment, ooit**, aangemaakt 2,1
+seconden na het project zelf (`meta.importSource: "import-suggestions"` - Vercel's eigen
+automatische importsuggestie-flow). Geen enkele deployment sindsdien, ondanks vermoedelijk
+meerdere latere commits op de gekoppelde repo se `main`. De commit-boodschap-overeenkomst is
+dus toeval (de eenmalige, automatische import ving toevallig de destijds nieuwste commit op),
+geen bewijs van gebruik. **Conclusie: verwijderen bleef terecht.**
+
+### Taak 1: active-defense verwijderd - geverifieerd, niet aangenomen
+
+`vercel remove active-defense --scope anoadder-1369s-projects --yes` → "Success! Removed 1
+project". Achteraf, onafhankelijk bevestigd:
+- `vercel project ls` (na verwijdering): "active-defense" komt niet meer voor (5 van de
+  oorspronkelijke 6 projecten resteren).
+- `curl -i https://active-defense.vercel.app`: **HTTP 404**, header
+  `x-vercel-error: DEPLOYMENT_NOT_FOUND`, body "The deployment could not be found on Vercel."
+  (DNS zelf resolvet nog wél - `*.vercel.app` is een gedeeld wildcard-domein van het hele
+  platform, dat resolvet voor elke subdomeinnaam ongeacht of er een project achter zit; de
+  betekenisvolle test is de HTTP-response, niet DNS-resolutie op zich).
+
+### Taak 2: geherformuleerd op basis van wat het onderzoek blootlegde - gedeeltelijk uitgevoerd
+
+**Eerste blokkade, gevonden vóór enige actie:** Vercel's data-model kent geen "koppel deze ene
+branch los"-functie. `vercel git connect/disconnect` (CLI en de onderliggende REST-API,
+rechtstreeks nagevraagd met het door de CLI-login opgeslagen bearer-token) werkt uitsluitend
+op de VOLLEDIGE repo-koppeling van een project, nooit op een individuele branch. Het
+"desktop"-project bleek bovendien, tegen eerdere twijfel in, **correct en met opzet**
+geconfigureerd: `link.type=github`, `repo=spankwallet`, `productionBranch=main`,
+`rootDirectory=desktop` - dit deployt doelbewust alleen de `desktop/`-submap van dít
+spankwallet-repo. **Root Directory-vraag hiermee afgesloten: geen aanpassing nodig.** Geen
+`client/`-project bestaat, dus ook geen risico op dezelfde-project-verwarring waar de vraag
+zich zorgen over maakte.
+
+**Tweede, zwaardere blokkade:** `active-defense-phase1` bleek, rechtstreeks gecontroleerd
+(`git worktree list`), op het moment van onderzoek **live uitgecheckt** in
+`/home/michel/projects/spankwallet-active-defense`, met een **ongepushte** WIP-commit
+(`38f9a2b`, "pre-relocation checkpoint", 2026-08-26) bovenop wat op `origin` staat
+(`f2face6`) - 3 commits nooit gemerged in `main`. Een git-branchverwijdering (lokaal of op
+GitHub) zou dat ongepushte werk kunnen weeshuizen. **Branch bewust NIET aangeraakt, op
+uitdrukkelijk verzoek, totdat expliciet bevestigd is dat die worktree niet meer in gebruik is.**
+
+**Open vraag - inmiddels beantwoord en uitgevoerd, in een latere sessie na expliciete
+verificatie.** Vóórdat de branch aangeraakt werd, eerst apart, met niets verwijderd,
+gecontroleerd of `38f9a2b` se inhoud daadwerkelijk in de nieuwe `active-defense`-repo
+terechtgekomen was - bestand voor bestand, niet op commit-boodschap:
+
+- Alle 8 inhoudelijke bestanden uit `38f9a2b` (`errors.rs`, `state.rs`, `instructions.rs`,
+  `lib.rs`, `tests/activeDefense.ts`, `tests/activeDefenseFull.ts`, `test-transfer-hook.js`,
+  `test-verify.js`) sha256-vergeleken tegen zowel de allereerste commit van de nieuwe repo
+  (`d33e4b2`, "Initial commit: active-defense, extracted from spankwallet") als de toenmalige
+  HEAD. Elk verschil dat gevonden werd was uitsluitend de programma-ID-constante (verwacht bij
+  een relocatie) of, voor `instructions.rs`, uitsluitend additief CHECK-documentatiecommentaar
+  uit een latere, aparte commit (`b8218b3`) - geen enkele regel inhoudelijk verloren.
+- De worktree zelf: `git status --ignored` toonde "nothing to commit, working tree clean",
+  geen stash-entries - het enige niet-getrackte bestand was het bewust-gitignored
+  `active-defense-keypair-new.json` (private key), waarvan een hash-identieke kopie al bestond
+  in `~/backups/spankwallet-active-defense-safety-20260826T210404Z/worktree-copy/`.
+- Bonus: diezelfde backupmap bevatte een git-bundle (`active-defense-phase1.bundle`) met de
+  volledige branchgeschiedenis - geverifieerd (`git bundle verify` + proefkloon) dat `38f9a2b`
+  zelf daar geldig in zit.
+
+Niets onbevestigd gevonden op enig punt - pas daarna, met expliciet akkoord, uitgevoerd:
+1. `git worktree remove /home/michel/projects/spankwallet-active-defense` - slaagde zonder
+   `--force` (bevestigt onafhankelijk dat de worktree echt schoon was).
+2. `git branch -D active-defense-phase1` in de hoofdrepo - `-d` (veilige variant) weigerde
+   eerst terecht ("not fully merged", want de branch werd nooit in `main` gemerged, zijn
+   inhoud werd verplaatst naar een aparte repo) - `-D` gebruikt omdat de veiligheid al apart,
+   handmatig geverifieerd was, precies het scenario waarvoor die vlag bestaat.
+3. `git push origin --delete active-defense-phase1` - GitHub bevestigde `[deleted]
+   active-defense-phase1`; `git ls-remote origin` en `git branch -a` na `fetch --prune` tonen
+   'm nergens meer.
+
+Mijn eerdere theorie ("ontkoppelen = branch op GitHub verwijderen, geen Vercel-actie") bleek
+dus wel de juiste interpretatie voor wat feitelijk uitgevoerd is - bevestigd doordat dit
+precies is wat gevraagd en gedaan werd, niet doordat de oorspronkelijke dashboard-UI ooit
+apart is nagekeken; dat laatste blijft strikt genomen ongetoetst.
+
+**Wat wél veilig en onafhankelijk van de branch-status was, en is uitgevoerd:** de oude
+preview-deployments van `active-defense-phase1` onder "desktop" opruimen - dat wist geen
+branch, geen git-koppeling, geen productie. Eerst precies geteld via de REST-API (niet
+aangenomen op basis van de eerdere, afgekapte CLI-lijstweergave die "~17" deed vermoeden):
+**35** preview-deployments met `meta.githubCommitRef == "active-defense-phase1"`, apart van
+**5** deployments met `ref == "main"` (waaronder de huidige productie). Verwijderd via
+`vercel remove <35 deployment-ID's> --safe --yes`: **34 verwijderd, 1 bewust overgeslagen**
+door de `--safe`-vlag (die deployment, `dpl_G72M2WJuDDAkusm87UpZX7zwDmxL`, draagt nog de
+branch-alias `desktop-git-active-defense-phase1-anoadder-1369s-projects.vercel.app` - `--safe`
+weigert terecht iets met een actieve alias te verwijderen). Achteraf geverifieerd, niet
+aangenomen:
+- REST-API-telling na opruimen: 6 deployments resteren voor dit project - exact de 5
+  `main`-deployments plus de ene bewust overgeslagen `active-defense-phase1`-deployment.
+- **Productiedeployment `dpl_9GDZvDSW8LGD4CvP1BSSk8hNRAEY` (commit `eb7091a3f54d93eb...`,
+  `githubCommitRef: main`) ongemoeid:** `readyState: READY`, `target: production`, en
+  `https://desktop-gray-sigma.vercel.app` geeft **HTTP 200**.
+
+### Eindstand
+
+Taak 1: **voltooid en geverifieerd.** Taak 2: **volledig afgerond, in twee stappen** - eerst
+34 van 35 oude previews opgeruimd (de 35e bewust bewaard, hield de branch-alias vast totdat de
+branch zelf verdween), branch en worktree in een latere sessie alsnog verwijderd na expliciete,
+bestand-voor-bestand-verificatie dat er niets verloren ging (zie hierboven). Taak 3 (Root
+Directory-vraag): **afgesloten** - `desktop/` is correct en met opzet, geen wijziging nodig.
+Auto-deploy-op-elke-push-advies: niet apart uitgezocht in deze sessie (geen eerdere vastlegging
+gevonden om op voort te bouwen, zie de correctie bovenaan) - te behandelen in een latere sessie
+als dat nog relevant is.

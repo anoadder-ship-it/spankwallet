@@ -334,16 +334,33 @@ impl SessionKeyAccount {
 
 /// B3 (STATUS.md sectie 76, statische-audit-bevinding A3): maximale duur
 /// (in slots) tussen `add_session_key`'s huidige slot en de gevraagde
-/// expiry_slot. ~7 dagen bij Solana's nominale 400ms-slottijd
-/// (1_512_000 * 0.4s = 604_800s = 7 dagen). Zonder deze grens zou B2's
-/// epoch-mechanisme het enige verschil zijn tussen "een gecompromitteerde
-/// sessiesleutel is achteraf intrekbaar" (via finalize_recovery of
-/// remove_session_key) en "een sessiesleutel kan structureel niet meer
-/// worden dichtgeplant" (een sessie die tientallen jaren geldig blijft,
-/// buiten elk redelijk hersteltraject om, als de eigenaar de recovery-
-/// route nooit gebruikt of pas laat ontdekt dat er een gecompromitteerde
-/// sessie actief is). Een harde bovengrens dwingt af dat elke sessie
-/// vroeg of laat vanzelf verloopt, ongeacht of iemand ooit ingrijpt.
+/// expiry_slot. Dit getal is een SLOTAANTAL, geen tijdsduur - de grens werkt
+/// hoe dan ook correct (een sessie loopt onvoorwaardelijk af na exact dit
+/// aantal slots), ongeacht hoe snel het netwerk die slots daadwerkelijk
+/// produceert. **~7 dagen was nooit een garantie, alleen een schatting op
+/// basis van Solana's toenmalige "nominale" 400ms/slot** - STATUS.md sectie
+/// 103 heeft dit empirisch gecorrigeerd (`scripts/measureSlotDuration.ts`,
+/// directe getBlockTime-meting, geen aanname): op 2026-08-28 mat mainnet-beta
+/// ~366ms/slot en devnet ~166ms/slot, geen van beide 400ms. Bij de huidige
+/// mainnet-slottijd is 1_512_000 slots ~6,4 dagen, niet 7 - en dat getal
+/// verandert opnieuw mee met toekomstige protocolwijzigingen (bijv. de door
+/// Helius genoemde overgang naar 300ms-slots). Elke "~N dagen"-vermelding in
+/// documentatie/UI moet dus als een op dit moment geldige schatting gelezen
+/// worden, nooit als een vaste belofte - zie ook `client/src/slotDuration.ts`
+/// se `estimateSlotMs()`, die om dezelfde reden live meet i.p.v. hardcodeert.
+/// Zonder deze grens zou B2's epoch-mechanisme het enige verschil zijn tussen
+/// "een gecompromitteerde sessiesleutel is achteraf intrekbaar" (via
+/// finalize_recovery of remove_session_key) en "een sessiesleutel kan
+/// structureel niet meer worden dichtgeplant" (een sessie die tientallen
+/// jaren geldig blijft, buiten elk redelijk hersteltraject om, als de
+/// eigenaar de recovery-route nooit gebruikt of pas laat ontdekt dat er een
+/// gecompromitteerde sessie actief is). Een harde bovengrens dwingt af dat
+/// elke sessie vroeg of laat vanzelf verloopt, ongeacht of iemand ooit
+/// ingrijpt. **Bewust NIET aangepast als reactie op de 300ms-overgang:** dit
+/// is een programma-layoutconstante, geen UI-schatting - wijzigen vereist een
+/// nieuwe worst-case-analyse en een programma-upgrade voor iets dat geen
+/// veiligheidsgat is (de slot-gebonden grens werkt hoe dan ook correct); zie
+/// STATUS.md sectie 103 voor de volledige afweging.
 pub const MAX_SESSION_DURATION_SLOTS: u64 = 1_512_000;
 
 #[cfg(test)]

@@ -54,6 +54,11 @@ const options = {
 // directory-wildcard (die zou de hele allowlist-redenering ondermijnen).
 const ALLOWED_FILES = {
   "wallet-signer.html": { file: "wallet-signer.html", contentType: "text/html" },
+  // STATUS.md sectie 107/109: de Helius-sleutel staat hier apart, niet
+  // meer hardcoded in wallet-signer.html - zie config.js voor waarom dit
+  // bestand bewust WEL gecommit en WEL in deze allowlist staat (geen
+  // echte secret, een verse kloon moet zonder extra stap werken).
+  "config.js": { file: "config.js", contentType: "text/javascript" },
   "vendor/web3.mjs": { file: "vendor/web3.mjs", contentType: "text/javascript" },
   "vendor/multisig.mjs": { file: "vendor/multisig.mjs", contentType: "text/javascript" },
   "vendor/wallet-standard-app.mjs": { file: "vendor/wallet-standard-app.mjs", contentType: "text/javascript" },

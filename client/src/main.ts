@@ -89,7 +89,17 @@ let lastCredentialId2: Uint8Array | null = null;
 let lastSessionKeypair: Keypair | null = null;
 let lastSessionExpirySlot: bigint | null = null;
 
-const connection = new Connection("https://devnet.helius-rpc.com/?api-key=f39fc413-6730-4848-a60f-a6685a6f04d3", "confirmed");
+// STATUS.md sectie 107/109: was hardcoded op drie plekken (hier,
+// admin/wallet-signer.html, desktop/src-tauri/src/rpc.rs) - nu een
+// env-var, uitsluitend zodat rotatie ooit één regel is i.p.v. drie
+// bestanden. GEEN echte secret-hantering: dit is een gratis, devnet-only
+// Helius-sleutel (bevestigd in sectie 107 punt 5) - de hardcoded waarde
+// hieronder is bewust de terugvaloptie, niet een placeholder, zodat een
+// verse kloon zonder enige configuratiestap blijft werken. Eigen sleutel
+// zetten: client/.env.local (Vite laadt dit automatisch, .gitignored) met
+// VITE_HELIUS_API_KEY=<sleutel>.
+const HELIUS_API_KEY = import.meta.env.VITE_HELIUS_API_KEY ?? "f39fc413-6730-4848-a60f-a6685a6f04d3";
+const connection = new Connection(`https://devnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, "confirmed");
 
 async function runStep1(): Promise<void> {
   log("Stap 1: passkey aanmaken via navigator.credentials.create()...");

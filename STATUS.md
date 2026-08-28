@@ -9746,3 +9746,71 @@ uitsluitend de beoordeling, zoals aangeleverd en besloten.
 geen nieuwe bevindingen die iets breken. Geen Kani/Trident-uitbreidingsronde nu (weken werk,
 verdient een eigen ongestoorde sessie, en er lopen al meerdere andere taken parallel).
 Alpenglow vastgelegd als toekomstig aandachtspunt, geen ronde nu.
+
+## 109. Helius-sleutel verplaatst naar env var op alle drie de plekken (vervolg op sectie 107 punt 5)
+
+Gevraagd: de hardcoded Helius-devnet-sleutel (`f39fc413-6730-4848-a60f-a6685a6f04d3`) op de
+drie plekken waar hij letterlijk stond (`admin/wallet-signer.html`,
+`desktop/src-tauri/src/rpc.rs`, `client/src/main.ts`) verplaatsen naar een env var, per
+omgeving het idiomatische mechanisme, met een sane default zodat een verse kloon zonder
+configuratiestap blijft werken. **Nogmaals expliciet: geen echte secret-hantering** - dit is
+en blijft een gratis, devnet-only Helius-account (sectie 107 punt 5) - het enige doel is dat
+rotatie ooit één regel wordt i.p.v. drie bestanden.
+
+### client/src/main.ts - Vite `import.meta.env`
+
+`HELIUS_API_KEY = import.meta.env.VITE_HELIUS_API_KEY ?? "f39fc413-..."` - de hardcoded
+waarde blijft letterlijk in de broncode staan als terugvaloptie, geen los `.env`-bestand
+nodig om te committen. Eigen sleutel zetten kan via `client/.env.local` (Vite laadt dit
+automatisch), nu toegevoegd aan `.gitignore` (samen met `client/.env`, voor als iemand toch
+voor die vorm kiest). Ontbrak: `client/src/vite-env.d.ts` (Vite's eigen standaard
+type-declaratiebestand) - zonder dat gooide `tsc --noEmit` een fout
+("Property 'env' does not exist on type 'ImportMeta'"), want dit project had 'm nooit nodig
+gehad tot nu. Toegevoegd, met een expliciet getypeerd `VITE_HELIUS_API_KEY?: string`.
+
+### admin/wallet-signer.html - `config.js`, geen `.env`/build-stap
+
+Eerst vastgesteld, niet aangenomen: er bestaat nog steeds geen build-stap om
+`wallet-signer.html` zelf te GEBRUIKEN (de esm.sh-vendoring uit sectie 107/109 punt 1 was
+een eenmalige, losstaande esbuild-aanroep om de vendor-bundels te PRODUCEREN - de HTML-pagina
+zelf wordt nog altijd rechtstreeks door `https-server.js` geserveerd, ongewijzigd). Een
+Vite-achtige env-var-aanpak past hier dus niet. Gekozen: een apart `admin/config.js`
+(`export const HELIUS_API_KEY = "..."`), lokaal geïmporteerd door `wallet-signer.html`
+(`import { HELIUS_API_KEY } from "./config.js"`) - zelfde stijl als de al-bestaande
+vendor-imports. **Bewust WEL gecommit, niet gitignored** (in tegenstelling tot wat sectie 107
+oorspronkelijk als optie noemde) - de sleutel is geen geheim, dus een verse kloon moet zonder
+extra stap werken; mocht dit ooit een echte secret worden, hoort dit bestand alsnog naar
+`.gitignore` verplaatst te worden, met een los, ongecommit exemplaar per signer-apparaat -
+vandaag niet nodig, expliciet zo gedocumenteerd in het bestand zelf. `https-server.js` se
+allowlist uitgebreid met `config.js` (zelfde exact-bij-naam-discipline als de vendor-bestanden).
+
+### desktop/src-tauri/src/rpc.rs - Rust `option_env!`, build-time
+
+`HELIUS_API_KEY: &str = match option_env!("HELIUS_API_KEY") { Some(key) => key, None =>
+"f39fc413-..." }` - Rust's build-time-equivalent van Vite's `import.meta.env`: compile-time
+opgelost (`option_env!` is een macro, geen runtime-bestandslezing), met precies dezelfde
+fallback-bij-afwezigheid-eigenschap. `devnet_rpc_url()` bouwt de volledige URL op uit deze
+constante; `DEVNET_RPC_URL` (voorheen een losse `&str`-constante) bestaat niet meer als
+zodanig - was nergens anders in de crate rechtstreeks gebruikt (gecontroleerd, niet
+aangenomen), dus geen ander bestand hoefde aangepast.
+
+### Getest, alle drie de paden, met bewijs
+
+- **desktop:** `cargo check` schoon. Mechanisme apart, geïsoleerd bewezen (los `rustc`-
+  bestand met exact dezelfde `option_env!`-constructie): zonder env var → terugvaloptie;
+  met `HELIUS_API_KEY=<test> rustc ...` → de override, empirisch beide kanten bevestigd, niet
+  aangenomen. Nieuwe test `rpc::tests::rpc_client_reaches_real_devnet` toegevoegd (roept
+  `rpc_client().get_slot()` aan tegen ECHTE devnet-infrastructuur, geen mock - past bij hoe
+  dit project consequent test) - slaagt. Volledige bestaande testsuite (9 tests) blijft groen.
+- **client:** `tsc --noEmit` schoon. `vite build` tweemaal uitgevoerd: zonder
+  `VITE_HELIUS_API_KEY` bevat de gebouwde bundel de terugvalsleutel (1 treffer); mét
+  `VITE_HELIUS_API_KEY=mijn-geroteerde-testsleutel-xyz` bevat de bundel UITSLUITEND de
+  override-waarde en NUL keer de oude terugvalsleutel - Vite/esbuild elimineert de
+  ongebruikte tak volledig. `vite`-devserver ook gestart en bevraagd (HTTP 200, broncode
+  toont de juiste `?? "f39fc413-..."`-constructie).
+- **admin:** volledige paginalading in een echte Chrome/Playwright-sessie tegen de
+  herstarte server - `config.js` (HTTP 200) en `wallet-signer.html` laden beide, "alle
+  imports geslaagd" verschijnt. Sleutel-inhoud van `config.js` rechtstreeks met `curl`
+  opgehaald en gecontroleerd, én een ECHTE `getSlot`-RPC-aanroep gedaan met exact die
+  sleutel tegen `devnet.helius-rpc.com` - geslaagd (`result: 489467160`), bevestigt dat de
+  sleutel na de verplaatsing nog steeds werkt, niet alleen dat de code compileert.

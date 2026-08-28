@@ -7,3 +7,12 @@ test-ledger/
 .xray/
 admin/*.pem
 *-keypair.json
+
+# STATUS.md sectie 107/109: persoonlijke env-var-overrides (bijv. een
+# geroteerde Helius-sleutel) - de committed default blijft wél gewoon
+# staan (geen echt geheim, zie daar; admin/config.js is bewust NIET
+# gitignored, exact om diezelfde reden - een verse kloon moet zonder
+# extra stap werken). Dit is puur voor wie lokaal iets anders wil zetten
+# zonder dat per ongeluk te committen.
+client/.env
+client/.env.local

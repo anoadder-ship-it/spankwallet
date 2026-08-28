@@ -96,7 +96,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-08-23T18:37:03Z-timeout-meldt-nu-echte-ketenstatus-niet-schijnbare-mislukking";
+      var PAGE_BUILD = "2026-08-28T18:45:00Z-helius-sleutel-verplaatst-naar-config-js";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -109,6 +109,8 @@
     </script>
 
     <script type="module">
+      import { HELIUS_API_KEY } from "./config.js";
+
       function log(msg, cls) {
         const el = document.getElementById("output");
         const line = document.createElement("div");
@@ -209,8 +211,7 @@
 
       log("[debug] alle imports geslaagd - pagina is klaar.", "log-debug");
 
-      const DEVNET_URL =
-        "https://devnet.helius-rpc.com/?api-key=f39fc413-6730-4848-a60f-a6685a6f04d3";
+      const DEVNET_URL = "https://devnet.helius-rpc.com/?api-key=" + HELIUS_API_KEY;
 
       const SPANKWALLET_PROGRAM_ID = new PublicKey("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
       const SPANKWALLET_PROGRAM_DATA = new PublicKey("5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq");

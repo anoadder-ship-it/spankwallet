@@ -8707,3 +8707,390 @@ regel, geheim-in-localStorage, klopt nog steeds; het risico is nu alleen drastis
 verkleind, niet weggenomen). `localStorage` blijft nodig ondanks de kortere levensduur -
 MIUI/HyperOS killt `sessionStorage` bij een app-switch, en elke connect-dan-onderteken-
 cyclus IS zo'n app-switch, ook al duurt hij nu maar minuten.
+
+## 102. Inventarisatie: Solana Transaction v1 (lokaal testbaar, testnet eind augustus 2026, mainnet enkele weken later) - vijf deelvragen, niets gebouwd
+
+Gevraagd: in kaart brengen wat v1's twee brekende wijzigingen (RPC-leescompatibiliteit,
+compute-budget-verhuizing) in deze repo raken, de SDK-situatie tegen de gepubliceerde
+v1-minimumversies leggen, de nieuwe 4096-byte-transactiegrens tegen een echte meting
+afzetten, en LiteSVM 0.16 beoordelen als testaanvulling. **Niets van onderstaande is
+gebouwd of gewijzigd** - de enige tijdelijke actie was een niet-gecommit, inmiddels weer
+verwijderd meetscript (`scripts/tmpMeasureTxSize.ts`) om deel d) tegen een echte
+transactie te meten in plaats van te schatten, zoals gevraagd.
+
+### a) getTransaction/getBlock/blockSubscribe - precies twee bestanden, vier plekken, allebei al op 0
+
+Volledige repo doorzocht (`.ts`/`.js`/`.html`/`.rs`, client/admin/desktop/scripts/tests,
+`node_modules`/`target` uitgesloten) op `getTransaction`, `getBlock`, `blockSubscribe` en
+`maxSupportedTransactionVersion`:
+
+- **`tests/hunt.ts:358` en `:364`, `tests/transferToken.ts:349` en `:355`** - vier
+  daadwerkelijke `provider.connection.getTransaction(signature, { commitment: "confirmed",
+  maxSupportedTransactionVersion: 0 })`-aanroepen, telkens in een korte pollus (tot 20x100ms)
+  die een `null`/ontbrekende `meta` interpreteert als "nog niet gepropageerd" en blijft
+  herhalen. **Precies de plek die vanmiddag nog in voorstel #11's verificatie langskwam**
+  (klopt met de vraag) - beide bevestigen de post-hunt/post-transfer lamport-balans uit de
+  transactie zelf, hetzelfde bewijspatroon als sectie 17/91.
+- **`admin/wallet-signer.html`** - GEEN daadwerkelijke `getTransaction()`/`getBlock()`-aanroep
+  in de code zelf. De enige RPC-lezing in het polling-pad is `getSignatureStatuses`
+  (`wallet-signer.html:473`), die geen transactie-/blokinhoud parseert en dus niet door
+  `maxSupportedTransactionVersion` geraakt wordt. Regel 457's commentaar verwijst naar een
+  HANDMATIGE, ad-hoc `getTransaction`-controle tegen devnet tijdens het debuggen van sectie
+  91 - geen code, dus niets om hier te repareren, maar een gewoonte om aan te denken als hij
+  ooit weer code wordt. `getTransactionPda` (regel 666) is een Squads-SDK-PDA-helper, geen
+  RPC-methode - naamsovereenkomst, geen relatie.
+- **`scripts/checkProposalTimelock.ts`, `tests/webauthnTestHelper.ts`** - gebruiken uitsluitend
+  `getBlockTime(slot)` (een enkel `i64`-getal, geen transactie-/blokinhoud) - niet geraakt.
+- **Desktop (Rust, `solana-rpc-client`)** - nul treffers voor een `get_transaction`/`get_block`-
+  equivalent. Bevestigt wat sectie 100 al vaststelde bij de vorige verificatie: de daadwerkelijk
+  aangeroepen methoden zijn uitsluitend `get_latest_blockhash()` en `get_balance()`. Het
+  desktop-RPC-pad heeft dus VANDAAG geen enkele blootstelling aan de leeskant van v1.
+- **Client (`client/src/`), overige scripts** - nul treffers.
+
+**Wat er gebeurt zodra een v1-transactie in beeld komt:** de vier `maxSupportedTransactionVersion:
+0`-aanroepen zouden een v1-transactie NIET herkennen - web3.js retourneert dan geen bruikbare
+transactie (in de praktijk gedraagt zich dat identiek aan "nog niet gepropageerd" in deze
+specifieke pollussen, omdat beide code-paden hier een lege/onbruikbare respons als reden hebben
+om te blijven pollen). Na 20 pogingen gooien beide tests dus een misleidende
+"kon de transactie niet terugvinden"-fout - EXACT het sectie-91-patroon (een meetopstelling die
+liegt, niet het systeem) opnieuw, nu via een andere oorzaak. **Vandaag geen live risico** - geen
+enkel code-pad in deze repo bouwt zelf een v1-versioned message (zie c/d), dus deze vier plekken
+zien nooit een v1-transactie tenzij dat verandert. Wel een landmine die met exact 0 gedragsrisico
+nu al opgeruimd kan worden: `maxSupportedTransactionVersion: 1` accepteert v0/legacy net zo goed
+(strikt superset), dus optrekken van 0 naar 1 op deze vier plekken kost niets en sluit dit gat
+voorgoed, wanneer dat ook gebeurt - vandaag bewust NIET gedaan (niets bouwen was de opdracht).
+
+**Aanvulling, empirisch geverifieerd i.p.v. aangenomen (terechte correctie op de vorige versie
+van deze sectie - "kosteloos" stond er als veronderstelling, niet als vaststaand feit):**
+`getTransaction` tegen een echte, bekende devnet-transactiesignatuur uitgevoerd met beide
+waarden, en de volledige JSON-respons byte-voor-byte vergeleken. Gebruikt: de uitvoertransactie
+van voorstel #11 zelf (`YMC1bqbY1mdA7aYjkTejojTGZW5jT9xgxmA9hg1bMnE6NpdFwpR4VyRzAwZeXrvwkqQAW5M5JmVNrAEpWYWBpyz`,
+sectie 95) - een ECHTE, bevestigde `version: 0`-transactie op devnet, precies het geval waar
+`maxSupportedTransactionVersion` toe doet. `curl` tegen `api.devnet.solana.com` met
+`maxSupportedTransactionVersion: 0` en apart met `1`, beide antwoorden genormaliseerd
+(`python3 -m json.tool --sort-keys`) en met `diff` vergeleken: **`diff` toont nul verschil over
+de volledige 151-regelige respons** - identieke `meta`, identieke `transaction`-inhoud,
+identieke `version: 0`. De superset-claim is hiermee VASTGESTELD, niet langer verondersteld:
+optrekken van 0 naar 1 op de vier plekken hierboven verandert het antwoord voor een bestaande
+v0-transactie aantoonbaar niet. De wijziging zelf is nog steeds niet doorgevoerd (alleen de
+meting was gevraagd).
+
+### b) Compute-budget/prioriteitsfee - nul treffers, en waarom dat zowel goed als slecht nieuws is
+
+Volledige repo doorzocht op `ComputeBudget`, `computeUnitLimit`, `computeUnitPrice`,
+`setComputeUnitLimit`/`setComputeUnitPrice`, `priorityFee`/`priority_fee`, `microLamport`: **nul
+treffers**, overal (client, admin, desktop, scripts, tests, het programma zelf). Dit project zet
+en leest vandaag helemaal niets rond compute-budget of prioriteitsfees.
+
+**Goed nieuws:** het specifieke lekpatroon uit de vraag ("alles wat de ComputeBudget-instructie
+SCANT om limieten/fees af te leiden krijgt stilzwijgend nul terug") is hier niet van toepassing -
+er is niets dat scant, dus er is niets dat stil kan falen op die manier.
+
+**Slecht nieuws, en de eigenlijke blootstelling:** we vertrouwen vandaag volledig op legacy/v0's
+IMPLICIETE standaard (ca. 200.000 CU per instructie, geen expliciete limiet ooit gezet). v1 heeft
+géén standaard - een weggelaten `computeUnitLimit` wordt 0 en de transactie faalt DIRECT, niet
+gedegradeerd. Dat is op zich een LUIDE, niet een stille fout (beter dan de scan-gebaseerde
+stille-nul uit de vraag) - maar het betekent dat v1 hier geen drop-in kan zijn: de dag dat een
+v1-verstuurpad gebouwd wordt (zie c/d - vandaag bestaat dat pad nergens), moet dat pad vanaf de
+eerste regel een expliciete compute-unit-limiet zetten (idealiter simuleer-dan-zet), iets wat
+deze codebase nog nooit heeft hoeven doen.
+
+**Aanvulling: het daadwerkelijke CU-verbruik nu gemeten, niet langer ongemeten opengelaten.**
+Gebruikt: de echte, bestaande `execute_advanced`-transactie uit stap 9b van sectie 35's
+eerste end-to-end-devnettest (een echte secp256r1-precompile-verificatie gevolgd door een
+echte `System::Assign`-CPI),
+`Wp9hEAyrPTzjy1ePei2RfBiav6oBWZ9cGb7tugkAeN139aWQQkjPoD7DHSsCn9ppk4g3hpXCR1RLjQr1DrhJZk1`.
+Twee metingen, niet één:
+- **`getTransaction` (het HISTORISCHE, echt op de keten uitgevoerde resultaat):**
+  `meta.computeUnitsConsumed = 15.440`, `err: null` (succesvol), binnen een impliciete limiet
+  van `400.000 CU` (2 top-level instructies x 200.000 CU legacy-standaard - de logregel zelf
+  bevestigt dit: `"...consumed 15440 of 400000 compute units"`, en er staat geen
+  `ComputeBudget`-programma-aanroep in de logs, consistent met de "nul treffers"-bevinding
+  hierboven). **3,9% van de impliciete limiet gebruikt** voor deze ene, succesvolle,
+  minimale CPI (geen CPI-data, geen extra remaining accounts buiten het doelaccount zelf).
+- **`simulateTransaction` (zoals expliciet gevraagd), tegen dezelfde ruwe transactiebytes,
+  `sigVerify: false` + `replaceRecentBlockhash: true`:** faalt, `InstructionError: [1,
+  "ProgramFailedToComplete"]`, `"Error: memory allocation failed, out of memory"`,
+  `unitsConsumed: 2.211`. **Verwacht, geen meetfout:** deze instructie is al eerder (sectie
+  35) succesvol op de keten uitgevoerd - de `action_nonce` die er destijds bij hoorde is
+  sindsdien allang opgehoogd en het doelaccount is al eigendom van ons programma, dus een
+  kale replay tegen de HUIDIGE programstaat loopt vast op state die niet meer bij de
+  oorspronkelijke, allang-verbruikte handtekening past. Dat maakt de 2.211-CU-uitkomst
+  ONBRUIKBAAR als CU-meting (een gefaalde uitvoering stopt vroeg, dus zegt niets over een
+  volledige, geslaagde run) - de 15.440-CU-waarde hierboven, uit de daadwerkelijk geslaagde
+  historische uitvoering, is het bruikbare getal. Een verse, geldig ondertekende simulatie
+  tegen een van de 14 echte productiewallets is vanuit deze omgeving niet mogelijk (vereist
+  een echte hardware-passkey-handtekening, dezelfde beperking als sectie 101's
+  Solflare-mobiel-rondtrip).
+
+Antwoord op de eerder openstaande vraag: de HOOGTE van een toekomstige expliciete
+compute-unit-limiet is voor DEZE minimale CPI dus bekend (ruim onder 200.000 CU volstaat al -
+15.440 is zelfs onder de kleinst mogelijke legacy-per-instructie-standaard). **Niet met
+zekerheid vastgesteld blijft:** het CU-verbruik voor een duurdere CPI (bijv. een SPL-token-
+transfer via `execute_advanced`, of met meer remaining accounts dan dit ene doelaccount) is
+niet gemeten - 15.440 CU is een ondergrens voor het pad, geen bovengrens voor elke mogelijke
+`execute_advanced`-aanroep.
+
+### c) SDK-versies tegen de gepubliceerde v1-minima (@solana/kit 8.0.0, solana-*4.2.x, solders 0.29.0)
+
+- **`@solana/kit`**: niet gebruikt, nul treffers repo-breed. We zitten overal op
+  `@solana/web3.js` - root/`client/package.json`/`desktop/package.json` allemaal `^1.98.0`,
+  resolved (package-lock) **1.98.4**; `admin/wallet-signer.html` laadt dezelfde **1.98.4** los
+  via esm.sh. Eén consistente versie, dat is tenminste geen los eindje.
+- **Cruciale, zelf gemeten bevinding (zie ook d):** `@solana/web3.js@1.98.4`'s eigen
+  `MessageV0.serialize()` alloceert intern een VAST `new Uint8Array(PACKET_DATA_SIZE)`-buffer
+  (`node_modules/@solana/web3.js/src/message/v0.ts:288`), met `PACKET_DATA_SIZE = 1280 - 40 - 8 =
+  1232` hardcoded (`node_modules/@solana/web3.js/src/transaction/constants.ts:8) - empirisch
+  bevestigd: elke v0-boodschap boven 1232 bytes gooit een kale `RangeError: encoding overruns
+  Uint8Array`, ONGEACHT of het cluster v1 al ondersteunt. web3.js 1.98.4 kan dus letterlijk geen
+  enkele transactie construeren die groter is dan de OUDE grens, laat staan een v1-boodschap -
+  de 4096-byte-grens bestaat voor deze codebase pas zodra de clientbibliotheek zelf verandert.
+  Volgens de vraag is v1-ondersteuning in web3.js 3.x nog in ontwikkeling (aangenomen uit de
+  briefing, in deze sessie niet zelfstandig op de web3.js-eigen release-aantekeningen
+  geverifieerd) - `@solana/kit` is de aangewezen, AL op 8.0.0+ zittende opvolger, maar geen
+  versie-bump: een functionele API zonder `Connection`/`PublicKey`/`Transaction`-klassen, dus
+  een daadwerkelijke herschrijving van `client/src/wallet.ts` en `admin/wallet-signer.html`'s
+  transactie-bouwlaag, niet een `package.json`-regel.
+- **Rust (`desktop/src-tauri`)**: resolved (Cargo.lock) `solana-sdk 2.3.1`, `solana-rpc-client
+  2.3.13`, `solana-program 2.3.0` - twee majors onder de gepubliceerde v1-vloer van 4.2.x.
+- **Herziening van vanavonds inschatting, zoals gevraagd:** de omzeiling van `solana-client
+  4.2.1` (door naar `solana-rpc-client` over te stappen, dezelfde 2.x-lijn) loste een
+  transitieve `rustls-webpki`-CVE-eis op ZONDER een ongerelateerde major-upgrade te forceren -
+  die beslissing blijft correct VOOR DAT PROBLEEM: een ongeplande 2.x->4.2.x-sprong onder
+  CVE-tijdsdruk doorvoeren was onnodig risico. Wat wél verandert: dat werd tot vanavond
+  beschreven als "vermeden", een open-eindig uitstel. Met v1's tijdlijn nu bekend (lokaal
+  testbaar vandaag, testnet eind augustus 2026, mainnet enkele weken later) is de juiste
+  framing "uitgesteld met een echte, gedateerde trigger" - de 2.x->4.2.x-sprong komt sowieso
+  terug, nu gemotiveerd door een feature (v1) in plaats van door een transitieve dependency.
+  **Verandert dit de conclusie van vanavond?** Nee voor de CVE-fix zelf (nog steeds de juiste,
+  minimale ingreep), WEL voor de planning: een aparte, geplande `solana-sdk`/`solana-rpc-
+  client`-upgrade naar 4.2.x hoort nu als eigen werkitem op de lijst, niet als "ooit" - al is
+  er geen haast, want a) hierboven laat zien dat desktop vandaag helemaal niets van
+  transactie-/blokdata LEEST, dus geen live leesblootstelling wacht op deze upgrade.
+- **`solders 0.29.0`**: niet van toepassing - geen Python-component in deze repo (nul `.py`-
+  bestanden, geen `requirements.txt`/`pyproject.toml`), puur genoemd omdat de briefing het
+  vermeldde.
+- **Anchor**: Rust `anchor-lang`/`anchor-spl` resolved **1.1.2**, TS `@coral-xyz/anchor`
+  `^0.31.1`. **Niet met zekerheid vastgesteld:** of `anchor-lang 1.1.2`'s eigen
+  `solana-program`-versie-eis al 4.2.x toelaat of zelf eerst moet volgen - niet getest in
+  deze sessie, puur inventariserend.
+
+### d) Transactiegrootte: gemeten tegen een echte transactie, niet geschat
+
+Methode: de daadwerkelijke Anchor-IDL (`target/idl/spankwallet.json`) plus de bestaande
+testhelpers (`buildSecp256r1Instruction`/`buildExecuteAdvancedPayload`,
+`tests/webauthnTestHelper.ts`/`tests/policy.ts`) gebruikt om een ECHTE `execute_advanced`-
+instructie te bouwen, gecompileerd tot een v0-boodschap precies zoals productiecode dat doet
+(`client/src/wallet.ts`, `admin/wallet-signer.html` gebruiken beide `VersionedTransaction`/
+`TransactionMessage` - legacy `Transaction` komt alleen in test-/devscripts voor), en
+daadwerkelijk `.serialize()` aangeroepen. Geen netwerkaanroep nodig (offline compileerbaar met
+een dummy 32-byte blockhash) - het meetscript is na gebruik weer verwijderd.
+
+**Basiskosten (één passkey-handtekening):** de secp256r1-precompile-instructiedata zelf is
+**182 bytes** (64 handtekening + 33 gecomprimeerde publieke sleutel + 37 authenticatorData +
+14 offsets-header + 2 header); `clientDataJSON` (**144 bytes** in deze meting, WebAuthn-
+origin/type/challenge-JSON) reist apart mee als instructie-ARGUMENT, niet in de precompile-
+instructie zelf, maar telt evengoed mee in de totale transactiegrootte.
+
+**Vandaag (huidige 1232-bytegrens), gemeten:**
+- `execute_advanced` met 3 remaining accounts (het hoogste aantal dat de bestaande testsuite
+  ergens daadwerkelijk gebruikt) + 8 bytes CPI-data: **863 bytes** - 70% van 1232, **~370 bytes
+  (30%) marge**.
+- Schaling met CPI-instructiedata (3 remaining accounts vast): exact byte-voor-byte
+  (`256->1111`, `350->1205`, `400->1255`) - grens ligt bij **~377 bytes CPI-data** voordat 1232
+  overschreden wordt.
+- Schaling met remaining accounts (8 bytes CPI-data vast): exact **33 bytes per extra account**
+  (`11->1127`, `12->1160`, `13->1193`, `14->1226`, `15->1259`) - **~14 remaining accounts is
+  vandaag het praktische plafond** voor `execute_advanced` met één passkey en minimale
+  CPI-data. Ver boven wat bestaande tests gebruiken, maar een toekomstige
+  "sluit-veel-verlopen-accounts-in-één-keer"-achtige uitbreiding zou dit snel raken.
+- **Onverwachte, herbruikbare bevinding:** boven 1232 bytes gooit `VersionedTransaction.
+  serialize()` in deze web3.js-versie geen nette foutmelding - een kale `RangeError: encoding
+  overruns Uint8Array` diep uit een buffer-layout-dependency (zie c) - empirisch gereproduceerd
+  bij 15 remaining accounts (1259 bytes) en bij 400+ bytes CPI-data, geheel los van v1.
+
+**Wat de nieuwe 4096-bytegrens praktisch zou opleveren, ALS de SDK 'm kon bereiken:** ongeveer
+**~100 remaining accounts** (tegen ~14 vandaag) of **~10x meer CPI-instructiedata** (~3600 tegen
+~377 bytes) voor `execute_advanced` - reële ruimte voor gebundelde CPI's, grotere
+allowlisted-programma-payloads, of op termijn een tweede handtekening (bijv. een
+sessiesleutel-mede-ondertekening) zonder meteen tegen de grens te lopen. **Maar** (zie c): die
+ruimte is vandaag NERGENS bereikbaar vanuit deze codebase - niet omdat het cluster het nog niet
+toestaat, maar omdat `@solana/web3.js@1.98.4` zelf weigert iets boven 1232 bytes te
+serialiseren, ongeacht clusterversie. De 4096-bytegrens bestaat op de keten, niet (nog) in ons
+gereedschap.
+
+### e) LiteSVM 0.16 als testaanvulling - complement, geen vervanging
+
+Niet in gebruik in deze repo (nul treffers voor "litesvm"/"LiteSVM"). Extern geverifieerd (web-
+zoekopdracht, zie bronnen onderaan): `litesvm` heeft een officiële Node/TypeScript-binding
+(npm-pakket `litesvm`, in-process, native-gebonden) die de Clock en accountstate rechtstreeks
+kan muteren, naar willekeurige slots kan springen, blockhashes kan laten verlopen, en
+compute-budgetten kan zetten - plus een aparte `anchor-litesvm`-wrapper specifiek voor
+Anchor-projecten, precies het framework dat deze repo al gebruikt.
+
+**Waarom dit raakt aan sectie 99:** het arm-to-open-ontwerp (`arm_wallet`/`disarm_wallet`, een
+15-minuten `time_gate_unlock_until`-venster) heeft precies dit nodig om te testen zonder een
+echte 15 minuten te wachten. De enige vandaag beschikbare aanpak - `advanceClockToTarget`-stijl
+uit `tests/webauthnTestHelper.ts`, die de klok laat vorderen door herhaaldelijk ECHTE kleine
+transacties te sturen tot de on-chain klok de doeltijd passeert - kost letterlijk zo lang als de
+lokale validator nodig heeft om die slots te produceren (sectie 99's eigen klokdrift-meting
+moest daadwerkelijk 900 seconden wachten, om precies deze reden). LiteSVM's rechtstreekse
+klok-mutatie zou dat tot milliseconden terugbrengen.
+
+**Zit ook meteen de surfpool-problematiek uit de weg** (secties 76-79/91/97): `anchor test`
+kiest zonder `--validator legacy` altijd surfpool (de hardcoded CLI-default), en surfpool heeft
+een empirisch bevestigde fee-onderrapportagebug waar dit project al een aparte detector voor
+heeft (`tests/verifyValidatorType.ts`). LiteSVM is een volledig ander pad (een ingebedde
+SVM-runtime, geen los validatorproces, geen CLI-default, geen RPC-fee-laag om te wantrouwen) -
+nieuwe arm-to-open-tests op LiteSVM zouden surfpool helemaal niet hoeven aan te raken.
+
+**Complement, geen vervanging:** LiteSVM heeft geen eigen RPC-server - alles wat vandaag tegen
+`provider.connection` als een levend JSON-RPC-endpoint test (het overgrote deel van de
+bestaande suite, met name de Squads/multisig-uitvoerpaden) is geen kandidaat voor een
+volledige omzetting, alleen nieuwe, klok-/state-zware tests zoals arm-to-open zijn dat.
+
+**Kosten, niet met zekerheid vastgesteld in deze sessie:** een nieuwe, native (napi)
+toolchain-dependency (`litesvm` + `anchor-litesvm`) - napi-pakketten leveren doorgaans
+platform-specifieke prebuilt binaries, dus CI-/dev-machine-compatibiliteit moet gecontroleerd
+worden, niet aangenomen. LiteSVM's exacte Agave/`solana-program`-versiepin (de briefing noemt
+Agave 4.2 met v1-ondersteuning) is niet zelfstandig tegen LiteSVM's eigen release-aantekeningen
+geverifieerd - wel bevestigd: de klok-/accountstate-mutatie hierboven is bruikbaar voor
+arm-to-open ONGEACHT of v1-ondersteuning klopt, dat is een apart voordeel.
+
+### Wat niet met zekerheid is vastgesteld (expliciet, zoals gevraagd)
+
+1. Of `@solana/web3.js` zelf ooit v1-ondersteuning krijgt, of dat dit uitsluitend via
+   `@solana/kit`/een toekomstige 3.x-lijn komt - aangenomen uit de briefing, niet zelfstandig
+   tegen web3.js' eigen release-aantekeningen geverifieerd.
+2. Of `anchor-lang 1.1.2` (Rust) al verenigbaar is met `solana-program 4.2.x`, of zelf eerst
+   moet volgen.
+3. ~~Het daadwerkelijke compute-unit-verbruik van de secp256r1-precompile-verificatie +
+   `execute_advanced`-CPI-pad~~ - inmiddels gemeten (zie b, aanvulling): 15.440 CU voor de
+   minimale, historisch geslaagde `System::Assign`-CPI, 3,9% van de impliciete
+   400.000-CU-limiet. **Nog steeds niet vastgesteld:** het CU-verbruik voor een duurdere CPI
+   (meer remaining accounts, grotere CPI-data, bijv. een SPL-token-transfer) - 15.440 CU is een
+   ondergrens voor het pad, geen bovengrens.
+4. LiteSVM's exacte Agave-versiepin en de praktische beschikbaarheid van zijn native binaries
+   op deze ontwikkelmachine/CI - alleen de npm-pakketbeschrijving is geraadpleegd.
+5. Of het handmatige `getTransaction`-controlepatroon achter `wallet-signer.html:457`'s
+   commentaar zich elders, buiten getrackte code, herhaalt - onmogelijk vast te stellen vanuit
+   de repo alleen.
+6. Congestiescenario voor klokdrift (sectie 99's eigen openstaande vraag 3) - onveranderd
+   openstaand, niet dit keer opnieuw onderzocht.
+
+### Voorstel voor volgorde
+
+1. **Nu, bevestigd kosteloos (niet langer aangenomen):** de vier `maxSupportedTransactionVersion:
+   0` -> `1` in `tests/hunt.ts`/`tests/transferToken.ts` - empirisch geverifieerd tegen een
+   echte devnet-transactie (zie a) dat dit de respons niet verandert. Sluit een landmine die
+   er anders slapend blijft liggen tot de dag dat v1-versturen realiteit wordt.
+2. **Op korte termijn, onafhankelijk van v1's tijdlijn:** LiteSVM/`anchor-litesvm` evalueren
+   als testpad voor sectie 99's arm-to-open-ontwerp ZODRA dat daadwerkelijk gebouwd wordt -
+   nuttig vandaag al, los van of v1 ooit landt.
+3. **Middellange termijn, ingepland i.p.v. uitgesteld:** de desktop-`solana-sdk`/
+   `solana-rpc-client` 2.x->4.2.x-upgrade als eigen werkitem agenderen, nu met een echte
+   trigger (v1) - niet urgent zolang desktop niets van transactie-/blokdata leest (a).
+4. **Langste aanlooptijd, nog niet starten zonder besluit:** de client-SDK-vraag
+   (web3.js 1.98.4 -> `@solana/kit` of een toekomstige web3.js 3.x) is een herschrijving van
+   `client/src/wallet.ts`/`admin/wallet-signer.html`'s transactie-bouwlaag, afhankelijk van een
+   externe, nog niet vastgelegde keuze (welke SDK v1 en de grotere `PACKET_DATA_SIZE` het eerst
+   krijgt) - aanbevolen: volgen, niet vandaag al op één van de twee wedden.
+5. **Randvoorwaarde, geen actie nu:** elk toekomstig v1-verstuurpad (via kit of een latere
+   web3.js) moet vanaf de eerste regel een expliciete compute-unit-limiet zetten (b) - v1 kent
+   geen impliciete 200k-standaard, een weggelaten limiet is een directe, totale mislukking.
+
+**Bronnen (webzoekopdracht, ter ondersteuning van c/e - niet de enige basis, zie metingen
+hierboven):**
+- [Solana V1 Transaction Format: Local Testing Live, Mainnet Activation in Weeks](https://solanacompass.com/news/solana-v1-transactions-now-testable-locally-as-mainnet-activation-nears)
+- [Larger Transaction Sizes | Solana](https://solana.com/upgrades/larger-transaction-sizes)
+- [litesvm - npm](https://www.npmjs.com/package/litesvm)
+- [LiteSVM with Typescript | Blueshift](https://learn.blueshift.gg/en/courses/testing-with-litesvm/typescript)
+
+### Aanvulling (2026-08-28): tweede bron (Helius' Agave 4.2-migratiechecklist) naast gelegd - scherper op twee punten, verder bevestigend
+
+Tweede, gerichtere bron dan de eerste webzoekopdracht hierboven:
+[Agave 4.2 Migration Checklist (Helius)](https://www.helius.dev/blog/agave-4-2-migration-checklist),
+die zelf naar een los "agent skill"-bestand verwijst (`.claude/skills/agave-42-readiness/
+SKILL.md`). **Die skill is NIET geïnstalleerd in deze ronde:** de aangeleverde tekst in de
+vraag bevatte een niet-ingevulde placeholder in plaats van de daadwerkelijke inhoud, en
+`WebFetch` op de Helius-pagina levert zelf ook geen byte-exacte brontekst (een AI-samenvatting
+van de pagina, geen letterlijke kopie) - een skill-bestand reconstrueren uit een samenvatting
+en het als "letterlijk overgenomen" behandelen zou zelf een vorm van verzinnen zijn. In plaats
+daarvan is de audit hieronder direct tegen de repo uitgevoerd, op basis van de betrouwbaar
+geciteerde check-definities uit dezelfde bron. Een tweede, apart gevonden bron
+([Triton One's eigen 4.2-checklist](https://blog.triton.one/agave-4-2-transaction-v1-and-your-breaking-changes-checklist/))
+bevat een inhoudelijk vergelijkbare, deels overlappende lijst (rewardType, Token-2022-
+velden, slotduur) maar noemt zelf geen `-32015`-foutcode en geen priorityFee-eenhedenval -
+die twee specifieke punten zijn uniek aan de Helius-bron.
+
+**Check 1 (transactie-v1-opt-in) - twee punten scherper dan sectie 102 hierboven al vaststelde:**
+- **Foutcode `-32015`** (`"Transaction version (1) is not supported by the requesting
+  client. Please use \"maxSupportedTransactionVersion\" in your request."`) - **nul treffers**
+  in de hele repo (`grep -rn "32015"`, alle bestandstypen). Dit bevestigt sectie 102's
+  bevinding preciezer: `tests/hunt.ts`/`tests/transferToken.ts`'s pollussen behandelen een
+  ontbrekend/onbruikbaar resultaat generiek (elke reden voor `null`/lege `meta` wordt gelijk
+  behandeld), er is geen aparte code-tak die specifiek op dit foutcode reageert - dus geen
+  bestaande foutafhandeling die "stiekem al goed zat" en over het hoofd was gezien. Bevestigt,
+  verandert de eerdere conclusie niet.
+- **Eigen, ruwe transactiebyte-parsing (nieuwe vraag, niet eerder gesteld in sectie 102):**
+  doorzocht op handmatige versie-byte-detectie (`0x80`/`VERSION_PREFIX`/bitshifts) en op
+  eigen decoders naast `@solana/web3.js`'s ingebouwde klassen (`Transaction.from`,
+  `VersionedTransaction.deserialize`, `Message.from`, `MessageV0.deserialize`) - **geen van
+  beide patronen komt ergens voor.** De enige aanpalende hit,
+  `multisig.accounts.VaultTransaction.fromAccountAddress` (`admin/wallet-signer.html:668`),
+  decodeert Squads' eigen Borsh-geëncodeerde PROGRAMMA-ACCOUNT (een opgeslagen voorstel-
+  structuur), niet een rauwe Solana-transactie-envelope - onaangeraakt door v1's
+  laag-formaat. **Antwoord:** deze repo decodeert nooit zelf transactiebytes; alles loopt via
+  web3.js. Het risico van check 1's tweede FAIL-voorwaarde ligt dus volledig en uitsluitend
+  bij de SDK-versie (sectie 102's al vastgestelde `PACKET_DATA_SIZE=1232`-hardcoding), niet
+  bij eigen code - een schonere, geruststellender uitkomst dan de vraag openliet.
+
+**Check 2 (rewardType, nieuwe waarde `"DeactivatedStake"`):** `grep -rin "rewardType"` -
+**nul treffers.** Bevestigd, niet aangenomen: geen van applicatie, deze repo parseert nergens
+`getBlock`/`blockSubscribe`-rewards.
+
+**Check 4 (Token-2022 `jsonParsed`, `depositConfidentialTransfer`/`withdrawConfidentialTransfer`,
+extensions-array):** `grep -rin "jsonParsed\|confidentialTransfer\|Token-2022\|Token2022"` -
+**nul treffers.** Bevestigd, niet aangenomen: niet van toepassing - dit project gebruikt
+uitsluitend klassieke SPL Token (zie sectie 35 e.o.), nergens Token-2022.
+
+**Check 5 (slotduur) - één treffer die de vraag expliciet voorspelde, en die een letterlijke
+"400"-grep WEL had gevonden, plus één die zo'n grep zou hebben GEMIST:**
+- `client/src/slotDuration.ts:1` - `const SLOT_MS_ESTIMATE = 400`, gebruikt in
+  `formatDurationEstimate()` (sessiesleutel-duur-preview, add/remove-session-key-kaarten) -
+  al zelf gelabeld `"een SCHATTING, geen garantie"`. Een letterlijke `"400"`-grep vindt dit
+  moeiteloos.
+- **`programs/spankwallet/src/state.rs:347` - `MAX_SESSION_DURATION_SLOTS: u64 = 1_512_000`
+  - GEEN letterlijke "400" in de constante zelf, maar wel dezelfde aanname erin gebakken:**
+  1.512.000 slots x 400ms = exact 604.800.000ms = precies 7 dagen (de eigen code-comment
+  bevestigt dit: `state.rs:337`, "~7 dagen bij Solana's nominale 400ms-slottijd"). Dit is
+  precies het soort constante dat de vraag voorspelde dat een skill zou missen omdat hij niet
+  letterlijk "400" heet. Helius' eigen artikel noemt vandaag (2026-08-28) als de verwachte
+  overgangsdatum naar 300ms op mainnet (van al 350ms) - als dat klopt, is de WERKELIJKE
+  duur van `MAX_SESSION_DURATION_SLOTS` voortaan 1.512.000 x 300ms = 453.600.000ms = **~5,25
+  dagen, niet 7**. Geen veiligheidsgat (het slot-gebonden `expiry_slot`-mechanisme zelf werkt
+  correct, ongeacht hoe snel slots daadwerkelijk voortlopen - een sessie loopt hoe dan ook af
+  na exact dat aantal slots) - wel een documentatie-/verwachtingsdrift: de "~7 dagen" in
+  code-comments (`state.rs:337`, `tests/sessionKeys.ts:2180`/`2197`) en de client-UI-schatting
+  (`slotDuration.ts`) worden stilzwijgend optimistisch zodra mainnet-slots daadwerkelijk
+  onder 400ms zakken. Check 3 (Geyser/account-update-matching) is niet apart onderzocht op
+  verzoek - wel gecontroleerd: `grep -rin "geyser\|accountSubscribe\|onAccountChange"` geeft
+  nul treffers, dit project draait geen eigen indexer/Geyser-consument, dus check 3 is
+  sowieso niet van toepassing.
+
+**Eenhedenvalkuil (priorityFee in lamports totaal vs. `setComputeUnitPrice` in micro-lamports
+per compute-unit) - vastgelegd als toekomstige waarschuwing, geen huidige fix:** sectie 102
+onderdeel b) had al vastgesteld dat dit project vandaag NERGENS compute-budget of
+prioriteitsfees zet of leest - deze valkuil kan dus vandaag nergens toeslaan. **Voor
+zodra dat verandert (elk toekomstig v1-verstuurpad, zie sectie 102's aanbeveling 5):** een
+naïeve portering die de bestaande "prijs per compute-unit x limiet"-formule loskt op v1's
+`priorityFee`-veld (een KANT-EN-KLAAR totaal in lamports, geen prijs-per-eenheid) berekent de
+uiteindelijke fee met een factor gelijk aan de compute-unit-limiet te hoog of te laag, ZONDER
+dat er een fout optreedt - een stille rekenfout, niet een crash. Vastgelegd hier zodat de
+sessie die het eerste v1-verstuurpad bouwt dit niet opnieuw hoeft te ontdekken.
+
+**Wat dit niet verandert:** geen van de vijf punten hierboven wijzigt sectie 102's conclusies
+of het voorgestelde volgorde-voorstel - dit is bevestiging en verscherping met een tweede
+bron, geen nieuwe bevinding die de prioritering omgooit. Niets gebouwd of gewijzigd, zoals
+gevraagd.
+

@@ -348,13 +348,13 @@ describe("spankwallet: transfer_token (SPL-token-transfer, passkey-gated)", () =
     // her-lees-actie zonder de transactie zelf te controleren).
     let txInfo = await provider.connection.getTransaction(signature, {
       commitment: "confirmed",
-      maxSupportedTransactionVersion: 0,
+      maxSupportedTransactionVersion: 1,
     });
     for (let i = 0; i < 20 && (!txInfo || !txInfo.meta); i++) {
       await new Promise((r) => setTimeout(r, 100));
       txInfo = await provider.connection.getTransaction(signature, {
         commitment: "confirmed",
-        maxSupportedTransactionVersion: 0,
+        maxSupportedTransactionVersion: 1,
       });
     }
     assert.isNotNull(txInfo, "kon de transfer_token-transactie niet terugvinden");

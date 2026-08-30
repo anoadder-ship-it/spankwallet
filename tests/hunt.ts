@@ -357,13 +357,13 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
     // propagatie-fenomeen als elders in dit project, nu op deze RPC-methode).
     let txInfo = await provider.connection.getTransaction(signature, {
       commitment: "confirmed",
-      maxSupportedTransactionVersion: 0,
+      maxSupportedTransactionVersion: 1,
     });
     for (let i = 0; i < 20 && (!txInfo || !txInfo.meta); i++) {
       await new Promise((r) => setTimeout(r, 100));
       txInfo = await provider.connection.getTransaction(signature, {
         commitment: "confirmed",
-        maxSupportedTransactionVersion: 0,
+        maxSupportedTransactionVersion: 1,
       });
     }
     if (!txInfo || !txInfo.meta) {

@@ -484,15 +484,30 @@ fn read_policy_account(account_info: &AccountInfo) -> Option<PolicyAccount> {
 }
 
 /// Verplichte (niet-tolerante) load van SessionKeyAccount - gebruikt door
-/// execute_advanced_via_session, waar `session` als UncheckedAccount
-/// gedeclareerd is (zie ExecuteAdvancedViaSession hierboven, BPF-stacklimiet).
-/// In tegenstelling tot read_passkeys_account/read_policy_account is er hier
+/// execute_advanced_via_session EN (STATUS.md sectie 119, stap-2-
+/// regressie-fix) transfer_token_via_session, beide waar `session` als
+/// UncheckedAccount gedeclareerd is (BPF-stacklimiet, zie de veldcommentaren
+/// bij ExecuteAdvancedViaSession/TransferTokenViaSession hieronder). In
+/// tegenstelling tot read_passkeys_account/read_policy_account is er hier
 /// geen geldig "bestaat nog niet"-scenario - een sessie MOET al bestaan
 /// (aangemaakt via add_session_key) - dus faalt dit gewoon door als het
 /// account niet deserialiseert, i.p.v. None terug te geven.
 fn load_session_account(account_info: &AccountInfo) -> Result<SessionKeyAccount> {
     let data = account_info.try_borrow_data()?;
     SessionKeyAccount::try_deserialize(&mut &data[..])
+}
+
+/// STATUS.md sectie 119 (stap-2-regressie-fix): het schrijvende tegenhanger
+/// van load_session_account hierboven - voor een instructie die `session`
+/// bewust als UncheckedAccount declareert (BPF-stacklimiet) maar tóch een
+/// veld moet bijwerken (bijv. spent_lamports/spent_token_amount). Zelfde
+/// try_borrow_mut_data + try_serialize-patroon als finalize_recovery al
+/// gebruikt voor PasskeysAccount - hier als herbruikbare helper i.p.v.
+/// opnieuw inline uitgeschreven.
+fn write_session_account(account_info: &AccountInfo, session: &SessionKeyAccount) -> Result<()> {
+    let mut data = account_info.try_borrow_mut_data()?;
+    let mut writer: &mut [u8] = &mut data;
+    session.try_serialize(&mut writer)
 }
 
 /// Meervoudige-sleutel-variant - gebruikt door elke instructie NA
@@ -2183,14 +2198,29 @@ pub struct TransferTokenViaSession<'info> {
     /// eigendoms-/mint-constraints hierboven, zelfde patroon als transfer_token.
     pub token_mint: UncheckedAccount<'info>,
 
-    // mut: spend-limits-ontwerpdocument §4 - spent_token_amount wordt
-    // atomisch opgehoogd binnen dezelfde instructie die de transfer uitvoert.
+    /// CHECK: bewust UncheckedAccount i.p.v. Account<SessionKeyAccount>.
+    /// STATUS.md sectie 119 (stap-2-regressie-fix, ontdekt tijdens sectie
+    /// 118's stap 4): WalletAccount's groei (247->256 bytes,
+    /// spend_threshold_lamports/disarmed) duwde deze Accounts-struct - die
+    /// al een typed WalletAccount, VaultAccount en TWEE TokenAccounts
+    /// droeg naast deze SessionKeyAccount (429 bytes) - over de BPF-stack-
+    /// limiet (empirisch: "Stack offset of 4104 exceeded max offset of
+    /// 4096 by 8 bytes" bij `anchor build`, niet zichtbaar in `cargo
+    /// check`/`cargo test`). Exact hetzelfde patroon en dezelfde reden als
+    /// `session` in ExecuteAdvancedViaSession hierboven (waar action_nonce
+    /// destijds dezelfde limiet raakte via PolicyAccount) - seeds/bump
+    /// garanderen nog steeds dat dit EXACT de sessie van deze wallet + deze
+    /// session_key is; de inhoud wordt hieronder handmatig gelezen
+    /// (load_session_account) EN, in tegenstelling tot die eerdere fix,
+    /// ook teruggeschreven (write_session_account) omdat
+    /// spent_token_amount hier - anders dan bij execute_advanced_via_session
+    /// - wel degelijk atomisch bijgewerkt moet worden.
     #[account(
         mut,
         seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
-        bump = session.bump,
+        bump,
     )]
-    pub session: Account<'info, SessionKeyAccount>,
+    pub session: UncheckedAccount<'info>,
 
     pub session_key: Signer<'info>,
 
@@ -2199,9 +2229,12 @@ pub struct TransferTokenViaSession<'info> {
 
 pub fn transfer_token_via_session(ctx: Context<TransferTokenViaSession>, amount: u64) -> Result<()> {
     // B2 (STATUS.md sectie 76): zelfde borrow-volgorde-reden als
-    // execute_via_session hierboven.
+    // execute_via_session hierboven. Sectie 119: `session` is nu een
+    // handmatig geladen eigen waarde (UncheckedAccount, BPF-stacklimiet),
+    // geen &mut meer rechtstreeks op ctx.accounts - zelfde gedrag,
+    // expliciet teruggeschreven aan het eind i.p.v. door Anchors macro.
     let wallet_session_epoch = ctx.accounts.wallet.session_epoch;
-    let session = &mut ctx.accounts.session;
+    let mut session = load_session_account(&ctx.accounts.session.to_account_info())?;
     let current_slot = Clock::get()?.slot;
     require!(
         current_slot <= session.expiry_slot,
@@ -2237,6 +2270,7 @@ pub fn transfer_token_via_session(ctx: Context<TransferTokenViaSession>, amount:
         SpankWalletError::SessionSpendTotalExceeded
     );
     session.spent_token_amount = new_spent;
+    write_session_account(&ctx.accounts.session.to_account_info(), &session)?;
 
     // Zelfde SPL-CPI als transfer_token() - bewust gedupliceerd, zie de
     // toelichting bovenaan dit blok.

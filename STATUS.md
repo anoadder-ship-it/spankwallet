@@ -10912,6 +10912,82 @@ bestaande test.
 **Diff-omvang:** uitsluitend `programs/spankwallet/src/errors.rs`, 22 toevoegingen, 0
 verwijderingen (`git diff --stat`) - geen ander bestand aangeraakt.
 
+## 118. Sectie 117/stap 4: `instructions.rs` - eerste PendingAction-kind-variant
+(`initiate_withdrawal`/`finalize_withdrawal`/`cancel_action`), plus een tussentijdse
+stap-2-regressiefix (zie sectie 119 hieronder)
+
+Eerste, kleinste, meest directe variant van sectie 115's ontwerp - zet het
+`PendingAction`-patroon één keer goed neer, de drie andere kinds (TokenTransfer,
+AdvancedAction, ThresholdChange) hergebruiken 'm in latere stappen. **Tijdens deze stap kwam
+een losstaande, ernstigere regressie boven water (stack-overflow-risico in een bestaand,
+ongerelateerd pad, veroorzaakt door sectie 116/stap 2) - apart onderzocht, gefixt en
+gedocumenteerd in sectie 119, hier alleen kort samengevat waar relevant.**
+
+### Vereenvoudiging t.o.v. sectie 115's oorspronkelijke ontwerp - expliciet vastgelegd
+
+Sectie 115 beschreef een tweetraps-flow (aparte `confirm_withdrawal` + een permissionless
+`finalize_withdrawal` zonder eigen ceremonie). Tijdens implementatie bewust vereenvoudigd op
+uitdrukkelijk verzoek: `finalize_withdrawal` draagt nu ZELF de (eventueel) tweede
+passkey-ceremonie, geen apart confirm-instructie. Functioneel gelijkwaardig - dezelfde
+2-of-2-garantie, dezelfde single-passkey-degradatie - één instructie minder. Bijeffect:
+`PendingActionNotConfirmed` (sectie 117's zevende errorcode, al gecommit) blijft in dit
+consolidated ontwerp ongebruikt - was bedoeld voor de oorspronkelijke aparte confirm-stap.
+Blijft staan in `errors.rs` voor het geval een toekomstige kind-variant of een latere aparte
+confirm-stap 'm alsnog nodig heeft - geen actie ondernomen, alleen vastgelegd zodat een
+latere lezer 'm niet als vergeten/dood beschouwt zonder de reden te kennen.
+
+### De drie instructies, met bewijs dat de kernvereisten daadwerkelijk geïmplementeerd zijn
+(niet aangenomen op basis van "het compileert")
+
+Op uitdrukkelijk verzoek gecontroleerd vóór commit, met exacte regelverwijzingen (zie de
+gecommitte broncode voor de actuele nummering):
+
+- **Single-passkey-degradatie**: `initiate_withdrawal` zet `pending.confirmed =
+  valid_passkey_count < 2` bij aanmaak; `finalize_withdrawal` slaat de
+  `SecondPasskeyMustDifferFromInitiator`-check bewust over als `confirmed` al `true` is
+  (`if !ctx.accounts.pending_action.confirmed { require!(...) }`) - expliciet in code-
+  commentaar vastgelegd direct bij die check, niet stilzwijgend.
+- **Epoch-mismatch (`PendingActionStaleEpoch`)**: eerste `require!` in
+  `finalize_withdrawal`'s body, vóór de timelock-check - vergelijkt `pending_action.epoch`
+  (snapshot van `wallet.session_epoch` bij initiate) tegen de HUIDIGE
+  `wallet.session_epoch`. Een recovery tussen initiate en finalize hoogt die laatste op
+  (bestaande, ongewijzigde `finalize_recovery`-logica), dus de vergelijking faalt automatisch.
+- **Drempel-eligibiliteit (`AmountEligibleForInstantExecute`)**: eerste `require!` in
+  `initiate_withdrawal`'s body, vóór de challenge/handtekeningverificatie - weigert elk
+  bedrag `<= wallet.spend_threshold_lamports` (had via `execute` gemogen, hoort niet
+  nodeloos de wachtrij/timelock in).
+
+**Expliciete grens, niet verzwegen: dit bewijst dat de logica AANWEZIG en correct
+BEDRAAD is, niet dat ze correct is onder daadwerkelijke uitvoering.** De 80 bestaande tests
+roepen geen van deze drie nieuwe instructies aan - ze bewijzen dat niets bestaands breekt,
+niets over het nieuwe gedrag zelf (echte WebAuthn-ceremonies, een echt verstreken timelock,
+een echte recovery tussen initiate/finalize, een echt tweede apparaat). Die bewijsvoering is
+sectie 115's afgesproken stap 6, hier bewust nog niet geleverd.
+
+### Overige ontwerpdetails, kort
+
+- **`PendingAction`-account blijft een singleton** (`init` op een deterministische PDA) -
+  `initiate_withdrawal` heeft geen `vault`-account nodig (nog geen verplaatsing).
+- **`cancel_action` is kind-agnostisch en draagt geen `recovery_state`/`disarmed`-
+  constraint** op `wallet` - annuleren mag altijd, zelfde principe als `cancel_recovery`.
+- **Nieuwe gedeelde helpers**: `verify_passkey_signature_multi_get_pubkey` (geeft de
+  herleide passkey terug, nodig voor de initiator-/2-of-2-vergelijking;
+  `verify_passkey_signature_multi` is nu een dunne wrapper hierop, geen gedupliceerde logica)
+  en `count_valid_passkeys`.
+- **Eén errorcode nodig buiten sectie 117's oorspronkelijke zeven** -
+  `AmountEligibleForInstantExecute`, ontbrak daar, toegevoegd aan `errors.rs` met een
+  commentaar dat expliciet naar deze afwijking van stap 3's scope verwijst.
+- **`lib.rs`**: drie nieuwe wrapper-instructies (`initiate_withdrawal`/`finalize_withdrawal`/
+  `cancel_action`) toegevoegd aan het `#[program]`-blok - structureel noodzakelijk, zonder
+  dit zouden de nieuwe functies onbereikbare, niet-aanroepbare code zijn.
+
+**`cargo check`/`cargo test -p spankwallet --lib`: groen (5/5).**
+`scripts/check-stack-safety.sh`: schoon (bovenop sectie 119's fix - zonder die fix had deze
+stap de al-bestaande regressie alleen maar verder verborgen).
+
+**Diff-omvang:** `programs/spankwallet/src/instructions.rs` (+423), `lib.rs` (+30),
+`errors.rs` (+8) - geen wijziging aan `state.rs` in deze stap.
+
 ## 119. Stap-2-regressie, gevonden tijdens sectie 118's stap 4: `transfer_token_via_session`
 overschreed de BPF-stacklimiet - gefixt, en de testgate uitgebreid zodat dit nooit meer
 stilzwijgend voorbij kan glippen

@@ -11363,3 +11363,122 @@ treffers.**
 
 **Diff-omvang:** `programs/spankwallet/src/instructions.rs` (+383), `lib.rs` (+28) - geen
 wijziging aan `state.rs`/`errors.rs`.
+
+## 123. Sectie 118/stap 5, kind 3 van 3: `initiate_threshold_change`/`finalize_threshold_change`
+- de zelfbeschermende instructie, beide velden bevestigd toegepast
+
+**Vierde en laatste kind. Met dit kind zijn alle vier de PendingAction-kinds compleet -
+zie de afsluitende samenvatting onderaan deze sectie voor wat sectie 115/118 se stap 5
+hiermee afrondt en wat structureel nog open blijft.**
+
+### Beide velden, in twee verschillende accounts, daadwerkelijk toegepast - niet aangenomen
+
+```rust
+// Beide velden daadwerkelijk toegepast - niet alleen de eerste.
+ctx.accounts.wallet.spend_threshold_lamports = new_spend_threshold_lamports;
+...
+spend_window.window_total_cap_lamports = new_window_total_cap_lamports;
+```
+
+`WalletAccount.spend_threshold_lamports` (sectie 116) én `SpendWindow.window_total_cap_lamports`
+(sectie 116/aanvulling punt A) worden allebei geschreven in dezelfde `finalize_threshold_change`
+- één gecombineerde config-wijziging, één wachtrij-item, exact zoals sectie 115's aanvulling
+al vaststelde.
+
+**`SpendWindow` bestaat mogelijk nog niet (nooit eerder een drempelwijziging afgerond voor
+deze wallet) - `finalize_threshold_change` initialiseert 'm dan, crasht niet.** `init_if_needed`
+op de PDA (`payer = closer`, veilig om dezelfde reden als `PolicyAccount` - een PDA die
+uitsluitend van `wallet.key()` afhangt kan nooit een ander accounttype "per ongeluk"
+hergebruiken), plus een eerste-gebruik-detectie identiek aan `add_allowed_program`'s eigen
+patroon (`wallet == Pubkey::default()` kan nooit waar zijn voor een echte, al bestaande
+WalletAccount-PDA, dus dat is het betrouwbare signaal "dit is net aangemaakt"):
+
+```rust
+let spend_window = &mut ctx.accounts.spend_window;
+if spend_window.wallet == Pubkey::default() {
+    spend_window.wallet = wallet_key;
+    spend_window.bump = ctx.bumps.spend_window;
+    spend_window.window_started_at = clock.unix_timestamp;
+    spend_window.spent_lamports_this_window = 0;
+}
+spend_window.window_total_cap_lamports = new_window_total_cap_lamports;
+```
+
+**Bewust NIET `window_started_at`/`spent_lamports_this_window` gereset bij een AL bestaand
+account** - alleen bij eerste aanmaak. Reden expliciet in de broncode vastgelegd: een
+drempelwijziging mag een lopend cumulatief venster niet stilzwijgend "wit wassen" - anders
+zou een aanvaller een niet-gerelateerde configuratiewijziging kunnen misbruiken om de
+cumulatieve besteding-tot-nu-toe onzichtbaar te resetten.
+
+### Commitment bindt zich vanaf het begin aan beide nieuwe waarden - geen achteraf-reparatie
+nodig deze keer
+
+```rust
+fn compute_threshold_change_commitment(
+    wallet: &Pubkey,
+    new_spend_threshold_lamports: u64,
+    new_window_total_cap_lamports: u64,
+) -> [u8; 32] {
+    let digest = hashv(&[
+        wallet.as_ref(),
+        b"pending_threshold_change",
+        &new_spend_threshold_lamports.to_le_bytes(),
+        &new_window_total_cap_lamports.to_le_bytes(),
+    ]);
+    ...
+}
+```
+
+Zowel bij `initiate_threshold_change` (challenge, mét nonce) als bij de commitment die
+`PendingAction` opslaat (zonder nonce) zijn BEIDE nieuwe waarden vanaf het eerste ontwerp
+meegenomen - dezelfde discipline die bij `finalize_withdrawal` pas achteraf gerepareerd moest
+worden (sectie 118's vervolgvraag), hier meteen goed, zoals bij kind 1/2.
+
+### Geen uitzondering voor een drempelverlaging - expliciet beargumenteerd, niet stilzwijgend
+verondersteld onschadelijk
+
+`initiate_threshold_change`/`finalize_threshold_change` kennen geen enkel onderscheid tussen
+een verhoging en een verlaging van `new_spend_threshold_lamports`/
+`new_window_total_cap_lamports` - dezelfde volledige wachtrij, dezelfde 24u-timelock, voor
+beide richtingen. Reden, vastgelegd in de broncode (niet alleen hier): een instant-toegestane
+verlaging zou een aanvaller met controle over de ceremonie een aparte, ongecontroleerde hendel
+geven - bijv. de drempel op 0 zetten om de eigenaar te verwarren/paniek te zaaien over waarom
+elke normale uitgave plotseling de wachtrij in moet, of om te toetsen of de eigenaar wel oplet
+zonder zelf al iets van waarde te riskeren. Het onderliggende ontwerpprincipe ("een
+configuratiewijziging die het bestedingsgedrag beïnvloedt, gaat altijd via dezelfde poort als
+een bestedingsactie zelf") maakt geen onderscheid naar richting - geen speciaal geval gebouwd.
+
+### Gedeelde helpers, stackrisico, bewijs
+
+Zelfde drie gedeelde helpers als kind 1/2 (`init_pending_action`/
+`check_pending_action_finalizable`/`check_pending_action_second_signer`), zelfde
+finalize-challenge-vorm (`nonce || pending_action.key() || commitment`).
+
+- `cargo check -p spankwallet`: groen - **geen enkele "nog ongebruikt"-waarschuwing meer**
+  (alle vier `PENDING_ACTION_KIND_*`-constanten en `SpendWindow`/`SpendWindow::LEN` nu
+  daadwerkelijk gebruikt, voor het eerst sinds sectie 116).
+- `cargo test -p spankwallet --lib`: 5/5 groen, ongewijzigd.
+- `scripts/check-stack-safety.sh`: schoon.
+- Zelfde extra grondigheid als kind 2: volledig schone `target/`, verse `anchor build`,
+  volledige-log-grep op "stack" - geen treffers.
+
+**Diff-omvang:** `programs/spankwallet/src/instructions.rs` (+267), `lib.rs` (+32) - geen
+wijziging aan `state.rs`/`errors.rs`.
+
+### Stap 5 hiermee volledig afgerond - en wat structureel nog open blijft
+
+Alle vier `PendingAction`-kinds (SolWithdrawal, TokenTransfer, AdvancedAction,
+ThresholdChange) zijn nu gebouwd, elk met dezelfde challenge-bindingsdiscipline, dezelfde
+epoch-/timelock-/2-of-2-controle via de drie gedeelde helpers, en elk individueel
+gecontroleerd op stackveiligheid vóór commit.
+
+**Twee dingen resten, geen van beide vandaag aangepakt:**
+1. **Sectie 115's afgesproken stap 6: echte tests tegen een lokale validator.** Alles wat tot
+   nu toe bewezen is, is "compileert, breekt niets bestaands" - geen van de nieuwe
+   instructies is ooit daadwerkelijk uitgevoerd.
+2. **De laatste, in sectie 121 prominent vastgelegde bouwstap: `execute`/`hunt`/
+   `transfer_token`/`execute_advanced` zelf aanpassen.** Zonder die stap blijft het volledige
+   spend-cap-mechanisme - inclusief dit net afgeronde `ThresholdChange`-kind - functioneel
+   inert: er is nu een correct werkende wachtrij, maar niets dat een cliënt of aanvaller
+   dwingt hem te gebruiken in plaats van de nog altijd volledig open directe paden. Sectie
+   121 geldt onverkort.

@@ -10820,3 +10820,60 @@ via_passkey` (het gemakspad, punt 2c) een gekaapte ceremonie zou misbruiken om d
 te DoSsen in plaats van geld te stelen, is laag-ernstig (geen fondsenverlies, direct
 herstelbaar via `rearm_wallet`) en wordt hier volledigheidshalve genoemd, niet als een
 zelfstandig risico behandeld.
+
+## 116. Sectie 115/stap 2: `state.rs` bijgewerkt - twee nieuwe velden op `WalletAccount`, twee nieuwe accounttypes, `cargo check`/`cargo test` groen
+
+**Uitsluitend `state.rs` gewijzigd, zoals gevraagd - niets in `instructions.rs`/`errors.rs`
+in deze stap. Nog niet gecommit.**
+
+**1. `WalletAccount` +9 bytes, helemaal achteraan, nooit ertussenin** (zelfde discipline als
+`action_nonce`/`session_epoch` daarvoor): `spend_threshold_lamports: u64` (8) en `disarmed:
+bool` (1), na `session_epoch`. `WalletAccount::LEN` bijgewerkt naar **256** (volledige
+Option-worst-case, 247+9) met de bereikbare-worst-case-afleiding (224 = 256-32) en de
+sectie-115/meetstap-1-cijfers (17 wallets: 12x231/marge 7, 4x239/marge 15, 1x247/marge 23,
+allemaal veilig) expliciet in het LEN-commentaar vastgelegd, niet alleen in STATUS.md.
+
+**2. Twee nieuwe accounttypes, exact zoals sectie 115 ze beschrijft, met de LEN-berekening
+veld-voor-veld in commentaar:**
+- `PendingAction` (`state.rs`): `wallet`/`bump`/`kind`/`initiated_at`/`epoch`/
+  `action_commitment`/`initiator_passkey`/`confirmed` - `LEN = 8+32+1+1+8+8+32+33+1 = 124`.
+- `SpendWindow` (`state.rs`): `wallet`/`bump`/`window_total_cap_lamports`/
+  `window_started_at`/`spent_lamports_this_window` - `LEN = 8+32+1+8+8+8 = 65`.
+
+Beide getallen komen exact overeen met de handmatige, python-geverifieerde optelsom uit
+sectie 115's meetstap.
+
+**3. `cargo check -p spankwallet`: groen, geen fouten.** Alleen de twee bekende, pre-
+bestaande `unexpected cfg condition value: "solana"`-waarschuwingen (Anchor's eigen
+`#[program]`-macro, ongerelateerd) plus vier verwachte `dead_code`-waarschuwingen
+(`PendingAction`/`SpendWindow` en hun `LEN` "nooit gebruikt/geconstrueerd") - exact wat je
+verwacht van twee structs die nog nergens in `instructions.rs` worden aangeroepen.
+
+**`cargo test -p spankwallet --lib`: brak initieel, gerepareerd binnen `state.rs` zelf, niet
+zomaar overgeslagen.** Twee bestaande unit-tests bleken door de LEN-wijziging kapot:
+- `sample_wallet_for_layout_tests()` (de gedeelde test-helper) miste de twee nieuwe velden
+  in zijn struct-literal - compileerfout (`E0063: missing fields`), rechtgezet met
+  `spend_threshold_lamports: 0, disarmed: false`.
+- **Een echte, inhoudelijke bug blootgelegd in de twee bestaande grens-tests, niet slechts
+  een compileerfout:** beide hardcodeerden hun slice-lengte als `WalletAccount::LEN - N`
+  (N=16 resp. 8) met als expliciete reden in het eigen commentaar "blijft de grens bewaken
+  ongeacht hoeveel velden er later bijkomen" - dat argument bleek zelf niet houdbaar. Met de
+  nieuwe `LEN=256` gaf `LEN-16` **240** (niet 231) en `LEN-8` **248** (niet 239) - de 9
+  nieuwe bytes werden door de oude vorm stilzwijgend WEL meegeteld in wat "het oude account"
+  moest simuleren, waardoor beide tests een niet-bestaand tussenformaat waren gaan testen
+  i.p.v. de echte, historische grens. Gecorrigeerd naar directe, letterlijke slice-lengtes
+  (`[..231]`/`[..239]`) - de enige vorm die daadwerkelijk ongevoelig is voor toekomstige
+  veldtoevoegingen, met het eigen commentaar aangepast om dit expliciet te benoemen i.p.v.
+  de oude, weerlegde aanname te laten staan.
+- **Nieuwe, derde test toegevoegd** (`old_247_byte_wallet_account_fails_closed_against_
+  current_layout`), zelfde patroon als de twee bestaande, voor de grens die deze sessie's
+  toevoeging zelf introduceert: een 247-byte account (mét action_nonce/session_epoch, van
+  vóór spend_threshold_lamports/disarmed) moet schoon falen tegen de huidige layout - fail-
+  closed, geverifieerd, niet aangenomen.
+- Resultaat na de fix: **5/5 groen** (de drie WalletAccount-grenstests, de bestaande
+  SessionKeyAccount-grenstest ongewijzigd/nog steeds groen, `test_id`).
+
+**Diff-omvang:** uitsluitend `programs/spankwallet/src/state.rs`, 179 toevoegingen/15
+verwijderingen (`git diff --stat`) - geen ander bestand aangeraakt.
+
+**Nog niet gecommit** - diff staat klaar voor beoordeling vóór vastlegging.

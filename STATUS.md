@@ -9814,3 +9814,178 @@ aangenomen), dus geen ander bestand hoefde aangepast.
   opgehaald en gecontroleerd, én een ECHTE `getSlot`-RPC-aanroep gedaan met exact die
   sleutel tegen `devnet.helius-rpc.com` - geslaagd (`result: 489467160`), bevestigt dat de
   sleutel na de verplaatsing nog steeds werkt, niet alleen dat de code compileert.
+
+## 110. Vaste regel vastgelegd: spankwallet nooit schrijfbaar doel voor ander project/tool/sessie
+
+Zie SECURITY.md, nieuwe sectie. Aanleiding: active-defense's STATUS.md sectie 15 (een
+LM Studio-MCP-tool met te brede filesystem-scope overschreef daar ongecommit werk) - hetzelfde
+risico als sectie 81 hier, andere concrete vorm. Vandaag mee verholpen aan de bron:
+LM Studio's `file-system-mcp`/`fs-mcp`/`shell-mcp`-configuratie/-code aangepast om
+spankwallet expliciet uit te sluiten (details in active-defense's eigen STATUS.md, sectie 18).
+
+## 111. Herbevestigd (niet opnieuw uitgevoerd): `spankwallet-active-defense`-worktree en
+`active-defense-phase1`-branch bestaan al niet meer
+
+Op verzoek "opgeruimd" - onderzoek wees uit dat dit al volledig gebeurd was, zie sectie 106
+hierboven voor de oorspronkelijke, met bewijs onderbouwde uitvoering (bestand-voor-bestand-
+verificatie dat niets verloren ging, backup + git-bundle vooraf, `git worktree remove` zonder
+`--force`, `git branch -D` + `git push origin --delete`, alles achteraf via `ls-remote`/
+`branch -a` na `fetch --prune` geverifieerd). Vandaag onafhankelijk herbevestigd, zonder op
+die eerdere vastlegging te vertrouwen: `git worktree list` (geen entry), `.git/worktrees/`
+(alleen `spankwallet-testfixture`), `ls /home/michel/projects/` (map bestaat niet),
+`git branch -a` in zowel spankwallet als active-defense's eigen repo (geen `active-defense-
+phase1`), en `git ls-remote --heads origin` op beide remotes (leeg). Niets om te verwijderen.
+
+Kleine correctie: het verzoek noemde als reden "kon nu pas" active-defense's eigen,
+git-clone-gebaseerde permanente testfixture - dat klopt niet met sectie 106's vastlegging,
+waar de daadwerkelijke blokkade destijds de bestand-voor-bestand-verificatie was dat niets
+verloren zou gaan, los van enige testfixture. Bewust niet overgenomen als reden hierboven.
+
+## 112. Sectie 102 afgerond: `maxSupportedTransactionVersion` overal naar 1, v1 nog nergens actief
+
+**Vervolg op sectie 102** (inventarisatie, niets gebouwd). Vandaag daadwerkelijk doorgevoerd:
+
+**1. Alle plekken opnieuw, onafhankelijk doorzocht** (niet op sectie 102's inventarisatie
+vertrouwd) - `getTransaction`/`getBlock`/`getTransactionsForAddress`/`getParsedTransaction`/
+`maxSupportedTransactionVersion` repo-breed (`.ts`/`.js`/`.html`/`.rs`, exclusief
+`node_modules`/`target`/`vendor`/`dist`/`build`). Resultaat: **exact dezelfde vier plekken**
+als sectie 102 vond, geen nieuwe - `tests/hunt.ts:360/366` en `tests/transferToken.ts:351/357`.
+`admin/wallet-signer.html` bevestigd nogmaals: geen `getTransaction`/`getBlock`-aanroep, alleen
+een verwijzing ernaar in een commentaarregel. `getTransactionsForAddress` (expliciet genoemd in
+het verzoek): nul treffers - bestaat niet in deze codebase, ook geen Helius-REST-aanroep met die
+naam (de Helius-integraties in `scripts/measureSlotDuration.ts`/`client/src/slotDuration.ts`
+gebruiken uitsluitend `getBlockTime`/`getSlot`, niet transactie-/blokinhoud).
+
+Alle vier `maxSupportedTransactionVersion: 0` → `1`. Vóór het wijzigen gecontroleerd of dit de
+betekenis van enige uitkomst verandert: beide plekken lezen alleen `txInfo.meta`/
+`txInfo.transaction.message.getAccountKeys()` (generiek, versie-onafhankelijk) - geen enkele
+branch die aanneemt dat de versie per se 0 is. Geen aanpassing nodig buiten de constante zelf.
+
+**2. Meting: v1 is nog NERGENS actief - devnet, testnet, en mainnet-beta alle drie leeg.**
+Niet aangenomen op basis van sectie 102's datum (27-28 augustus) - vandaag rechtstreeks
+gecontroleerd, in twee stappen:
+- `getVersion` op alle drie: `solana-core 4.3.0-beta.2`, `feature-set 2409014235` - identiek op
+  devnet, testnet én mainnet-beta. Op zich geen bewijs van activatie, wel dat er geen drift is.
+- De daadwerkelijke feature-gate: `txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL`
+  ("Larger Transactions" / v1, `FEATURE_ACCOUNT_SIZE = 9`) - opgezocht en onafhankelijk
+  gecorroboreerd in Solana Foundation's eigen source
+  (`solana-foundation/solana-com`, `apps/media/lib/upgrades/feature-activation.ts`, via `gh api
+  search/code`), niet enkel op een zoekresultaat-samenvatting vertrouwd. Rechtstreeks
+  `getAccountInfo` op dat adres op alle drie de clusters: **`value: null` op devnet, testnet, én
+  mainnet-beta** - het feature-account bestaat nog nergens op een publiek cluster (zelfs niet in
+  de "aangevraagd, nog niet geactiveerd"-toestand, wat al een bestaand `Option::None`-account zou
+  zijn). De lokale CLI (`solana-cli 4.1.2`) kent de feature-naam zelf nog niet
+  (`Unknown feature`), consistent met "lokaal al testbaar, cluster-activatie nog niet" uit de
+  vraagstelling.
+- **Conclusie: v1 is op dit moment (2026-08-30) op geen van de drie publieke clusters actief of
+  zelfs maar aangevraagd.** Sectie 102's tijdlijn ("testnet eind augustus, mainnet enkele weken
+  later") is dus nog niet ingelopen - vandaag valt nog net binnen "eind augustus", dus geen
+  tegenspraak, wel een harde bevestiging dat er nog niets hoeft te veranderen aan hoe deze vier
+  plekken zich gedragen (`maxSupportedTransactionVersion: 1` blijft vandaag functioneel identiek
+  aan `0`, exact de sectie-102-superset-vaststelling).
+
+**3. Volledige testsuite gedraaid tegen een echte (lokale) validator na de wijziging.**
+Onderweg een onafhankelijk, ongerelateerd omgevingsprobleem gevonden en - met dezelfde
+wegwerp-deploy-discipline als in active-defense's sessies - tijdelijk omzeild om de suite
+überhaupt te kunnen draaien:
+- Poort 8000 (gossip, `solana-test-validator`'s default) bleek bezet door een lokale
+  HPLIP-printerdienst, niets met Solana te maken - opgelost met een permanente `[test.validator]
+  gossip_port = 8001` in `Anchor.toml` (blijft staan, klein en herbruikbaar voor iedere
+  toekomstige lokale testrun op deze machine).
+- `target/deploy/spankwallet-keypair.json` (een symlink naar
+  `~/.config/spankwallet/program-keypairs/spankwallet-keypair.json`, ongewijzigd sinds 22
+  augustus - dus geen recente manipulatie) bleek een ANDERE pubkey te bevatten
+  (`4ywru3zEtQZv2pv5S7azb9PBMh3bDKzR7HS47QKpkBfa`) dan `declare_id!`/`Anchor.toml`
+  (`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) - een pre-existing, van deze sessie los
+  bestaand mankement dat élke lokale `anchor test` altijd met `DeclaredProgramIdMismatch` had
+  laten falen, ongeacht deze of enige andere wijziging. Onafhankelijk bevestigd dat dit geen
+  onbevoegde overschrijving is (sectie 110's risico): het echte, canonieke `9ma6...BK9` staat
+  gewoon correct en `executable: true` op devnet; de mismatchte pubkey staat nergens live. Niet
+  de persistente sleutel zelf aangepast - in plaats daarvan tijdelijk een verse
+  wegwerp-keypair gebruikt voor `declare_id!`/`Anchor.toml`/`target/deploy/spankwallet-
+  keypair.json` (de symlink zelf ONGEMOEID gelaten qua doel, alleen tijdelijk vervangen), gebouwd,
+  getest, en daarna alles teruggezet: `declare_id!` en `Anchor.toml` weer op `9ma6...BK9`
+  (`git diff` op `lib.rs` leeg, bevestigd byte-identiek aan HEAD), de originele symlink hersteld,
+  opnieuw gebouwd zodat `target/deploy/spankwallet.so` weer bij de echte ID hoort.
+- Resultaat tegen de throwaway-deploy: **80 passing, 2 pending, 0 failing** (twee keer gedraaid,
+  identiek resultaat) - inclusief `tests/hunt.ts` en `tests/transferToken.ts`, de twee bestanden
+  met de gewijzigde regel. AUDIT M-2's eigen logregels tonen expliciet het throwaway-programma-ID
+  succesvol uitvoerend (`Program 7DTzYDR8wkT5gcrA4cf2LYp97ExnZ8by5B3akx6WSiLG ... consumed 10464
+  ... units`) - functioneel bewijs dat de gedeclareerde en gedeployde ID exact matchten,
+  sterker dan een statische bytegrep op het gecompileerde `.so` zou zijn (base58-pubkeys staan
+  daar als 32 ruwe bytes, niet als ASCII-tekst - een eerste bytegrep-poging gaf daarom terecht
+  nul treffers voor beide adressen).
+
+**Openstaand, niet vandaag aangepakt:** het pre-existing `target/deploy/spankwallet-keypair.json`
+↔ `declare_id!`-mankement zelf blijft bestaan voor een VOLGENDE lokale `anchor test`-run (elke
+run zal opnieuw `DeclaredProgramIdMismatch` geven totdat iemand bewust beslist welke van de twee
+pubkeys de juiste is en de andere daarnaar bijwerkt) - buiten de scope van dit verzoek, hier
+alleen gedocumenteerd zodat het niet als nieuw verrast bij de volgende sessie.
+
+## 113. GitHub-meldingenronde afgerond: branch-protection-vals-alarm gecorrigeerd, vier CodeQL-alerts afgewezen met bewijs, wallet-standard-mobile-versiecheck
+
+**1. "Geen branch protection" was een vals alarm - gecorrigeerd, niet in het rapport blijven staan.**
+De classic-protection-API (`GET /repos/.../branches/main/protection`) is een ander GitHub-
+mechanisme dan Rulesets, en zag de bestaande ruleset niet. Rechtstreeks bevraagd:
+`GET /repos/.../rulesets` en `/rulesets/20594948` ("main-protection", aangemaakt tijdens een
+eerdere push-hold-episode). Bevestigd: `enforcement: "active"`, target `~DEFAULT_BRANCH` (main),
+regels `deletion` + `non_fast_forward` + `required_signatures`, `bypass_actors: []`,
+`current_user_can_bypass: "never"` - sterker dan classic branch protection (niemand, ook geen
+repo-admin, kan hem omzeilen). **Conclusie: geen governance-gat.** Het eerdere rapport sprak zich
+uit op basis van het verkeerde mechanisme; dit punt is uit het rapport gehaald.
+
+**2. Vier CodeQL-alerts (#10, #9, #8, #7) onderzocht met daadwerkelijke codefragmenten vóór
+afwijzing, daarna gedismissed via `PATCH /code-scanning/alerts/{n}`.** Belangrijke correctie
+onderweg: de drie eerder afgewezen alerts (#5, #4, #3) bleken bij navraag GEEN
+"build-mode:none/macro-locatieverwarring"-gevallen te zijn zoals verondersteld, maar
+`#[cfg(test)]`-testdummy's ("used in tests" - testwachtwoorden/testvector, geen echt
+sleutelmateriaal). #7 en #8 zijn dus op eigen, onafhankelijk bewijs afgewezen, niet "omdat ze bij
+het bekende patroon horen".
+
+- **#10** (`admin/vendor/wallet-standard-mobile.mjs:1`, `js/incomplete-sanitization`):
+  gemarkeerd fragment `Ze=Ze.replace(/u/g,"\\u")` - reconstrueert een Kanji/Unicode-regexklasse
+  in de geminificeerde `qrcode`-bundel (transitieve dependency van
+  `@solana-mobile/wallet-standard-mobile`, gevendord in commit 88c55e4 vanaf esm.sh). Geen
+  externe/onvertrouwde datastroom naar deze regel; CodeQL classificeert 'm zelf als `library`.
+  **Afgewezen** (`false positive`): gevendorde, onaangepaste derdenpartij-afhankelijkheid,
+  stroomopwaarts gevolgd.
+- **#9** (`admin/wallet-signer.html:370`, `js/clear-text-storage-of-sensitive-data`):
+  `saveDeeplinkState` slaat `dappSecretKey`/`sharedSecret`/`session` cleartext op in
+  localStorage. CodeQL heeft feitelijk gelijk - geen vals-positief. Dit is de efemere sleutel van
+  het Solflare-deeplinkkanaal, niet de wallet-ondertekeningssleutel; risico al bewust beperkt in
+  sectie 107: `beginFreshDeeplinkConnect` dwingt een verse verbinding per actie af, en commit
+  f66ecca voegde een actieve 30-minuten-vervaltermijn (`scheduleDeeplinkExpiry`) toe bovenop de
+  bestaande lazy-expiry - was oorspronkelijk 8 dagen. **Afgewezen** (`won't fix`): geaccepteerd,
+  al-gemitigeerd risico.
+- **#8** (`desktop/src-tauri/src/lib.rs:12`, `rust/hard-coded-cryptographic-value`): gemarkeerde
+  locatie (kolom 25-49) is de macro-aanroep `tauri::generate_handler![` zelf, geen letterlijke
+  waarde in spankwallet-broncode. `build-mode:none` kan de macro-expansie niet volgen en wijst
+  iets uit Tauri-interne gegenereerde code toe aan de aanroepregel. **Afgewezen**
+  (`false positive`): macro-locatieverwarring door `build-mode:none`.
+- **#7** (`desktop/src-tauri/src/fee_payer.rs:99`, `rust/hard-coded-cryptographic-value`):
+  gemarkeerde regel `let mut salt = vec![0u8; SALT_LEN];` wordt op regel 100 direct overschreven
+  door `rand::thread_rng().fill_bytes(&mut salt)`. De nul-buffer wordt nooit als zodanig gebruikt
+  - Argon2 (regel 87) krijgt altijd de gerandomiseerde versie. `build-mode:none` (source-only
+  analyse) ziet deze directe overschrijving niet. **Afgewezen** (`false positive`): zelfde
+  `build-mode:none`-beperking als #8, hier via een zero-init-dan-randomize-patroon i.p.v.
+  macro-expansie.
+
+Alle vier bevestigd `state: "dismissed"` na de `PATCH`-aanroepen.
+
+**3. `@solana-mobile/wallet-standard-mobile`-versiecheck (0.5.3 gepind sinds 88c55e4, 0.6.0
+beschikbaar sinds 2026-08-17) - afgesloten, geen aanleiding om te upgraden.** Changelog (GitHub
+releases + `CHANGELOG.md` op `solana-mobile/mobile-wallet-adapter`) tussen 0.5.3 en 0.6.0:
+- Eén "Minor" wijziging: ondersteuning voor een nieuw, optioneel transport (Nostr Relays) naast
+  het bestaande lokale/remote-transport - additief, raakt het bestaande deeplink-transport dat
+  spankwallet gebruikt niet.
+- Eén "Patch" wijziging: migratie van de build-/typecheck-toolchain naar TypeScript 6 - dev-only,
+  geen runtime-impact.
+- Enige dependency-wijziging: `@solana-mobile/mobile-wallet-adapter-protocol` `^2.2.9` → `^2.3.0`
+  (volgt uit dezelfde toolchain-/transport-wijziging hierboven).
+- Geen security advisories voor dit pakket op GitHub (leeg resultaat, beide versies).
+Geen van beide wijzigingen is security-relevant of breaking voor hoe spankwallet dit pakket
+gebruikt. **Pin op 0.5.3 bewust ongewijzigd gelaten** - geen aanleiding om te upgraden, dit is
+geen open/onbeantwoord punt.
+
+**GitHub-meldingenronde hiermee compleet**: 0 open CodeQL-alerts, branch-protection-rapport
+gecorrigeerd, dependency-versiecheck afgesloten.

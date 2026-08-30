@@ -11197,3 +11197,70 @@ build-diagnostiek die `anchor build` mogelijk ooit op dezelfde "waarschuwing zon
 falende exit code"-manier zou rapporteren - dit script is specifiek gericht op de
 stackframe-klasse, niet een generieke "parse alle mogelijke toekomstige Anchor-diagnostiek"-
 oplossing.
+
+## 120. Sectie 118/stap 5, kind 1 van 3: `initiate_token_transfer`/`finalize_token_transfer` -
+hergebruikt het SolWithdrawal-patroon via nieuwe gedeelde helpers
+
+**Belangrijke tussenstap vóór het eigenlijke kind: `spend_threshold_lamports` wordt vandaag
+NERGENS afgedwongen buiten `initiate_withdrawal`'s eigen eligibiliteitscheck.** Rechtstreeks
+gecontroleerd (`grep`), niet aangenomen: `execute`/`hunt` lezen dit veld nooit - een gebruiker
+kan vandaag nog gewoon `execute` rechtstreeks aanroepen voor een willekeurig groot bedrag,
+volledig buiten de wachtrij om. De drempel begrenst dus alleen "mag de wachtrij dit bedrag
+accepteren", niet "mag het instant-pad dit bedrag toestaan" - dat laatste vereist een
+toekomstige, nog niet ingeplande wijziging aan `execute`/`hunt` zelf. Relevant voor kind 3
+(ThresholdChange) hieronder: die instructie beschermt vandaag dus nog een mechanisme zonder
+scherpe tanden. Hier alleen vastgelegd, niet opgelost - buiten de scope van stap 5.
+
+### Gedeelde helpers, geëxtraheerd vóór het eerste hergebruik (sectie 115 punt 4)
+
+Drie nieuwe, kind-agnostische helperfuncties, en `initiate_withdrawal`/`finalize_withdrawal`
+zelf ernaar geretrofit (niet alleen de nieuwe kinds) - anders zou de codebase inconsistent
+worden (drie kinds delen een helper, de vierde niet, zonder reden):
+- `init_pending_action(...)`: de acht gedeelde PendingAction-velden in één keer gezet -
+  identiek voor alle vier kinds.
+- `check_pending_action_finalizable(pending, wallet_session_epoch, now)`: de epoch-
+  mismatch- en timelock-check, identiek voor alle vier kinds (leest uitsluitend
+  kind-agnostische velden).
+- `check_pending_action_second_signer(pending, actual_pubkey)`: de 2-of-2-/single-passkey-
+  degradatie-check, identiek voor alle vier kinds.
+
+**Bewust NIET verder geünificeerd (de challenge-opbouw, de commitment-berekening, en de
+daadwerkelijke waardeverplaatsing blijven per kind gedupliceerd) - met reden, niet uit
+gemakzucht:** elk kind heeft een andere Accounts-struct (andere accounts, andere typen) -
+Anchor staat geen generieke instructie toe die over verschillende accountsets heen werkt.
+Volledige unificatie zou een polymorfe dispatch-laag vereisen die per kind alsnog naar
+specifieke velden/accounts vertakt - meer complexiteit voor dezelfde hoeveelheid code, en
+weg van dit project se voorkeur voor kleine, expliciete, op-zichzelf-leesbare instructies
+(dezelfde afweging die `execute_via_session`/`transfer_token_via_session` destijds al
+bewust gedupliceerd hield i.p.v. gedeeld met hun niet-sessie-tegenhangers).
+
+### Kind 1: TokenTransfer
+
+- `compute_token_transfer_commitment`: zelfde vier waarden als `transfer_token`'s
+  al-bewezen challenge (sectie 76/B6: `recipient_token_account`/`token_mint`/`amount`/
+  `vault_token_account`), zonder nonce - zelfde reden als bij `compute_withdrawal_commitment`.
+- `initiate_token_transfer`: challenge/nonce/passkey-patroon zoals `initiate_withdrawal`,
+  accepteert de vier waarden als kale `Pubkey`/`u64`-argumenten (geen echte token-accounts
+  nodig, er verplaatst nog niets). **Geen drempel-eligibiliteitscheck - bewust, met reden in
+  de broncode zelf vastgelegd, niet stilzwijgend weggelaten:** sectie 115 punt 2e stelde al
+  vast dat er geen betrouwbare cross-denominatie-vergelijking bestaat tussen een lamport-
+  gedenomineerde drempel en een SPL-tokenbedrag met willekeurige decimalen - elke
+  tokenoverdracht gaat daarom in v1 altijd via de wachtrij, ongeacht bedrag.
+- `finalize_token_transfer`: **de challenge bindt zich meteen aan de volledige commitment**
+  (`nonce || pending_action.key() || commitment`) - dezelfde discipline die bij
+  `finalize_withdrawal` pas achteraf gerepareerd moest worden, hier vanaf het begin correct.
+  Voert daarna dezelfde SPL-transfer-CPI uit als `transfer_token` (bewust gedupliceerd,
+  zelfde bestaande reden als bij de `_via_session`-varianten).
+- `cancel_action` (al gebouwd in stap 4) is al kind-agnostisch - geen aparte cancel-variant
+  voor dit kind nodig, bevestigd door de bestaande implementatie te herlezen (leest `kind`
+  nergens, sluit puur op seeds/bump).
+
+**Bewijs, per kind afzonderlijk gedraaid, niet pas aan het eind:**
+- `cargo check -p spankwallet`: groen, geen nieuwe waarschuwingen behalve de verwachte
+  "nog ongebruikt" voor de twee resterende kind-constanten (AdvancedAction/ThresholdChange).
+- `cargo test -p spankwallet --lib`: 5/5 groen, ongewijzigd.
+- `scripts/check-stack-safety.sh`: schoon, geen stackframe-regressie door dit kind.
+
+**Diff-omvang:** `programs/spankwallet/src/instructions.rs` (+399/-33, inclusief de
+retrofit van `initiate_withdrawal`/`finalize_withdrawal` naar de nieuwe gedeelde helpers),
+`lib.rs` (+29, twee nieuwe wrapper-instructies) - geen wijziging aan `state.rs`/`errors.rs`.

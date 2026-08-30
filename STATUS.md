@@ -10911,3 +10911,143 @@ bestaande test.
 
 **Diff-omvang:** uitsluitend `programs/spankwallet/src/errors.rs`, 22 toevoegingen, 0
 verwijderingen (`git diff --stat`) - geen ander bestand aangeraakt.
+
+## 119. Stap-2-regressie, gevonden tijdens sectie 118's stap 4: `transfer_token_via_session`
+overschreed de BPF-stacklimiet - gefixt, en de testgate uitgebreid zodat dit nooit meer
+stilzwijgend voorbij kan glippen
+
+**Gevonden tijdens het compileren van sectie 118's stap 4** (initiate_withdrawal/
+finalize_withdrawal/cancel_action, apart gedocumenteerd/gecommit), maar de oorzaak zit in
+sectie 116/stap 2 (`state.rs`, `WalletAccount` +9 bytes, al gecommit als `a71e803`) - **niets
+van vandaag's nieuwe spend-cap-code zelf.** Deze sectie behandelt uitsluitend de regressie en
+de fix, los van stap 4's eigen instructies.
+
+### De regressie, precies gebisect
+
+`anchor build` (het echte BPF/SBF-doelplatform, met de harde 4096-byte-stackframe-limiet -
+strenger dan `cargo check`/`cargo test`, die alleen tegen het native target draaien) meldde:
+
+```
+Error: Function ...TransferTokenViaSession...try_accounts... Stack offset of 4104 exceeded
+max offset of 4096 by 8 bytes... Estimated function frame size: 4160 bytes. Exceeding the
+maximum stack offset may cause undefined behavior during execution.
+```
+
+Niet aangenomen dat dit door stap 4 kwam - drie punten gebisect, elk met een schone
+`anchor build`-run in een apart, tijdelijk `git worktree`:
+- **`211068e`** (sectie 115, vóór ELKE code-wijziging van vandaag): schone build, **exit code
+  0, nul "Stack offset"-regels.**
+- **`a71e803`** (sectie 116/stap 2, `state.rs` alleen, al gecommit): **dezelfde "Stack
+  offset"-regel verschijnt al hier** - vóór errors.rs (stap 3) of instructions.rs (stap 4)
+  ooit werden aangeraakt.
+- Stap 4's eigen nieuwe instructies (initiate_withdrawal/finalize_withdrawal/cancel_action)
+  compileren zelf zonder enige nieuwe stackwaarschuwing - de regressie zat al in de codebase
+  vóórdat stap 4 begon, stap 4's `anchor build`-run legde 'm alleen als eerste daadwerkelijk
+  bloot.
+
+**Root cause:** `TransferTokenViaSession`'s Accounts-struct droeg al een typed
+`WalletAccount`, `VaultAccount` en TWEE `TokenAccount`s naast een typed `SessionKeyAccount`
+(429 bytes) tegelijk op de stack tijdens `try_accounts()` - al dicht tegen de limiet.
+`WalletAccount`'s groei (247->256 bytes, sectie 116) was precies de 8-9 bytes die 'm
+duwde. **Exact hetzelfde patroon, dezelfde oorzaaksklasse, als de eerder al gedocumenteerde
+`ExecuteAdvanced`/`PolicyAccount`-episode** (waar `action_nonce`'s 8 bytes destijds dezelfde
+limiet raakte) - dit is dus de TWEEDE keer dat een WalletAccount-groei een reeds-krappe
+Accounts-struct elders in dit bestand over de rand duwt, niet de eerste.
+
+### De fix - `programs/spankwallet/src/instructions.rs`, zelfde bewezen patroon
+
+`session` in `TransferTokenViaSession` van `Account<'info, SessionKeyAccount>` naar
+`UncheckedAccount<'info>` - exact het patroon dat `ExecuteAdvancedViaSession` al gebruikt
+voor precies dezelfde reden. Eén verschil: `execute_advanced_via_session` heeft geen bedrag
+om bij te houden (leest `session` alleen), `transfer_token_via_session` moet
+`spent_token_amount` wél atomisch bijwerken - dus naast de al-bestaande
+`load_session_account`-helper (lezen) is er een NIEUWE, herbruikbare `write_session_account`-
+helper bijgekomen (schrijven), zelfde `try_borrow_mut_data` + `try_serialize`-patroon als
+`finalize_recovery` al gebruikt voor `PasskeysAccount` - hergebruikt i.p.v. opnieuw inline
+uitgeschreven, zoals gevraagd.
+
+**Bewijs, elk apart geverifieerd, niet aangenomen:**
+
+1. **`anchor build` op de gefixte code, volledig schoon, geen enkele stackwaarschuwing
+   meer, op geen enkele instructie:**
+   ```
+   warning: struct `SpendWindow` is never constructed
+   warning: associated constant `LEN` is never used
+   warning: `spankwallet` (lib) generated 2 warnings
+       Finished `release` profile [optimized] target(s) in 3.84s
+   ```
+   (De twee resterende waarschuwingen zijn de al-bekende, verwachte `SpendWindow`-
+   dead-code-meldingen uit sectie 116 - `SpendWindow` wordt pas in een latere stap gebruikt.)
+   `grep -n "Stack offset"` op de volledige build-log: **geen treffers.**
+
+2. **`cargo test -p spankwallet --lib`: 5/5 groen, ongewijzigd.**
+
+3. **Volledige bestaande testsuite tegen een echte lokale validator** (`yarn test`, met het
+   sectie-114-recept: tijdelijk `declare_id!`/`Anchor.toml` op de lokale wegwerp-keypair,
+   daarna teruggezet, `git diff` op beide leeg bevestigd): **80 passing, 2 pending, 0
+   failing** - identiek aan de bestaande baseline. Met name de twee tests die
+   `transfer_token_via_session`'s GEWIJZIGDE code-pad rechtstreeks raken slaagden allebei
+   ongewijzigd: *"transfer_token_via_session voert een echte SPL-transfer uit als
+   can_transfer_token=true"* en *"transfer_token_via_session faalt bij overschrijding van de
+   per-tx- of cumulatieve token-limiet, en spent_token_amount telt correct op"* - dezelfde
+   spend-limit-logica, dezelfde foutcodes (`SessionSpendPerTxExceeded`/
+   `SessionSpendTotalExceeded`/`SessionTokenMintNotAllowed`), functioneel identiek gedrag,
+   alleen de manier waarop het account gelezen/geschreven wordt is veranderd.
+
+**Diff-omvang van de fix:** uitsluitend `programs/spankwallet/src/instructions.rs`, 43
+toevoegingen/9 verwijderingen (`git diff --stat`) - géén wijziging aan `state.rs`/`errors.rs`/
+`lib.rs` nodig voor deze specifieke fix.
+
+### Structurele vraag: controleert de bestaande testgate dit ooit? Nee - empirisch bevestigd,
+niet aangenomen - **zevende instantie van "groen betekende iets anders dan gedacht"**
+
+Rechtstreeks getest, niet afgeleid: de stap-2-regressie tijdelijk teruggezet (`git show
+c8876f5:.../instructions.rs`, de bekende-kapotte staat van vóór deze fix), en de ECHTE,
+canonieke testgate gedraaid (`yarn test`, wat destijds simpelweg `anchor test --validator
+legacy` was) tegen die kapotte code:
+
+```
+$ yarn test
+...
+Error: Function ...TransferTokenViaSession...Stack offset of 4104 exceeded max offset...
+...
+  80 passing (2m)
+$ echo $?
+0
+```
+
+**De "Stack offset"-regel staat gewoon IN de uitvoer, begraven tussen ~200 regels
+build-output - maar `yarn test` rapporteert onverstoord "80 passing" en exit code 0.** Een
+ontwikkelaar of CI-pijplijn die alleen op exit code of "X passing, 0 failing" let, ziet dit
+dus nooit. Dit is dezelfde onderliggende les als de zes eerdere keren deze sessie dat "groen"
+niet betekende wat aangenomen werd (CodeQL-alerts die het verkeerde patroon bleken,
+DeclaredProgramIdMismatch, etc.) - hier specifiek: **`cargo check`/`cargo test` zien deze
+klasse fout NOOIT (ander compilatiedoel), en `anchor build`/`anchor test` zien 'm wél in hun
+uitvoer maar falen er NOOIT op (exit code blijft altijd 0).**
+
+### De structurele fix: `scripts/check-stack-safety.sh`, verplicht onderdeel van `yarn test`
+
+Nieuw script, bewust bash (geen RPC/TS-logica nodig, puur tekstcontrole op `anchor build`'s
+uitvoer): draait `anchor build --ignore-keys`, en grept de VOLLEDIGE uitvoer (niet de exit
+code, die bewees zojuist niets) op de exacte compilerformulering ("stack offset of N ...
+exceeded max offset") - faalt expliciet (`exit 1`) als die regel gevonden wordt.
+`package.json`'s `"test"`-script bijgewerkt: `bash scripts/check-stack-safety.sh && anchor
+test --validator legacy` - de poort draait nu VÓÓR elke testrun, niet als losse, makkelijk te
+vergeten stap.
+
+**Het script zelf getest tegen beide bekende staten, niet aangenomen dat het werkt:**
+- Tegen de kapotte code (dezelfde `c8876f5`-versie hierboven): **exit code 1**, met een
+  duidelijke foutmelding die naar deze sectie verwijst.
+- Tegen de gefixte code: **exit code 0**, "Geen stackframe-waarschuwingen gevonden - veilig."
+- **Eind-tot-eind bevestigd met het ECHTE, bijgewerkte `yarn test`-commando** (niet alleen
+  het script los): draait de stack-check, dan de volledige suite, **80 passing, 2 pending, 0
+  failing** - de poort zit nu daadwerkelijk in het pad dat elke toekomstige sessie gebruikt,
+  niet alleen als los, ongebruikt script in `scripts/`.
+
+**Reikwijdte, eerlijk benoemd:** dit vangt toekomstige stackframe-regressies op ELKE
+instructie (niet alleen `TransferTokenViaSession`), omdat het de VOLLEDIGE `anchor build`-
+uitvoer controleert, niet een specifieke functienaam. Het vangt NIET andere klassen
+build-diagnostiek die `anchor build` mogelijk ooit op dezelfde "waarschuwing zonder
+falende exit code"-manier zou rapporteren - dit script is specifiek gericht op de
+stackframe-klasse, niet een generieke "parse alle mogelijke toekomstige Anchor-diagnostiek"-
+oplossing.

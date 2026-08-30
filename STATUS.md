@@ -11297,3 +11297,69 @@ als "de bescherming is er al" gelezen worden vóór die laatste stap voltooid en
 Zie sectie 120 voor de eerste, specifieke constatering hiervan (bij `ThresholdChange`'s
 eigen nut) - deze paragraaf tilt 'm op tot een projectbrede waarschuwing, niet beperkt tot
 één kind.
+
+## 122. Sectie 118/stap 5, kind 2 van 3: `initiate_advanced_action`/`finalize_advanced_action` -
+commitment over het volledige CPI-doel, hoogste stackrisico van de drie kinds
+
+**Het meest ongewone van de drie kinds, zoals gevraagd expliciet uitgewerkt: er bestaat
+geen "bedrag/bestemming" voor een generieke CPI.** `action_commitment` bindt zich in plaats
+daarvan aan het VOLLEDIGE CPI-doel - programma-ID, ELKE meegegeven account (sleutel +
+schrijf-/signer-vlag) EN de volledige instructiedata - exact dezelfde velden die
+`execute_advanced`'s eigen, al-bewezen challenge al bindt (sectie 25/32), hier zonder nonce.
+
+### Ambiguïteit-bestendigheid van de hash - expliciet nagegaan, niet aangenomen
+
+Drie concrete manieren waarop twee verschillende CPI's PER ONGELUK dezelfde hash zouden
+kunnen opleveren, en waarom elk daarvan hier structureel is uitgesloten:
+- **Accountvolgorde herschikt:** elke account draagt een VASTE breedte (32+1+1=34 bytes),
+  aaneengesloten in iteratievolgorde - volgorde zit in de bytereeks zelf, geen aparte
+  lijst/index die los zou kunnen raken. Twee CPI's met dezelfde accounts in een andere
+  volgorde geven een andere bytereeks, dus een andere hash.
+- **isSigner/isWritable-vlaggen "wegvallen" in een buuraccount se sleutelbytes:** de vaste
+  34-bytebreedte per account (geen scheidingstekens, geen variabele lengte) maakt dit
+  structureel onmogelijk - er is geen manier om een vlag-byte te laten "verschuiven" naar
+  wat de hash als sleutelbytes van een ander account leest.
+- **Instructiedata die toevallig op nog een account lijkt (of andersom):** `account_count`
+  (u16) én de instructiedata-lengte (u32) worden BEIDE expliciet vóór hun eigen veld
+  meegehashet (zelfde patroon als `execute_advanced`'s bestaande payload) - het einde van de
+  accountmetadata en het begin van de instructiedata is daardoor nooit dubbelzinnig, ongeacht
+  de daadwerkelijke bytewaarden.
+
+`build_cpi_account_metadata` (nieuwe, gedeelde helper) bouwt deze bytes ÉÉN keer per
+aanroep en levert ook meteen de `AccountMeta`/`AccountInfo`-lijsten voor de daadwerkelijke
+`invoke_signed` bij finalize - initiate gebruikt alleen de bytes (voor challenge/commitment),
+finalize gebruikt alle drie. Voorkomt dat dezelfde fiddly is-vault/is-signer-logica drie keer
+apart geschreven zou moeten worden (initiate se challenge, initiate se commitment, finalize
+se herberekening + daadwerkelijke CPI).
+
+### Herverificatie bij finalize - niet alleen de commitment, ook de allowlist opnieuw
+
+`finalize_advanced_action` herhaalt `execute_advanced`'s eigen eager-checks (self-CPI,
+executable, allowlist-lidmaatschap) OPNIEUW tegen de LIVE `PolicyAccount`, niet alleen tegen
+wat bij initiate al gold - zelfde principe als `execute_advanced_via_session`'s bestaande
+live-herverificatie (sectie 76/ontwerppunt 2: "nooit gecached"). Reden: de eigenaar kan het
+programma tussen initiate en finalize (tot 24+ uur later) van de allowlist verwijderd hebben,
+bijvoorbeeld omdat het inmiddels verdacht blijkt - een reeds-geautoriseerde, maar nog niet
+uitgevoerde CPI mag dan niet alsnog doorgaan alsof er niets veranderd is.
+
+### Stackrisico - het hoogste van de drie kinds, expliciet extra gecontroleerd
+
+`FinalizeAdvancedAction` draagt de meeste velden van de drie nieuwe kinds (`wallet`/`vault`/
+`pending_action` getypeerd, `policy`/`cpi_program`/`passkeys`/`instructions_sysvar`
+UncheckedAccount) - vergelijkbaar met `ExecuteAdvanced`, waar dit exacte type probleem
+eerder al daadwerkelijk optrad (sectie 69, `action_nonce`'s 8 bytes) en waar sectie 116's
+eigen `WalletAccount`-groei het opnieuw deed (sectie 119, `TransferTokenViaSession`). Extra
+grondig gecontroleerd, niet volstaan met het standaard `check-stack-safety.sh`-resultaat:
+volledig schone `target/`, verse `anchor build`, en de HELE uitvoer doorzocht op elke
+vermelding van het woord "stack" (niet alleen de bekende foutformulering) - **geen
+treffers.**
+
+**Bewijs:**
+- `cargo check -p spankwallet`: groen.
+- `cargo test -p spankwallet --lib`: 5/5 groen, ongewijzigd.
+- `scripts/check-stack-safety.sh`: schoon.
+- Aanvullende, verse `anchor build` met volledige-log-grep op "stack" (hoofdletter-
+  ongevoelig): geen treffers.
+
+**Diff-omvang:** `programs/spankwallet/src/instructions.rs` (+383), `lib.rs` (+28) - geen
+wijziging aan `state.rs`/`errors.rs`.

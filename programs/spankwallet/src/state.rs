@@ -95,6 +95,33 @@ pub struct WalletAccount {
     /// WalletAccount als SessionKeyAccount (die laatste heeft geen Option-
     /// velden en faalt hierop wél echt fail-closed).
     pub session_epoch: u64,
+
+    /// STATUS.md sectie 115 (spend-cap-ontwerpdocument): instant-limiet in
+    /// lamports voor de directe paden (execute/hunt - transfer_token en
+    /// execute_advanced gaan altijd via de PendingAction-wachtrij, zie
+    /// sectie 115 punt 2e). `0` = veiligste stand ("alles moet queuen"),
+    /// de default voor elk bestaand account na deze upgrade (fail-safe,
+    /// zelfde precedent als action_nonce/session_epoch hierboven). Bewust
+    /// VLAK, geen `Option` - dit programma heeft al één gedocumenteerde
+    /// Option-tijdbom (deposit_authority, sectie 85), geen tweede
+    /// toegevoegd. Wijzigen kan alleen via `initiate_threshold_change`/
+    /// `finalize_threshold_change` (kind=3 op PendingAction hieronder),
+    /// zelfde timelock als een opname zelf - zie sectie 115 punt 3 voor
+    /// waarom een instant wijzigbare drempel het hele mechanisme zou
+    /// ondermijnen.
+    pub spend_threshold_lamports: u64,
+
+    /// STATUS.md sectie 115: noodstop-vlag. `false` = normaal. Primair
+    /// gezet door `disarm_wallet_via_backup_authority` (NIET via een
+    /// WebAuthn-ceremonie - zie sectie 115 punt 2c voor waarom dat de kern
+    /// van dit mechanisme is tegen het ceremonie-kapingsdreigingsmodel uit
+    /// sectie 72), secundair via `disarm_wallet_via_passkey`. Blokkeert
+    /// execute/transfer_token/execute_advanced/hunt EN elke
+    /// initiate_*/finalize_* op PendingAction, totdat `rearm_wallet` het
+    /// terugzet. `cancel_action`/`cancel_recovery` dragen bewust GEEN
+    /// `!disarmed`-constraint (een verdedigende actie mag nooit geblokkeerd
+    /// worden door de staat waar hij tegen beschermt).
+    pub disarmed: bool,
 }
 
 impl WalletAccount {
@@ -102,6 +129,21 @@ impl WalletAccount {
     // + vault_bump (1) + created_at (8) + backup_authority (32)
     // + recovery_state option (1 + RecoveryState::LEN) + recovery_timelock_seconds (8)
     // + deposit_authority option (1 + 32) + action_nonce (8) + session_epoch (8)
+    // + spend_threshold_lamports (8) + disarmed (1)
+    //   = 247 (vóór sectie 115) + 9 (de twee nieuwe velden) = 256
+    //
+    // STATUS.md sectie 115/meetstap 1 (2026-08-30): 256 is de VOLLEDIGE
+    // Option-worst-case (recovery_state EN deposit_authority beide Some) -
+    // theoretisch, deposit_authority is vandaag nog altijd onbereikbaar
+    // Some (precies één schrijfplek, altijd None, zie instructions.rs). De
+    // BEREIKBARE worst case (recovery_state Some, deposit_authority
+    // geforceerd None) is 256 - 32 = 224. Live gemeten tegen alle 17
+    // bestaande WalletAccounts (`scripts/checkWorstCaseAccountSafety.ts`,
+    // constanten tijdelijk op 224/256 gezet): 12 accounts op 231 bytes
+    // (marge 7), 4 op 239 bytes (marge 15), 1 op 247 bytes (marge 23) -
+    // ALLE 17 veilig onder 224, GEEN migratie nodig voor deze wijziging.
+    // Onder de volledige 256: alle 17 "onveilig" - ongewijzigde, nog
+    // steeds dode-letter-situatie, zelfde als vóór deze wijziging.
     pub const LEN: usize = 8
         + PASSKEY_PUBKEY_LEN
         + 32
@@ -114,7 +156,9 @@ impl WalletAccount {
         + 8
         + (1 + 32)
         + 8
-        + 8;
+        + 8
+        + 8
+        + 1;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]
@@ -363,6 +407,83 @@ impl SessionKeyAccount {
 /// STATUS.md sectie 103 voor de volledige afweging.
 pub const MAX_SESSION_DURATION_SLOTS: u64 = 1_512_000;
 
+/// STATUS.md sectie 115 (spend-cap-ontwerpdocument): singleton-PDA per
+/// wallet (`seeds = [b"pending_action", wallet.key()]`), zelfde
+/// deterministische-singleton-redenering als PolicyAccount/PasskeysAccount
+/// hierboven - `init` faalt vanzelf op een adres dat al bezet is, dus
+/// "maximaal één openstaande grote actie tegelijk" wordt afgedwongen door
+/// Solana's eigen account-aanmaakregel, geen aparte teller/vlag nodig.
+/// `kind` onderscheidt vier gevallen (0=SolWithdrawal, 1=TokenTransfer,
+/// 2=AdvancedAction, 3=ThresholdChange) - zie sectie 115 punt 2b/2c voor de
+/// per-kind payload-/challenge-opbouw. `action_commitment` bevat BEWUST
+/// geen nonce (die beschermt alleen de initiate-handtekening zelf, al
+/// voltooid zodra dit account bestaat) - finalize herberekent 'm uit de
+/// dan aangeleverde waarden en eist een exacte match, geen nieuwe
+/// handtekening nodig.
+#[account]
+pub struct PendingAction {
+    pub wallet: Pubkey,
+    pub bump: u8,
+    pub kind: u8,
+    pub initiated_at: i64,
+    /// Snapshot van wallet.session_epoch bij initiate - finalize eist dat
+    /// dit nog gelijk is aan de HUIDIGE wallet.session_epoch, zelfde
+    /// mechanisme als SessionKeyAccount.epoch hierboven: een geslaagde
+    /// finalize_recovery maakt zo elke vóór de recovery gequeuede actie in
+    /// één klap ongeldig, zonder 'm apart te hoeven opzoeken/sluiten.
+    pub epoch: u64,
+    pub action_commitment: [u8; 32],
+    /// Welke passkey initieerde - een eventuele confirm_* (2-of-2, alleen
+    /// relevant/vereist als er bij initiate al ≥2 geldige passkeys
+    /// bestonden) moet een AFWIJKENDE herleide sleutel opleveren.
+    pub initiator_passkey: [u8; PASSKEY_PUBKEY_LEN],
+    /// Of een tweede, andere passkey heeft mee-ondertekend. Start al
+    /// `true` bij initiate als er destijds geen tweede passkey bestond
+    /// (single-passkey-wallets vallen zo terug op timelock-only-
+    /// bescherming i.p.v. voor altijd geblokkeerd te worden - zie sectie
+    /// 115's aanvulling, punt B).
+    pub confirmed: bool,
+}
+
+impl PendingAction {
+    // discriminator (8) + wallet (32) + bump (1) + kind (1) + initiated_at (8)
+    // + epoch (8) + action_commitment (32) + initiator_passkey (33) + confirmed (1)
+    // = 124, geverifieerd veld-voor-veld tegen STATUS.md sectie 115/meetstap 1
+    pub const LEN: usize = 8 + 32 + 1 + 1 + 8 + 8 + 32 + PASSKEY_PUBKEY_LEN + 1;
+}
+
+/// STATUS.md sectie 115 (aanvulling, punt A): eigen satellite-PDA voor de
+/// cumulatieve glijdende-vensterlimiet op de instant-paden (execute/hunt) -
+/// bewust NIET rechtstreeks op WalletAccount, want zelfs de kleinst
+/// haalbare inline-encoding (8 bytes) past niet meer in de 7 bytes marge
+/// die na spend_threshold_lamports/disarmed nog over is op de 12 krapste
+/// WalletAccounts (zie de bytenrekensom aldaar). Als eigen, gloednieuw
+/// accounttype (geen bestaande instances) kost dit 0 bytes migratie-risico
+/// voor bestaande wallets. Seeds = [b"spend_window", wallet.key()], lui
+/// aangemaakt (`init_if_needed`), zelfde argument als PolicyAccount: een
+/// PDA die uitsluitend van wallet.key() afhangt kan nooit een ander
+/// accounttype "per ongeluk" hergebruiken.
+#[account]
+pub struct SpendWindow {
+    pub wallet: Pubkey,
+    pub bump: u8,
+    /// Door de eigenaar ingesteld, ZELF ook timelock-beschermd (via
+    /// dezelfde initiate_threshold_change/finalize_threshold_change,
+    /// kind=3 op PendingAction hierboven, uitgebreid met deze tweede
+    /// waarde) - anders zou een gekaapte ceremonie 'm in één klap kunnen
+    /// openzetten, zelfde reden als bij spend_threshold_lamports.
+    pub window_total_cap_lamports: u64,
+    pub window_started_at: i64,
+    pub spent_lamports_this_window: u64,
+}
+
+impl SpendWindow {
+    // discriminator (8) + wallet (32) + bump (1) + window_total_cap_lamports (8)
+    // + window_started_at (8) + spent_lamports_this_window (8)
+    // = 65, geverifieerd veld-voor-veld tegen STATUS.md sectie 115/meetstap 1
+    pub const LEN: usize = 8 + 32 + 1 + 8 + 8 + 8;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +522,12 @@ mod tests {
             deposit_authority: Some(Pubkey::default()),
             action_nonce: 0,
             session_epoch: 0,
+            // STATUS.md sectie 115: de twee nieuwste velden, zelfde
+            // Some/Some-redenering hierboven raakt deze twee niet (allebei
+            // vlak, geen Option) - gewoon meegenomen zodat deze helper de
+            // volledige, huidige LEN blijft serialiseren.
+            spend_threshold_lamports: 0,
+            disarmed: false,
         }
     }
 
@@ -411,11 +538,19 @@ mod tests {
     /// falen tegen de HUIDIGE structuurdefinitie - geen giswaarde voor die
     /// velden, een echte deserialisatiefout. Native `cargo test` volstaat
     /// hiervoor (geen SBF-target/live validator nodig, puur Borsh-lengte-/
-    /// offsetlogica). Slice-lengte bewust hardcoded op LEN - 16 (niet
-    /// dynamisch tegen een lopend veldenaantal) zodat deze test dezelfde,
-    /// oorspronkelijke 231-byte-grens blijft bewaken ongeacht hoeveel velden
-    /// er later nog bijkomen - zie de aparte test hieronder voor de nieuwste
-    /// (239-vs-247) grens specifiek.
+    /// offsetlogica).
+    ///
+    /// GECORRIGEERD (STATUS.md sectie 115/stap 2): de slice-lengte stond
+    /// hier voorheen als `LEN - 16`, met het argument dat dit "de 231-byte-
+    /// grens blijft bewaken ongeacht hoeveel velden er later nog bijkomen" -
+    /// dat argument was zelf niet houdbaar, en deze sessie's toevoeging
+    /// (spend_threshold_lamports + disarmed, 9 bytes) bewijst dat meteen:
+    /// `LEN - 16` zou na die toevoeging 240 zijn opgeleverd, niet 231 - de 9
+    /// nieuwe bytes waren dan stilzwijgend WEL meegenomen in wat "het oude
+    /// account" moest voorstellen. Vervangen door een directe, letterlijke
+    /// 231 - de enige vorm die daadwerkelijk ongevoelig is voor toekomstige
+    /// veldtoevoegingen, zie de aparte test hieronder voor de 239-grens en
+    /// de nieuwste 247-grens specifiek.
     #[test]
     fn old_231_byte_wallet_account_fails_closed_against_current_layout() {
         let wallet = sample_wallet_for_layout_tests();
@@ -424,12 +559,10 @@ mod tests {
         wallet.try_serialize(&mut current_layout_bytes).unwrap();
         assert_eq!(current_layout_bytes.len(), WalletAccount::LEN);
 
-        // De oorspronkelijke, vóór-C-1-fix layout is de huidige MINUS de 16
-        // achteraan toegevoegde bytes van action_nonce (8) + session_epoch
-        // (8), nooit ertussenin (zie beide veldcommentaren) - dus gewoon de
-        // eerste (LEN - 16) bytes van een geldig, huidig account simuleren
-        // een echt, bestaand, oorspronkelijk account.
-        let old_layout_bytes = &current_layout_bytes[..WalletAccount::LEN - 16];
+        // De oorspronkelijke, vóór-C-1-fix layout is exact de eerste 231
+        // bytes van een geldig, huidig account - een echt, bestaand,
+        // oorspronkelijk account had nooit meer dan dat.
+        let old_layout_bytes = &current_layout_bytes[..231];
         assert_eq!(old_layout_bytes.len(), 231);
 
         let mut slice: &[u8] = old_layout_bytes;
@@ -443,7 +576,12 @@ mod tests {
     /// B2 (STATUS.md sectie 76) - dezelfde fail-closed-garantie, nu specifiek
     /// voor de session_epoch-grens: een 239-byte WalletAccount (mét
     /// action_nonce, van vóór session_epoch) moet SCHOON falen tegen de
-    /// huidige 247-byte layout.
+    /// huidige layout. GECORRIGEERD (sectie 115/stap 2), zelfde reden als de
+    /// test hierboven: `LEN - 8` gaf vóór deze sessie's toevoeging nog 239
+    /// (toen was session_epoch het laatst-toegevoegde veld), maar zou na de
+    /// nieuwe 9 bytes de VERKEERDE 8 staartbytes hebben afgesneden
+    /// (disarmed + 7 van de 8 bytes van spend_threshold_lamports, niet
+    /// session_epoch) - vervangen door een directe, letterlijke 239.
     #[test]
     fn old_239_byte_wallet_account_fails_closed_against_current_layout() {
         let wallet = sample_wallet_for_layout_tests();
@@ -452,14 +590,40 @@ mod tests {
         wallet.try_serialize(&mut current_layout_bytes).unwrap();
         assert_eq!(current_layout_bytes.len(), WalletAccount::LEN);
 
-        let old_layout_bytes = &current_layout_bytes[..WalletAccount::LEN - 8];
+        let old_layout_bytes = &current_layout_bytes[..239];
         assert_eq!(old_layout_bytes.len(), 239);
 
         let mut slice: &[u8] = old_layout_bytes;
         let result = WalletAccount::try_deserialize(&mut slice);
         assert!(
             result.is_err(),
-            "een 239-byte WalletAccount (mét action_nonce, zonder session_epoch) had schoon moeten falen tegen de huidige 247-byte layout"
+            "een 239-byte WalletAccount (mét action_nonce, zonder session_epoch) had schoon moeten falen tegen de huidige layout"
+        );
+    }
+
+    /// STATUS.md sectie 115/stap 2 - zelfde fail-closed-garantie, nu voor de
+    /// NIEUWSTE grens: een 247-byte WalletAccount (mét action_nonce EN
+    /// session_epoch, van vóór spend_threshold_lamports/disarmed) moet
+    /// SCHOON falen tegen de huidige layout. Zelfde patroon als de twee
+    /// tests hierboven, ditmaal meteen met een directe, letterlijke
+    /// slice-lengte - geen `LEN - N` meer, zie de correctie hierboven voor
+    /// waarom dat de robuustere vorm is.
+    #[test]
+    fn old_247_byte_wallet_account_fails_closed_against_current_layout() {
+        let wallet = sample_wallet_for_layout_tests();
+
+        let mut current_layout_bytes = Vec::new();
+        wallet.try_serialize(&mut current_layout_bytes).unwrap();
+        assert_eq!(current_layout_bytes.len(), WalletAccount::LEN);
+
+        let old_layout_bytes = &current_layout_bytes[..247];
+        assert_eq!(old_layout_bytes.len(), 247);
+
+        let mut slice: &[u8] = old_layout_bytes;
+        let result = WalletAccount::try_deserialize(&mut slice);
+        assert!(
+            result.is_err(),
+            "een 247-byte WalletAccount (mét action_nonce/session_epoch, zonder spend_threshold_lamports/disarmed) had schoon moeten falen tegen de huidige layout"
         );
     }
 

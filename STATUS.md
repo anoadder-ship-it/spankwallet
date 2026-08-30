@@ -10065,3 +10065,758 @@ correct `echte validator bevestigd (http://127.0.0.1:8899): solana-core=4.1.2` e
 draaide door naar de 80 passing/2 pending hierboven. Deze fail-closed poort - eerder ergens
 ingebouwd, hier voor het eerst in een sessie daadwerkelijk getriggerd en gezien werken - blijft
 dus intact en doet precies wat hij moet doen.
+
+## 115. Ontwerpdocument: spend-cap-mechanisme voor de directe paden (execute/transfer_token/execute_advanced/hunt) - vervolg op sectie 99, niets gebouwd
+
+Gevraagd: een volledig ontwerp voor het belangrijkste resterende protocolgat - de vier
+directe paden kennen vandaag geen enkele bestedingslimiet - beoordeeld specifiek tegen het
+WebAuthn-ceremonie-kapingsdreigingsmodel (sectie 72), niet tegen een generieke
+best-practice-lijst. **Niets van onderstaande is gebouwd of gewijzigd; broncode-referenties
+zijn allemaal tegen de HUIDIGE, ongewijzigde `state.rs`/`instructions.rs` gelezen, niet
+aangenomen.**
+
+**Het dreigingsmodel, kort herhaald (sectie 72):** een kwaadaardige browserextensie steelt
+de passkey niet - ze laat de echte hardware-ceremonie doorgaan maar herschrijft de
+challenge-/payload-bytes vlak vóór `navigator.credentials.get()` ondertekent. De aanvaller
+heeft dus GEEN standalone, offline bruikbaar geheim (anders dan een gestolen sessiesleutel) -
+hij moet wachten tot de eigenaar ZELF een live ceremonie start, en kan dat bij ELKE
+volgende legitieme ondertekenmoment opnieuw doen. Twee gevolgen die de rest van dit document
+sturen: (a) elke mitigatie die zelf ALLEEN via een normale passkey-ceremonie loopt, deelt
+in principe dezelfde kwetsbaarheid als wat hij beschermt, en (b) de aanvaller kan geen
+willekeurig aantal extra ceremonies afdwingen - alleen ceremonies die de eigenaar toch al
+zelf initieert (elke `navigator.credentials.get()`-aanroep triggert een systeemeigen
+biometrie-/PIN-prompt die de eigenaar fysiek moet goedkeuren; een extensie kan die niet
+onzichtbaar zelf oproepen).
+
+### 1. De drie kandidaten uit sectie 99, herwogen tegen dit specifieke model
+
+**Arm-to-open (sectie 99's eigen aanbeveling): zwak tegen dit model, en sectie 99 zegt dat
+zelf al expliciet.** Bewapenen vereist DEZELFDE live ceremonie als de actie zelf - een
+aanvaller die een ceremonie kan kapen, kaapt net zo goed de bewapeningsceremonie, of wacht
+gewoon tot de eigenaar toch al beide doet in dezelfde sessie. Tegen een STANDALONE geheim
+(sessiesleutel) is arm-to-open een reëel, aantoonbaar voordeel (onvoorspelbaar venster i.p.v.
+een publiek vast tijdstip) - maar dat is een ANDER dreigingsmodel dan waar dit document
+tegen beoordeelt. Tegen herhaalde kleine diefstal over meerdere ceremonies: geen enkel
+voordeel - een open venster begrenst WANNEER, niet HOEVEEL, dus een aanvaller die keer op
+keer een ceremonie binnen een open venster kaapt, is door dit mechanisme op geen enkele
+manier gehinderd. **Score tegen dit dreigingsmodel: geen bescherming op de as die telt.**
+
+**Een simpele, vaste bestedingscap (sectie 99's "derde optie"): begrenst schade per
+ceremonie, doet niets tegen herhaling.** Een aanvaller met een gekaapte ceremonie trekt
+gewoon tot de cap - identiek aan wat sectie 99 zelf al vaststelde. Het echte, onderbelichte
+punt hier: een vaste cap ZONDER enige aanvullende maatregel is bij herhaalde kaping
+(dit document se eigen tweede subvraag) een LINEAIRE lek-snelheid, geen begrenzing - een
+aanvaller die op elke legitieme ceremonie van de eigenaar kan meeliften, trekt de cap
+telkens opnieuw, net zo lang tot de vault leeg is. Voor een eigenaar die de wallet dagelijks
+gebruikt, is "begrensd per keer" geen echte geruststelling als het "onbegrensd over tijd"
+blijft. **Score: begrenst het enkelvoudige moment, lost het cumulatieve probleem niet op -
+zie kandidaat 4 hieronder voor een aanvulling die specifiek dit gat dicht.**
+
+**Pending withdrawal + drempel-tweede-passkey-eis (sectie 72/99's eigen "al-geplande"
+richting): de enige van de drie die iets structureel toevoegt tegen dit exacte model - MAAR
+alleen als de tweede handtekening écht van een ANDERE, fysiek gescheiden ceremonie komt.**
+Twee varianten, met een scherp onderscheid dat sectie 99 zelf nog niet had uitgewerkt:
+- **Timelock-only, permissionless finalize (zoals `finalize_recovery` vandaag al werkt):**
+  beschermt via VERTRAGING + ZICHTBAARHEID - de eigenaar krijgt een venster om een
+  onverwachte, gekaapte opname op te merken en te vetoën. Dit werkt ONGEACHT of de
+  finalize-ceremonie zelf gekaapt kan worden, want finalize vereist in dit ontwerp GEEN
+  nieuwe ceremonie - de autorisatie gebeurde al bij het queuen. Reëel, structureel voordeel:
+  vandaag bestaat dit venster niet, punt.
+- **Met een verplichte TWEEDE, ANDERE passkey bij finalize (echte 2-of-2):** voegt daar
+  bovenop een onafhankelijke-credential-eis toe - een aanvaller die ÉÉN browser/extensie/
+  apparaat heeft gekaapt, kan een grote opname nu niet meer alleen voltooien, hij moet ook
+  een ceremonie op het TWEEDE, fysiek gescheiden apparaat kapen. Dat is de enige van alle
+  hier besproken mechanismen die de daadwerkelijke AANVALSOPPERVLAKTE verkleint in plaats
+  van alleen de SCHADE per gebeurtenis of het REACTIEVENSTER - maar **alleen als dat tweede
+  apparaat/die tweede browser genuinely gescheiden is.** Op hetzelfde apparaat/dezelfde
+  browser "co-ondertekenen" met een tweede geregistreerde passkey beschermt NUL - dezelfde
+  gecompromitteerde extensie ziet en herschrijft beide ceremonies. Dit is een eerlijke,
+  harde grens die het ontwerp hieronder expliciet noemt, niet verzwijgt.
+
+**Kritische, eerlijke conclusie op dit onderdeel:** geen van de drie oorspronkelijke
+kandidaten is als STAND-ALONE mechanisme sterk tegen ceremonie-kaping. Arm-to-open en de
+vaste cap zijn allebei structureel zwak op precies de as die dit dreigingsmodel raakt. Alleen
+de 2-of-2-variant van pending-withdrawal doorbreekt het "aanvaller wacht gewoon tot de
+volgende legitieme ceremonie"-patroon - en zelfs die alleen voor eigenaars die daadwerkelijk
+een tweede, fysiek gescheiden passkey geregistreerd hebben. Dit stuurt het gecombineerde
+ontwerp hieronder: geen van de drie wordt losgelaten, maar de combinatie moet zelf ook expliciet
+toegeven waar hij nog steeds niets aan doet (zie "Wat dit ontwerp NIET oplost" aan het eind).
+
+### 2. Het gecombineerde ontwerp, op instructieniveau
+
+**Kernkeuze die de rest van dit ontwerp vormgeeft: al het "pending"-toestand verhuist naar
+één nieuw, apart accounttype (`PendingAction`) i.p.v. naar `WalletAccount` zelf.** Reden,
+vooruitlopend op punt 4's bytenrekenwerk: `WalletAccount` heeft nu al maar 16/24 bytes marge
+(sectie 85/99). Een naïef ontwerp met een apart pending-withdrawal-veld ÉN een apart
+pending-threshold-change-veld rechtstreeks op `WalletAccount` (zoals `recovery_state`)
+kost al snel 24+ bytes en past NIET (zie punt 4). Door alle wacht-toestand naar een eigen,
+gloednieuw account te verplaatsen - dat geen enkele bestaande-account-migratievraag heeft,
+want er bestaan nog geen instanties van - blijft `WalletAccount` zelf bijna ongemoeid.
+
+#### 2a. Nieuwe velden op `WalletAccount`
+
+Beide bewust VLAKKE (niet-`Option`) velden, zelfde discipline als sectie 99's
+`time_gate_unlock_until` en om dezelfde reden: dit programma heeft al één gedocumenteerde
+tijdbom rond `Option`-velden (`deposit_authority`, sectie 85) en voegt daar bewust geen
+tweede aan toe.
+
+| Veld | Type | Bytes | Betekenis |
+|---|---|---|---|
+| `spend_threshold_lamports` | `u64` | 8 | Instant-limiet in lamports. `0` = veiligste stand (alles moet queuen) - de default voor de 14 bestaande wallets na upgrade, fail-safe zoals sectie 85/86's precedent. |
+| `disarmed` | `bool` | 1 | Noodstop (zie 2c/3-Disarm hieronder). `false` = normaal. |
+
+**Totaal: +9 bytes op `WalletAccount`.** Geen nieuw `Option`-veld, geen nieuwe
+state-afhankelijke worst-case-complicatie - zie punt 4 voor de volledige herberekening.
+
+#### 2b. Nieuw accounttype: `PendingAction` (singleton-PDA per wallet)
+
+Seeds: `[b"pending_action", wallet.key()]` - deterministisch, ÉÉN adres per wallet, zelfde
+patroon als `PolicyAccount`/`PasskeysAccount`. **Bewust een singleton, niet een lijst/PDA-
+per-opname:** `init` faalt vanzelf als er al een pending action bestaat op dit adres - dat
+is precies de gewenste beperking ("maximaal één openstaande grote actie tegelijk per
+wallet"), afgedwongen door Solana's eigen account-aanmaakregel, zonder een extra teller/vlag
+nodig te hebben. Neveneffect, expliciet als voordeel: dit voorkomt ook dat een aanvaller
+meerdere grote opnames TEGELIJK in de wachtrij zou kunnen zetten om de eigenaar se
+review-capaciteit te overspoelen - een concrete, aanwijsbare veiligheidswinst van deze
+keuze, niet alleen een bytebesparing.
+
+```rust
+#[account]
+pub struct PendingAction {
+    pub wallet: Pubkey,                    // 32 - zelfde auditeerbaarheids-reden als
+                                            //      SessionKeyAccount/PolicyAccount/PasskeysAccount
+    pub bump: u8,                          // 1
+    pub kind: u8,                          // 1 - 0=SolWithdrawal 1=TokenTransfer
+                                            //     2=AdvancedAction 3=ThresholdChange
+    pub initiated_at: i64,                 // 8
+    pub epoch: u64,                        // 8 - snapshot van wallet.session_epoch bij initiate,
+                                            //     zelfde mechanisme als SessionKeyAccount.epoch
+    pub action_commitment: [u8; 32],       // 32 - hash van de kind-specifieke waarden
+                                            //      (GEEN nonce erin, zie toelichting hieronder)
+    pub initiator_passkey: [u8; PASSKEY_PUBKEY_LEN], // 33 - welke passkey initieerde
+    pub confirmed: bool,                   // 1 - of een TWEEDE, ANDERE passkey heeft
+                                            //     mee-ondertekend (alleen relevant/vereist
+                                            //     als er ≥2 passkeys bestonden bij initiate)
+}
+// LEN = 8 (discriminator) + 32+1+1+8+8+32+33+1 = 124 bytes
+```
+
+**Waarom `action_commitment` GEEN nonce bevat, in tegenstelling tot elke andere challenge in
+dit programma:** de nonce se enige taak is replay-preventie van de INITIATE-handtekening
+zelf - die taak is al voltooid zodra `initiate_*` slaagt (dezelfde `check_current_action_nonce`/
+`consume_action_nonce`-machinerie als elke bestaande instructie, ongewijzigd). `finalize_*`
+verifieert geen NIEUWE handtekening - het bewijst alleen dat de op dát moment aangeleverde
+waarden (ontvanger/bedrag/CPI-doel) IDENTIEK zijn aan wat ooit is geautoriseerd. Een nonce
+zou hier niets toevoegen en zou het bovendien onmogelijk maken de commitment op finalize-tijd
+opnieuw te berekenen (`wallet.action_nonce` is dan allang verder opgehoogd door andere,
+tussentijdse acties).
+
+Rentkosten: geëxtrapoleerd uit sectie 85's daadwerkelijk gemeten cijfer voor het bestaande
+341-byte `SessionKeyAccount` (3.264.240 lamport = 0,00326424 SOL, dus ~9.573 lamport/byte) -
+voor 124 bytes: ~1.187.000 lamport ≈ **~0,0012 SOL, schatting, te bevestigen met
+`Rent::get()?.minimum_balance()` bij implementatie**, niet als hard getal aangenomen.
+
+#### 2c. Nieuwe instructies
+
+Notatie: elke `initiate_*`/`finalize_*` heeft dezelfde `wallet.recovery_state.is_none()`-
+constraint als de bestaande vier directe paden (zie 2d hieronder voor de volledige
+recovery-afweging), en dezelfde `!wallet.disarmed`-constraint (zie Disarm hieronder).
+
+**`initiate_withdrawal(recipient: Pubkey, amount: u64, client_action_nonce, client_data_json)`**
+Accounts: `wallet` (mut), `pending_action` (init, payer=payer, space=PendingAction::LEN,
+seeds=[b"pending_action", wallet]), `passkeys`, `instructions_sysvar`, `payer` (Signer).
+Challenge-domain `b"initiate_withdrawal"`, payload = nonce||recipient||amount (identiek aan
+`execute`'s bestaande payload-opbouw). Na verificatie: `action_commitment =
+hashv([wallet, b"pending_withdrawal", recipient, amount_le])`, `kind=0`,
+`initiator_passkey=<herleide sleutel>`, `epoch=wallet.session_epoch`,
+`confirmed = (totaal_aantal_geldige_passkeys < 2)` (zie hieronder - als er geen tweede
+passkey bestaat, kan 2-of-2 sowieso niet gehaald worden, dus start het veld al "waar" i.p.v.
+de eigenaar voor altijd te blokkeren, zie de degradatie-afweging verderop).
+
+**`confirm_withdrawal(client_action_nonce, client_data_json)`** (en de kind-analoge varianten
+- zie "Eén gedeelde confirm/cancel" hieronder)
+Accounts: `wallet`, `pending_action` (mut), `passkeys`, `instructions_sysvar`. Challenge-domain
+`b"confirm_action"`, payload = nonce||pending_action.key()||pending_action.action_commitment.
+Vereist: herleide passkey ≠ `pending_action.initiator_passkey`
+(`SecondPasskeyMustDifferFromInitiator`, nieuwe errorcode). Zet `confirmed = true`.
+
+**`finalize_withdrawal(recipient: Pubkey, amount: u64)`** - permissionless, geen nieuwe
+ceremonie.
+Accounts: `wallet` (mut), `vault` (mut), `pending_action` (mut, close=caller - rent terug
+naar wie finalize aanroept, zelfde "closer betaalt/incasseert"-patroon als
+`close_expired_session`), `recipient` (mut). Vereist, in volgorde: `pending_action.kind ==
+0`, `pending_action.epoch == wallet.session_epoch` (anders `PendingActionStaleEpoch` -
+zie 2d), `pending_action.confirmed` (anders `PendingActionNotConfirmed`),
+`Clock::get()?.unix_timestamp >= pending_action.initiated_at + PENDING_ACTION_TIMELOCK_SECONDS`
+(anders `PendingActionTimelockNotElapsed`), en `hashv([wallet, b"pending_withdrawal",
+recipient, amount_le]) == pending_action.action_commitment` (anders
+`PendingActionCommitmentMismatch` - vangt een finalize-poging met ANDERE waarden dan
+oorspronkelijk geautoriseerd). Voert daarna exact dezelfde lamport-verplaatsing uit als
+`execute` vandaag al doet.
+
+**`cancel_action()`** (kind-agnostisch, ÉÉN instructie voor alle vier kinds)
+Accounts: `wallet`, `pending_action` (mut, close=caller), `passkeys`, `instructions_sysvar`.
+Vereist een geldige HUIDIGE passkey (elke, niet per se dezelfde als de initiator - zelfde
+"veto door een van de huidige geldige passkeys"-principe als `cancel_recovery`). Sluit
+`pending_action` onvoorwaardelijk, ongeacht kind/staat/timelock. **Bewust GEEN
+`!wallet.disarmed`-constraint** - annuleren moet altijd mogelijk blijven, ook tijdens een
+noodstop, zelfde argument als waarom `cancel_recovery`/`remove_passkey` buiten sectie 99's
+tijdpoort vielen.
+
+**Analoog, zelfde structuur, hier niet herhaald veld-voor-veld:**
+`initiate_token_transfer`/`finalize_token_transfer` (kind=1, payload/commitment als
+`transfer_token`'s bestaande payload: recipient_token_account||token_mint||amount||
+vault_token_account), `initiate_advanced_action`/`finalize_advanced_action` (kind=2, payload/
+commitment als `execute_advanced`'s bestaande payload: cpi_program||accounts||data - zie
+hieronder voor waarom dit pad ALTIJD verplicht is, nooit instant), `initiate_threshold_change`/
+`finalize_threshold_change` (kind=3, payload=nonce||new_threshold, commitment=
+hashv([wallet, b"pending_threshold_change", new_threshold_le])).
+
+**`disarm_wallet_via_backup_authority()`** - de daadwerkelijke noodstop, PRIMAIRE pad.
+Accounts: `wallet` (mut), `backup_authority` (Signer, `address = wallet.backup_authority`) -
+**bewust GEEN WebAuthn-ceremonie, geen `instructions_sysvar`.** Dit is de kern van dit
+onderdeel van het ontwerp: sectie 72's eigen "panic button"-eis ("de trigger-ceremonie moet
+via een kanaal lopen dat NIET dezelfde kwetsbaarheid deelt als de hoofd-passkey", regel
+5163) rechtstreeks toegepast. `backup_authority` is een bestaand, apart Ed25519-veld
+(`WalletAccount.backup_authority`, al aanwezig, 0 nieuwe bytes) dat NOOIT door een
+browserextensie-gebaseerde WebAuthn-kaping geraakt kan worden - een structureel andere
+sleutel, structureel ander ondertekenpad. **Bewust GEEN `recovery_state.is_none()`-
+constraint** - disarmen moet juist WEL werken tijdens een lopende recovery (arguably nuttiger
+dan ooit op dat moment). Zet `wallet.disarmed = true`.
+
+**`disarm_wallet_via_passkey(client_action_nonce, client_data_json)`** - SECUNDAIR,
+gemaks-pad voor als `backup_authority`'s sleutel niet snel voorhanden is. Zelfde
+challenge-patroon als elke andere passkey-instructie, domain `b"disarm_wallet"`. **Eerlijk
+gelabeld: dit pad deelt dezelfde kwetsbaarheid als alles wat het probeert te beschermen** -
+een extensie die AL een ceremonie kaapt, kan een disarm-poging net zo goed onderscheppen/
+laten mislukken/omleiden. Puur "beter dan niets", geen garantie - moet in de UI ook zo
+gelabeld worden, niet als evenwaardig aan de backup-authority-route gepresenteerd.
+
+**`rearm_wallet(client_action_nonce, client_data_json)`** - normale passkey-ceremonie, WEL
+`recovery_state.is_none()` (heractiveren van bestedingen tijdens een lopende recovery is
+nooit gewenst). Zet `wallet.disarmed = false`.
+
+**Waarom `disarmed` ALLE acht waarde-bewegende/wachtrij-vormende instructies blokkeert, niet
+alleen de instant-paden:** een owner die de noodstop indrukt, vertrouwt op dat moment
+per definitie GEEN enkele lopende autorisatie meer - ook niet een reeds-in-de-wachtrij-
+staande opname die hij zelf ooit (mogelijk gekaapt) heeft geïnitieerd. `disarmed` bevriest
+dus ook `finalize_*`, niet alleen de instant-paden - een reeds gequeuede, legitieme opname
+blijft daardoor gewoon liggen (niet geannuleerd, niet uitgevoerd) tot de eigenaar bewust
+`rearm_wallet` aanroept, waarna finalize weer mogelijk is als de timelock inmiddels
+verstreken is.
+
+**Nieuwe errorcodes nodig** (zelfde `#[msg(...)]`-stijl als `errors.rs`):
+`SecondPasskeyMustDifferFromInitiator`, `PendingActionStaleEpoch`,
+`PendingActionNotConfirmed`, `PendingActionTimelockNotElapsed`,
+`PendingActionCommitmentMismatch`, `WalletDisarmed`, `PendingActionAlreadyExists` (Anchor's
+eigen `init`-foutmelding op een bestaand adres is al voldoende, maar een eigen, duidelijkere
+naam is een kleine UX-verbetering).
+
+#### 2d. Verhouding tot de bestaande recovery-flow
+
+- **`initiate_*` en `finalize_*`: bevriezen tijdens een lopende recovery**, zelfde
+  `recovery_state.is_none()`-constraint als de bestaande vier directe paden. Consistent:
+  recovery betekent dat de eigenaar se passkey-controle zelf in twijfel staat - precies het
+  verkeerde moment om een grote opname te laten voltooien of een nieuwe te laten beginnen.
+- **`cancel_action`: NIET bevroren** - een verdedigende actie mag nooit geblokkeerd worden
+  door de situatie waar hij tegen beschermt, zelfde principe als `cancel_recovery`/
+  `disarm_wallet` hierboven.
+- **Een succesvolle `finalize_recovery` moet elke openstaande `PendingAction` impliciet
+  ongeldig maken - via het BESTAANDE `session_epoch`-mechanisme, geen nieuwe machinerie.**
+  `PendingAction.epoch` is een snapshot van `wallet.session_epoch` bij initiate;
+  `finalize_recovery` hoogt `session_epoch` vandaag al op (B2, sectie 76) om ELKE bestaande
+  sessiesleutel in één klap ongeldig te maken. `finalize_withdrawal`/`finalize_token_transfer`/
+  `finalize_advanced_action`/`finalize_threshold_change` controleren `pending_action.epoch ==
+  wallet.session_epoch` - een `PendingAction` die vóór een recovery is aangemaakt (dus
+  geautoriseerd door de OUDE, mogelijk gecompromitteerde passkey) kan na een geslaagde
+  recovery dus nooit meer voltooid worden, zonder dat `finalize_recovery` zelf iets extra's
+  hoeft te doen. Blijft wel als "verweesd" account staan (rent vast, net als de drie
+  341-byte-`SessionKeyAccount`-zombies uit sectie 85/86) tot iemand alsnog `cancel_action`
+  aanroept met een NIEUWE, geldige (post-recovery) passkey - dat kan altijd, `cancel_action`
+  draagt geen epoch-check. Zelfde bewust-aanvaarde, kleine rent-kost als het bestaande
+  precedent, hier expliciet vooraf benoemd i.p.v. achteraf herontdekt.
+
+#### 2e. `execute_advanced` specifiek: ALTIJD via de wachtrij, nooit instant, ongeacht bedrag
+
+**Expliciet antwoord op de gestelde vraag: execute_advanced krijgt GEEN drempel-op-bedrag-
+route.** Twee onafhankelijke, allebei-op-zichzelf-doorslaggevende redenen:
+1. **Er is structureel geen betrouwbaar "bedrag" om tegen te toetsen.** CPI-instructiedata is
+   ondoorzichtige bytes tegen een willekeurig, door de eigenaar zelf toegestaan extern
+   programma (sectie 26/27) - er bestaat geen generieke manier om uit `cpi_instruction_data:
+   Vec<u8>` een lamport-equivalent te destilleren zonder per-programma-specifieke parsers te
+   bouwen, wat precies het soort bespoke-complexiteit is dat dit project consequent vermijdt
+   (zie `execute`'s eigen commentaar: "BEWUST GEEN generieke CPI-doorgeefluik").
+2. **Een CLIENT-gerapporteerd bedrag zou het hele mechanisme ondermijnen, niet alleen
+   onnauwkeurig zijn.** Als de client zelf een "geschat bedrag" mag opgeven om de instant-vs-
+   wachtrij-beslissing te sturen, kan een gekaapte ceremonie triviaal een LAAG getal opgeven
+   terwijl de daadwerkelijke CPI een grote verplaatsing uitvoert - het getal wordt nergens
+   tegen de echte CPI-effecten geverifieerd (dat zou circulair zijn: je zou de CPI al moeten
+   UITVOEREN om te weten wat hij verplaatst, en dan is de gate al te laat). Een zelf-
+   gerapporteerd getal is dus geen betrouwbare routeringsbeslissing, het is een uitnodiging
+   om de gate te omzeilen.
+
+Consistent met dit project se eigen, herhaaldelijk toegepaste regel "beoordeel de worst
+case, niet de huidige situatie" (letterlijk zo geformuleerd in sectie 99 over `hunt`): een
+instructie waarvan het verplaatste bedrag NIET vooraf vast te stellen is, moet behandeld
+worden als potentieel het maximale bedrag - dus altijd de wachtrij, nooit instant. Praktisch
+gevolg: `spend_threshold_lamports` wordt door `execute_advanced` helemaal niet gelezen -
+alleen `execute` en `hunt` (zie hieronder) doen dat.
+
+**`transfer_token`: dezelfde behandeling, andere reden - geen betrouwbare
+denominatie-vergelijking.** `spend_threshold_lamports` is lamport-gedenomineerd; SPL-tokens
+hebben willekeurige decimalen en geen on-chain prijsoracle bestaat in dit ontwerp (bewust
+buiten scope, zie hieronder). Een RUWE integer-vergelijking (threshold toepassen op de kleinste-
+eenheid-hoeveelheid, decimalen negerend) is AANTOONBAAR onjuist: een drempel die voor een
+6-decimalen-stablecoin zinnig is, is absurd te ruim of te krap voor een token met 0 of 9
+decimalen. **Aanbeveling: `transfer_token` gaat in v1 ALTIJD via `initiate_token_transfer`/
+`finalize_token_transfer`, net als `execute_advanced`.** Reëel nadeel, niet verzwegen: elke
+tokenoverdracht, hoe klein ook, krijgt vanaf nu een timelock-wachttijd - een merkbare
+UX-regressie t.o.v. vandaag (zie punt 5). Een toekomstige, per-mint-instelbare drempeltabel
+(vergelijkbaar met `PolicyAccount`'s door-de-eigenaar-gecureerde lijst) is een denkbare
+Fase-2-verfijning - niet hier uitgewerkt, wel expliciet als open vervolgvraag genoteerd zodat
+dit niet stilzwijgend "voor altijd zo" wordt.
+
+**`hunt`: WEL onder de gewone lamport-drempel, praktisch bijna altijd instant.** De enige
+extraheerbare waarde in `hunt` is `to_user` (de helft van de teruggewonnen
+token-account-rent) - lamport-gedenomineerd, dus direct vergelijkbaar, en structureel
+zelfbegrensd door de rent-exempt-minimumdrempel per token-account (typisch een fractie van
+0,01 SOL). Toetsen tegen `spend_threshold_lamports` is dus goedkoop en consistent, maar zal
+in de praktijk vrijwel nooit de wachtrij triggeren bij een normaal ingestelde drempel -
+gedocumenteerd als zodanig, niet stilzwijgend een dode letter latend zoals eerder met
+`deposit_authority` gebeurde (sectie 85's expliciete les: noem een structureel-bijna-nooit-
+bereikt pad met zoveel woorden, laat het niet impliciet).
+
+### 3. De drempelvraag: vast bedrag vs. percentage van het vault-saldo
+
+**Optie A - vast lamport-bedrag, aanpasbaar via dezelfde wachtrij als opnames
+(`initiate_threshold_change`/`finalize_threshold_change`, kind=3 hierboven).** Simpel,
+voorspelbaar, en - cruciaal tegen dit dreigingsmodel - een aanvaller kan de drempel niet in
+één gekaapte ceremonie omhoog zetten en in dezelfde/de eerstvolgende ceremonie meteen
+misbruiken: elke drempelverhoging moet zelf eerst door dezelfde timelock (zie punt 5) voordat
+hij van kracht wordt, exact zoals gevraagd.
+
+**Optie B - percentage van het huidige vault-saldo.** Technisch goedkoper in bytes
+(`spend_threshold_bps: u16`, 2 bytes i.p.v. 8) en schaalt vanzelf mee met de werkelijke
+inhoud van de wallet, zonder dat de eigenaar handmatig moet bijstellen na een grote storting.
+
+**Aanbeveling: Optie A (vast bedrag) - met het echte nadeel er expliciet bij, niet
+verzwegen.**
+
+Doorslaggevende reden tegen Optie B, specifiek tegen DIT dreigingsmodel, niet generiek:
+**de vault is permissionless fundeerbaar door IEDEREEN** (elke normale SOL-storting naar de
+vault-PDA werkt zonder handtekening, zie `execute`'s eigen commentaar over "crediteren mag
+altijd, ongeacht wie het doelaccount bezit"). Een aanvaller die al een ceremonie kan kapen,
+kan er ook voor kiezen om EERST, met zijn EIGEN geld, een grote storting naar de vault te
+doen (geen handtekening nodig, dus geen ceremonie-kaping ervoor nodig) om het
+percentage-gebaseerde instant-plafond TIJDELIJK op te blazen, en vervolgens de eerstvolgende
+gekaapte ceremonie gebruiken om tot dat opgeblazen plafond te trekken - mogelijk MEER van de
+OORSPRONKELIJKE, eigenaars-eigen fondsen dan een vast bedrag ooit zou hebben toegestaan. Dit
+is geen theoretisch corner-case-bezwaar; het is een directe, door de aanvaller zelf
+te initiëren manipulatie van precies het getal waar dit hele mechanisme op leunt - Optie B
+faalt dus specifiek tegen HET dreigingsmodel waar dit document tegen beoordeelt, niet alleen
+in het algemeen.
+
+**Het echte nadeel van mijn eigen voorkeur (Optie A), niet verzwegen:** een vast bedrag
+schaalt NIET automatisch mee - noch omhoog (een eigenaar die spaart, moet actief, via de
+wachtrij, zijn drempel verhogen, of blijft met een steeds onhandiger lage instant-limiet
+zitten) noch omlaag (een eigenaar die de vault grotendeels leeghaalt via een grote,
+gequeuede opname houdt een drempel over die - relatief tot wat er nog in de vault zit -
+plotseling weer een groot deel van het RESTERENDE saldo instant beschikbaar maakt, zonder
+dat er ooit een bewuste herbeoordeling plaatsvond). Dat tweede punt is een reëel,
+niet-triviaal restrisico van Optie A dat dit document niet oplost - een toekomstige UI-laag
+zou de eigenaar hier actief aan kunnen herinneren ("uw drempel is nu >50% van uw
+vault-saldo, wilt u die verlagen?"), maar dat is client-side hygiëne, geen protocolgarantie.
+
+### 4. Bytekosten en migratie-impact - echte berekening, tegen sectie 85's cijfers
+
+**Uitgangspunt, gemeten in sectie 85, ongewijzigd sinds (sectie 99 is nooit gebouwd):**
+`WalletAccount` bereikbare worst case vandaag = **215 bytes**. Fysieke toekenning: **12 van
+de 14 bestaande accounts op 231 bytes** (marge 16), **2 op 239 bytes** (marge 24) - exacte
+telling uit sectie 84 (regel ~6963), niet opnieuw aangenomen.
+
+**Dit ontwerp voegt 9 bytes toe aan `WalletAccount`** (`spend_threshold_lamports`: 8,
+`disarmed`: 1 - zie 2a). Géén nieuw `Option`-veld, dus geen nieuwe state-afhankelijke
+worst-case-complicatie zoals bij `recovery_state`/`deposit_authority`.
+
+Nieuwe reachable worst case: 215 + 9 = **224 bytes**.
+
+| Toegekend | Oude marge (215) | Nieuwe marge (224) | Past zonder migratie? |
+|---|---|---|---|
+| 231 bytes (12 accounts) | 16 | **7** | Ja - 231 ≥ 224 |
+| 239 bytes (2 accounts) | 24 | **15** | Ja - 239 ≥ 224 |
+
+**Conclusie: past, GEEN migratie-instructie nodig voor `WalletAccount`** - maar dit
+verbruikt 9 van de 16 beschikbare bytes op de krapste 12 accounts (56% van de marge die
+sectie 99 nog intact liet), en dat is VÓÓR sectie 99's eigen, nog niet gebouwde 8-byte
+`time_gate_unlock_until`-voorstel is meegerekend. **Als beide voorstellen ooit samen
+geïmplementeerd worden (sectie 99 zelf beveelt dat al aan, "samenvoegen"), is de optelsom
+9 + 8 = 17 bytes - dat past NIET meer in de 16-bytes-marge van de 12 krapste accounts
+(17 > 16).** Dit is een reëel, nu al zichtbaar samenloop-probleem tussen twee voorstellen
+die beide "passen" als je ze apart bekijkt, maar niet meer als je ze - zoals sectie 99 zelf
+al besloot - combineert. Vastgelegd hier zodat een latere sessie die sectie 99's tijdpoort
+alsnog bouwt BOVENOP dit ontwerp, deze exacte optelsom opnieuw controleert vóór ze aanneemt
+dat het nog past.
+
+**`PendingAction` (nieuw accounttype, 124 bytes, zie 2b): geen migratievraag - er bestaan nog
+geen instanties.** Elke toekomstige uitbreiding van DIT account (mocht die ooit nodig zijn)
+krijgt wél zijn eigen worst-case-analyse, zelfde discipline als hierboven.
+
+**Verplicht vóór een echt voorstel, zelfde discipline als sectie 83-88/99:**
+`checkWorstCaseAccountSafety.ts` opnieuw draaien tegen de daadwerkelijke nieuwe `LEN` (224,
+niet dit document se handmatige rekenwerk vertrouwen), en - nieuw t.o.v. eerdere rondes - de
+exacte samenloop-optelling met sectie 99 herbevestigen als dat voorstel ondertussen ook
+gebouwd is.
+
+### 5. Timing en compute: hoe lang moet de timelock zijn
+
+**Kader:** lang genoeg dat de eigenaar een reële kans heeft het op te merken (minstens één
+slaapcyclus/werkdag, niet enkele minuten), kort genoeg dat een legitieme grote, geplande
+uitgave (bijv. een huurbetaling, een grote aankoop) niet onredelijk vertraagd wordt.
+Recovery se eigen 72u-default (sectie 3.1a-ontwerp) is het verkeerde ankerpunt om
+klakkeloos te kopiëren - recovery is het nucleaire-optie-pad (alle passkeys kwijt), een
+pending withdrawal is een lichter, potentieel vaker voorkomend mechanisme.
+
+**Voorstel: 24 uur als programmaconstante (`PENDING_ACTION_TIMELOCK_SECONDS`), niet
+per-wallet instelbaar in v1** - zelfde bewuste vereenvoudiging als sectie 99 al koos voor
+`arm_wallet`'s duur ("een vaste constante volstaat voor een eerste versie... per-wallet
+instelbare duur kost minimaal 4 extra bytes, uitgesteld"). 24 uur is kort genoeg om niet
+onwerkbaar te voelen voor een eenmalige grote, geplande uitgave, lang genoeg om minstens één
+volledige nacht/werkdag te overspannen - vergelijkbaar met de opname-holds die
+gecentraliseerde exchanges standaard hanteren voor grote/nieuwe-adres-uitbetalingen, een
+bekend, geaccepteerd UX-patroon voor precies dit doel. **Dit is een productbeslissing, geen
+zuiver technische afleiding - het exacte getal is aan Michel, dit is een onderbouwd
+voorstel, geen vaststaand feit.**
+
+**Klokdrift:** zelfde meting als sectie 99 al deed (`scripts/measureClockDrift.ts`) is hier
+van toepassing, maar bij 24 uur (86.400s) is de relevante vraag ANDERS dan bij een
+minuten-schaal `arm_wallet`-venster: sectie 99's gemeten venster-verlenging (0,2-0,5s over
+900s) schaalt naar orde-grootte seconden over 24 uur - volstrekt verwaarloosbaar tegenover
+een venster van 86.400 seconden. Geen aparte meting nodig voor DIT specifieke getal; de
+asymmetrie die sectie 99 al vaststelde (een tragere ketenklok verlengt het venster in echte
+tijd, nooit verkort hem) blijft hier fail-safe om dezelfde reden.
+
+**Compute:** `finalize_*` doet geen nieuwe WebAuthn-precompile-verificatie (geen
+`instructions_sysvar`-introspectie nodig, zie 2c) - goedkoper in compute-units dan
+`execute`/`transfer_token` zelf, ondanks de extra `hashv`-herberekening voor de
+`action_commitment`-vergelijking (één `hashv`-aanroep, verwaarloosbaar t.o.v. de bestaande
+secp256r1-precompile-kosten elders in dit programma). `initiate_*`/`confirm_*` dragen wél de
+volledige bestaande passkey-verificatiekost, ongewijzigd t.o.v. `execute`/`transfer_token`
+vandaag.
+
+**Reële UX-kost, niet verzwegen:** voor `execute`/`hunt` onder de drempel verandert er niets
+(nog steeds instant, één ceremonie). Voor `transfer_token` en `execute_advanced` (2e hierboven)
+betekent dit ontwerp dat ELKE aanroep, ongeacht bedrag, voortaan TWEE ceremonies (initiate +
+eventueel confirm) plus een 24-uur-wachttijd kost in plaats van één instant-ondertekende
+transactie. Dat is een fundamentele gebruiksverandering voor wie de wallet vandaag voor
+frequente, kleine tokenoverdrachten gebruikt - een kost die punt 3's percentage-optie of een
+toekomstige per-mint-drempeltabel (2e) zou kunnen verzachten, maar die dit v1-ontwerp bewust
+niet oplost.
+
+### 6. Vierde alternatief, niet in sectie 99: een cumulatieve, glijdende-vensterlimiet op de
+directe paden - specifiek tegen HERHAALDE kleinere diefstal, wat geen van de drie andere
+kandidaten aantoonbaar oplost
+
+**Aanleiding:** herweeg punt 1's eigen bevinding - geen van de drie oorspronkelijke
+kandidaten begrenst het CUMULATIEVE effect van een aanvaller die op meerdere, achtereenvolgende
+legitieme ceremonies meelift, elke keer onder de instant-drempel blijvend. Een vaste cap
+begrenst per-transactie, niet per-periode; arm-to-open begrenst wanneer, niet hoeveel;
+pending-withdrawal grijpt pas boven de drempel in. Een aanvaller die stelselmatig net-onder-
+de-drempel blijft, ontwijkt alle drie.
+
+**Voorstel: lift `SessionKeyAccount`'s AL BEWEZEN `max_lamports_total`/`spent_lamports`-
+patroon (voorstel #10, sectie 53) naar `WalletAccount`-niveau, toegepast op de directe
+paden.** Twee nieuwe velden: `spent_lamports_this_window: u64` (8) en `window_started_at:
+i64` (8) - bij elke `execute`/`hunt`-aanroep (en, indien ooit ingevoerd, bij elke
+`finalize_token_transfer`) opgeteld; als `now - window_started_at >
+SPEND_WINDOW_SECONDS` (voorstel: 7 dagen, programmaconstante), reset het venster en de teller
+vóór de nieuwe optelling. Een aanroep die de resterende venstercapaciteit zou overschrijden,
+faalt of - beter, minder verrassend voor de eigenaar - wordt automatisch naar de
+`PendingAction`-wachtrij omgeleid in plaats van hard te falen.
+
+**Dit is de enige van de vier besproken mechanismen die specifiek dit document se eigen
+tweede subvraag ("helpt het tegen herhaalde kleinere diefstal over meerdere legitieme
+momenten") met "ja, aantoonbaar" beantwoordt** - een aanvaller die keer op keer net onder de
+per-transactie-drempel blijft, loopt binnen het venster alsnog tegen de cumulatieve cap aan.
+
+**Eerlijke bytekost, waarom dit NIET in het hoofdontwerp is opgenomen:** +16 bytes bovenop
+de al voorgestelde 9 (punt 2a) = 25 bytes totaal op `WalletAccount`. Nieuwe reachable worst
+case: 215 + 25 = **240 bytes - past NIET meer op de 12 accounts die maar 231 bytes hebben
+(240 > 231), en past ook niet meer op de 2 accounts van 239 bytes (240 > 239). Dit vereist
+dus, in tegenstelling tot het hoofdontwerp uit punt 2, WEL een migratie-instructie (realloc)
+voor alle 14 bestaande wallets vóórdat dit veilig gedeployed kan worden.** Een reële,
+niet-triviale extra bouwstap (een `migrate_wallet_account`-instructie die `system_program::
+realloc` aanroept plus een rent-topup, met zijn eigen worst-case-analyse) - precies het soort
+werk dat sectie 99 zelf al probeerde te vermijden door bewust vlakke velden te kiezen. **Dit
+document beveelt dit vierde mechanisme daarom NIET aan voor een eerste versie** - het lost
+een reëel gat op dat de andere drie laten liggen, maar tegen een concrete, meetbare
+implementatiekost die apart, expliciet door Michel afgewogen moet worden, niet stilzwijgend
+meegenomen in punt 2's hoofdontwerp.
+
+### 7. Wat dit ontwerp NIET oplost - eerlijk, niet verzwegen
+
+- **Een `disarm_wallet_via_passkey`-poging kan zelf gekaapt worden** (2c) - alleen de
+  `backup_authority`-route is structureel immuun voor dit dreigingsmodel.
+- **2-of-2-bescherming bij `finalize_*` werkt alleen met een genuine TWEEDE, fysiek
+  gescheiden passkey/apparaat** (punt 1) - een eigenaar met één device/browser krijgt alleen
+  de timelock-only-bescherming (vertraging + zichtbaarheid), niet de sterkere
+  onafhankelijke-credential-eis. De UI zou actief moeten aanmoedigen een tweede passkey op
+  een écht ander apparaat te registreren om dit mechanisme zijn volle waarde te geven -
+  buiten scope van dit protocol-ontwerp.
+- **Herhaalde kleinere diefstal blijft in het hoofdontwerp (punt 2) onopgelost** - alleen
+  het (bewust niet aanbevolen) vierde alternatief (punt 6) adresseert dit, tegen een reële
+  migratiekost.
+- **`transfer_token`/`execute_advanced` verliezen hun instant-pad volledig** (2e) - een
+  bewuste, maar merkbare UX-regressie, niet een neutrale bijwerking.
+- **Een eigenaar die zijn ENIGE passkey EN `backup_authority` allebei kwijtraakt/laat
+  kapen op hetzelfde moment, is door niets in dit document geholpen** - buiten scope, dekt
+  hetzelfde restrisico dat sectie 72 al als "gecompromitteerd apparaat/OS"-categorie erkende.
+
+### Aanbeveling
+
+Bouw het ontwerp uit punt 2 (WalletAccount +9 bytes, `PendingAction`-singleton-PDA, 2-of-2
+opportunistisch bij ≥2 passkeys, `execute_advanced`/`transfer_token` altijd via de wachtrij,
+`disarm_wallet_via_backup_authority` als primaire noodstop) met een vaste 24-uur-timelock
+(punt 5) en een vast, door de wachtrij zelf beschermd lamport-drempelbedrag (punt 3, Optie
+A). Dit is de combinatie die vandaag ONBEGRENSDE directe paden omzet in een systeem met een
+reëel, aantoonbaar reactievenster tegen ceremonie-kaping, zonder een `WalletAccount`-
+migratie te vereisen. Het lost NIET alles op (punt 7) - met name herhaalde kleinere
+diefstal (punt 6) en de zwakte van het enkele-apparaat-scenario (punt 1) blijven staan, en
+`transfer_token`/`execute_advanced` worden merkbaar trager voor legitiem gebruik (punt 2e/5).
+Dat is een bewuste afweging tussen dekking en bruikbaarheid, geen technisch afgedwongen
+uitkomst - de knoop (deze combinatie vs. punt 6's zwaardere, migratie-vereisende aanvulling
+vs. een ander drempelbedrag/andere timelockduur dan hier voorgesteld) is aan Michel.
+
+### Aanvulling (tweede ontwerpronde): drie punten aangescherpt, geen herschrijving
+
+Vervolg op drie specifieke vragen over de aanbevolen combinatie hierboven. Nog steeds
+**niets gebouwd.**
+
+#### A. Het cumulatieve gat onder de drempel - bestaat het echt, en past een compacte fix?
+
+**Ja, het gat bestaat, en de herweging in punt 1 zei dat eigenlijk al met zoveel woorden
+zonder de consequentie voor de AANBEVOLEN combinatie zelf hard te trekken.** Punt 2 se
+`execute`/`hunt` blijven onder `spend_threshold_lamports` volledig INSTANT en PER-TRANSACTIE
+begrensd, zonder enige window/totaal-boekhouding - functioneel identiek aan kandidaat 2 (de
+"simpele vaste cap") uit punt 1, en dat is precies de kandidaat die daar afviel op "doet
+niets tegen herhaling". Een aanvaller met langdurige toegang tot een gekaapte extensie kan
+dus, zoals gesteld, over meerdere dagen telkens net-onder-de-drempel laten tekenen - de
+aanbevolen combinatie beschermt daar vandaag niet tegen. Dit stond al genoemd in punt 7's
+"wat dit niet oplost"-lijst, maar zonder een compacte oplossing te onderzoeken - dat gebeurt
+hieronder.
+
+**De compacte, SessionKeyAccount-geïnspireerde toevoeging past NIET rechtstreeks op
+`WalletAccount` - echte berekening, geen aanname:**
+
+Resterende marge NA de in punt 2/4 al voorgestelde 9 bytes (224 reachable worst case): **7
+bytes** op de 12 accounts van 231 bytes, **15 bytes** op de 2 accounts van 239 bytes.
+
+Het compacte, twee-velden-patroon dat `SessionKeyAccount` al bewezen gebruikt
+(`max_lamports_total`/`spent_lamports`, beide `u64`) toegepast op een venster
+(`window_started_at: i64` + `spent_lamports_this_window: u64`) kost **16 bytes**, identiek
+aan wat punt 6 al voor de VOLLEDIGE vierde-alternatief-variant berekende (240 nieuwe
+reachable worst case - 231 én 239 allebei te klein, migratie voor alle 14). Geen
+verrassing: dit IS in essentie hetzelfde veldenpaar, alleen nu voorgesteld als "kleine
+aanvulling" i.p.v. "los vierde alternatief" - de bytekost verandert daar niet door.
+
+**Geprobeerd te verkleinen, twee varianten, allebei nog steeds te groot voor de 12 krapste
+accounts:**
+- `u32`+`u32` (window_started_at, spent_lamports_this_window): **8 bytes** - nieuwe
+  reachable worst case 224+8=232. 239-byte accounts: 232 ≤ 239, past (marge 7 over). 231-byte
+  accounts: 232 > 231, **past NIET** (1 byte tekort, voor alle 12). Extra nadeel: `u32` voor
+  een lamportbedrag geeft een harde bovengrens van ~4,295 miljard lamport ≈ **~4,29 SOL** aan
+  cumulatieve vensterlimiet - een reële beperking voor een wallet die met grotere bedragen
+  werkt, niet alleen een cosmetische keuze.
+- Eén enkel, handmatig gebitpackt `u64`-veld (bovenste 16 bits: venster-epoch-nummer,
+  onderste 48 bits: bestede lamports dit venster - epoch afgeleid uit `now /
+  WINDOW_SECONDS`, geen aparte tijdstempel nodig): ook **8 bytes**, zelfde 232-uitkomst,
+  zelfde 1-byte-tekort op de 231-byte-accounts - maar nu WEL met veilige volle
+  `u48`-lamportrange (281.474 SOL, geen praktische beperking). **Dit zou het EERSTE
+  handmatig-gebitpackte veld in de hele codebase zijn** - een nieuwe complexiteitsklasse
+  (custom (de)serialisatielogica buiten Anchor/Borsh se automatische afleiding om) voor een
+  besparing van precies 0 bytes t.o.v. de simpelere twee-`u32`-variant op de plek waar het
+  ertoe doet (de 231-byte-accounts falen bij BEIDE varianten evenzeer). **Niet aanbevolen** -
+  de complexiteitskost staat niet in verhouding tot de bytebesparing die hij niet eens
+  oplevert op de bindende grens.
+
+**Conclusie: er bestaat geen enkele redelijke, huisstijl-consistente inline-encoding die
+binnen de resterende 7 bytes van de 12 krapste accounts past.** Minimaal 8 bytes is nodig
+voor ÜBERHAUPT een venster-mechanisme met bruikbare precisie, en 8 > 7.
+
+**Aanbevolen oplossing: dezelfde architecturale zet als bij `PendingAction` (punt 2) -
+verplaats de venstertoestand naar een eigen, nieuw satellite-PDA in plaats van rechtstreeks
+op `WalletAccount`.** Nieuw accounttype `SpendWindow`, seeds `[b"spend_window",
+wallet.key()]`, lui aangemaakt (`init_if_needed`, zelfde argument als `PolicyAccount`: een
+PDA die uitsluitend van `wallet.key()` afhangt kan nooit een ander accounttype "per ongeluk"
+hergebruiken):
+
+```rust
+#[account]
+pub struct SpendWindow {
+    pub wallet: Pubkey,                   // 32
+    pub bump: u8,                         // 1
+    pub window_total_cap_lamports: u64,   // 8 - door de eigenaar ingesteld, ZELF ook
+                                           //     timelock-beschermd (zie hieronder)
+    pub window_started_at: i64,           // 8
+    pub spent_lamports_this_window: u64,  // 8
+}
+// LEN = 8 (discriminator) + 32+1+8+8+8 = 65 bytes
+```
+
+**Kost 0 bytes op `WalletAccount`** - geen migratievraag voor de 14 bestaande wallets, om
+precies dezelfde reden als `PendingAction`: er bestaan nog geen instanties. Rentkosten,
+zelfde extrapolatiemethode als eerder (~9.573 lamport/byte): 65 x 9.573 ≈ 622.000 lamport ≈
+**~0,00062 SOL**, schatting.
+
+**Mechanisme:** `execute` en `hunt` (de enige twee instructies die de instant-drempel
+gebruiken, zie punt 2e) krijgen `spend_window` als extra, `init_if_needed`-account. Bij elke
+instant-uitvoering: als `now - window_started_at > SPEND_WINDOW_SECONDS` (voorstel: 7 dagen,
+zelfde orde als `MAX_SESSION_DURATION_SLOTS`), reset venster + teller eerst; daarna
+`spent_lamports_this_window.checked_add(amount)` vergelijken tegen
+`window_total_cap_lamports` - overschrijding geeft een expliciete, andere foutmelding
+(`SpendWindowExceeded`) die de client vertelt `initiate_withdrawal` te gebruiken in plaats
+van een generieke afwijzing. `transfer_token`/`execute_advanced` raken dit account nooit
+(ze gaan sowieso altijd via de wachtrij, punt 2e) - geen wijziging aan hun Accounts-structs.
+
+**De cap zelf moet dezelfde timelock-bescherming krijgen als `spend_threshold_lamports`, om
+dezelfde reden als punt 3 al vaststelde (anders zet een gekaapte ceremonie 'm in één klap
+open):** `initiate_threshold_change`/`finalize_threshold_change` (kind=3, punt 2c)
+uitgebreid met een tweede waarde (`new_window_total_cap_lamports`), `action_commitment`
+dekt voortaan beide velden samen, en `finalize_threshold_change` krijgt `spend_window` (mut)
+erbij in zijn Accounts-struct. Geen apart vijfde `kind` nodig - één gecombineerde
+config-wijziging, één wachtrij-item.
+
+**Stack-/complexiteitscheck:** `Execute`/`Hunt`'s Accounts-structs zijn vandaag klein (5
+resp. 9 accounts, geen grote embedded arrays zoals `PolicyAccount`'s `allowed_programs`) -
+heel anders dan `ExecuteAdvanced`, waar het BPF-stackprobleem eerder daadwerkelijk optrad
+(sectie-verwijzing in `instructions.rs`'s eigen commentaar bij `ExecuteAdvanced.policy`).
+Een extra 65-byte typed account erbij zou hier naar verwachting geen probleem geven, maar
+dat moet empirisch bevestigd worden bij implementatie, niet aangenomen - zelfde discipline
+als overal elders in dit document.
+
+#### B. "Genuinely separate" bij 2-of-2-finalize - concreet gemaakt, geen aanname meer
+
+**Is één passkey het te verwachten geval voor de meeste gebruikers? Vermoedelijk ja, maar
+zonder harde data.** Dit project heeft geen telemetrie/analytics (bewust, zie de
+privacy-inventarisatie sectie 107) - er bestaat dus geen cijfer om op terug te vallen. Wat
+wél bekend is, redenerend uit het bestaande ontwerp zelf: `add_passkey` is uitdrukkelijk
+geframed als een REDUNDANTIE-actie ("bijv. na verlies van een ander apparaat", sectie
+"multi-passkey"-commentaar in `instructions.rs`), niet als een verwachte
+standaard-onboardingstap - en WebAuthn-gebruik elders (platform-authenticators als Touch
+ID/Windows Hello, gekoppeld aan precies één toestel) suggereert dat een tweede,
+GEREGISTREERDE passkey een bewuste extra handeling vereist die de meerderheid van
+casual-gebruikers waarschijnlijk overslaat tenzij de UI er actief op aandringt. **Behandel
+single-passkey daarom als het te verwachten hoofdgeval, niet als een randgeval**, bij het
+beoordelen van dit mechanisme se werkelijke dekking.
+
+**Wat gebeurt er bij één passkey - expliciet, zoals gevraagd: het systeem VALT TERUG op
+single-passkey-finalize, het weigert NIET uit te voeren.** Dit was al zo besloten in punt 2c
+(`confirmed = (totaal_aantal_geldige_passkeys < 2)` bij initiate) maar de consequentie stond
+er niet met zoveel woorden: **voor een wallet met precies één geldige passkey is de
+2-of-2-laag van dit ontwerp non-existent - zulke wallets krijgen UITSLUITEND de
+timelock-only-bescherming (vertraging + zichtbaarheid, punt 1's eerste variant), nooit de
+onafhankelijke-credential-eis.** Tegen een aanvaller met LANGDURIGE, VOLGEHOUDEN toegang tot
+de gekaapte extensie (dit document se eigen dreigingsmodel) is dat een reëel verschil: zo'n
+aanvaller hoeft alleen te wachten tot de timelock verstrijkt en niemand grijpt in - geen
+tweede ceremonie nodig om te kapen, want die bestaat voor deze gebruiker niet.
+
+**Bewust GEEN harde eis ("weiger tot een tweede apparaat is toegevoegd") - zelfde
+afweging als eerder al genoemd, hier expliciet herbevestigd:** dat zou grote, legitieme
+opnames categorisch onmogelijk maken voor de vermoedelijke meerderheid van gebruikers met
+één toestel - een zwaardere UX-kost dan dit document elders al accepteert (punt 2e/5), voor
+een bescherming die zelfs dan niet gegarandeerd sterker zou zijn (zie hieronder waarom "twee
+passkeys" geen garantie is). Gedegradeerde bescherming voor wie geen tweede toestel heeft is
+de bewuste keuze; volledige blokkade is dat niet.
+
+**Kan het protocol op enige manier verifiëren dat twee passkeys daadwerkelijk van
+verschillende apparaten/omgevingen komen? Nee - eerlijk, dit is een grens die het protocol
+principieel niet kan afdwingen, niet slechts een ontbrekende implementatiedetail.** Drie
+onafhankelijke redenen:
+1. **Een passkey is on-chain letterlijk niets meer dan een P-256-publieke-sleutel** (33
+   bytes, `PASSKEY_PUBKEY_LEN`) - geen enkel metadata-veld over welk apparaat/welke
+   authenticator 'm heeft gegenereerd.
+2. **WebAuthn se eigen attestatiemechanisme (AAGUID, optioneel bij `.create()`) lost dit ook
+   niet op, zelfs als het wél verzameld/geverifieerd zou worden** (vandaag niet gedaan in
+   `passkey.ts`, niet nagekeken of dat zou moeten veranderen - buiten scope hier): een AAGUID
+   identificeert een AUTHENTICATOR-TYPE/-model ("Touch ID", "YubiKey 5 NFC"), geen individueel
+   fysiek exemplaar - twee verschillende iPhones melden hetzelfde platform-AAGUID, dus zelfs
+   volledige attestatie zou "twee fysiek gescheiden apparaten" niet van "twee passkeys op
+   hetzelfde type apparaat" kunnen onderscheiden.
+3. **Het meest fundamentele punt, al impliciet vastgesteld in sectie 72 en hier expliciet
+   herbevestigd:** zelfs een AANTOONBAAR fysiek ander authenticator-exemplaar (bijv. een
+   losse YubiKey) beschermt niet als de ceremonie ERMEE alsnog via DEZELFDE gecompromitteerde
+   browser/extensie loopt - sectie 72 stelde dit al vast voor hardware-sleutels in het
+   algemeen ("gangbare consumenten-FIDO2-sleutels... tekent een vervalste challenge dus even
+   blind als de browser zelf"). Wat hier daadwerkelijk telt, is niet de identiteit van de
+   PASSKEY, maar of de TWEEDE ceremonie via een ANDERE, niet-gecompromitteerde
+   browser-/apparaatomgeving loopt - en dat is informatie die WebAuthn se datamodel een
+   relying party (dit programma) NOOIT blootstelt, ongeacht attestatie.
+
+**Conclusie: "genuinely separate" is, en blijft, volledig een gebruikersgedragsgrens, niet
+een protocolgarantie.** Het enige wat dit ontwerp - of enige toekomstige uitbreiding ervan -
+kan doen, is de KANS vergroten (een tweede passkey MOET, cryptografisch, een andere sleutel
+zijn dan de initiator - dat wordt wel afgedwongen, zie `SecondPasskeyMustDifferFromInitiator`
+in punt 2c) zonder ooit te kunnen GARANDEREN dat hij ook van een andere, veilige omgeving
+komt. De client-UI kan hier zachte, niet-cryptografische hints aan toevoegen (bijv. een
+registratiescherm dat expliciet aanraadt "registreer deze tweede passkey vanaf een ANDER
+apparaat of een ANDERE browser dan uw primaire"), maar dat is client-side gedragssturing,
+geen on-chain garantie - en moet in de UI ook zo, met zoveel woorden, gelabeld worden, niet
+als een harde beveiligingseigenschap gepresenteerd.
+
+#### C. Interactie met de al-geaccepteerde `backup_authority`-zwakte (H-3)
+
+**H-3, ter herinnering (sectie 68, regel ~4373-4376):** `backup_authority`-overnamemacht +
+ongelimiteerde, herhaalbare `initiate_recovery` als DoS/griefing-vector - **bevestigd als
+bewust, correct ontwerp, geen bug**, met de vastgelegde operationele conclusie dat
+`backup_authority` "als een volwaardige owner-sleutel behandeld" moet worden. Belangrijke,
+vaak onderbelichte precisering die hier expliciet meetelt: dit is niet alleen een
+DoS-vector - een gecompromitteerde `backup_authority` die 72 uur ongehinderd blijft (geen
+`cancel_recovery` door een geldige passkey binnen dat venster) leidt tot een VOLLEDIGE
+eigenaarschapsovername (`finalize_recovery` wijzigt `owner_passkey`), niet alleen tot een
+bevroren wallet. H-3 omvat dus zowel een griefing/freeze-vector als - in het ergste geval -
+een takeover-vector.
+
+**Klopt de zorg: voegt `disarm_wallet_via_backup_authority` een NIEUWE bevoegdheid toe aan
+dezelfde, al-kwetsbare sleutel? Ja, letterlijk - maar bij nadere weging is dit geen nieuwe
+CAPABILITEITSKLASSE, wel een nieuwe, PARALLELLE instantie van een al geaccepteerde klasse.**
+Vergelijking, stap voor stap:
+
+| | `initiate_recovery` (bestaand, H-3) | `disarm_wallet_via_backup_authority` (nieuw, dit ontwerp) |
+|---|---|---|
+| Kost voor de aanvaller | 1 Ed25519-handtekening, geen cooldown | 1 Ed25519-handtekening, geen cooldown |
+| Effect | `recovery_state = Some` -> blokkeert de 4 directe paden | `disarmed = true` -> blokkeert de 4 directe paden + alle initiate_*/finalize_* |
+| Kost voor de eigenaar om te herstellen | 1 passkey-ceremonie (`cancel_recovery`) | 1 passkey-ceremonie (`rearm_wallet`) |
+| Herhaalbaar door de aanvaller? | Ja, onbeperkt, direct na elke cancel | Ja, onbeperkt, direct na elke rearm |
+| Kan dit tot volledige overname leiden? | **Ja - als 72u ongehinderd verstrijkt** | **Nee - disarm bevriest alleen, muteert nooit `owner_passkey`** |
+
+**Conclusie: qua griefing-mechaniek (kosten/herhaalbaarheid voor beide partijen) is dit
+functioneel IDENTIEK aan het al-geaccepteerde H-3-patroon - geen verslechtering op die as.
+Qua WORST-CASE ernst is het zelfs MILDER dan het bestaande risico: disarm kan nooit,
+op zichzelf, tot eigenaarschapsovername leiden, `initiate_recovery` (onbeteugeld, 72u) wel.**
+Een compromis van `backup_authority` was dus al, vóór dit ontwerp, een "kan de wallet
+bevriezen, en in het ergste geval overnemen"-risico; dit ontwerp voegt een TWEEDE weg naar
+"bevriezen" toe, geen nieuwe weg naar "overnemen".
+
+**Is dit daarmee een aanvaardbaar neveneffect? Ja, met één concrete, vastgelegde
+consequentie voor toekomstig werk - niet onbenoemd gelaten:**
+1. **Aanvaardbaar zonder aparte, nieuwe mitigatie nu** - het introduceert geen ernstiger
+   uitkomst dan wat al bewust geaccepteerd is, en de bestaande operationele richtlijn
+   ("behandel `backup_authority` als een volwaardige ownersleutel") dekt de nieuwe
+   bevoegdheid net zo goed als de oude.
+2. **Wél expliciet vastgelegd, zodat een latere H-3-fix niet half werkt:** als H-3 ooit een
+   cooldown krijgt op `initiate_recovery` (de "zonder haast"-richting die sectie 68 al
+   noemt), moet DEZELFDE cooldown-logica ook op `disarm_wallet_via_backup_authority` worden
+   toegepast - anders verdwijnt de griefing-vector via het ene pad en blijft hij, ongewijzigd,
+   bestaan via het andere. Dit document voegt dat expliciet toe als vereiste onderdeel van
+   een toekomstige H-3-fix, niet als een apart, nieuw ticket.
+3. **Niet nu al een cooldown op disarm bouwen zonder H-3 zelf ook aan te pakken** - een
+   asymmetrische fix (de nieuwere, mildere instantie oplossen terwijl de oudere, ernstigere
+   instantie met dezelfde makelij onopgelost blijft) zou inconsistent zijn met hoe dit
+   project risico's tot nu toe heeft afgewogen (sectie 68 koos expliciet "zonder haast" voor
+   H-3 zelf) en zou bovendien een vals gevoel van veiligheid geven voor precies de sleutel
+   die operationeel al als hoog-risico is bestempeld.
+
+**Kleine, losstaande observatie, geen actiepunt:** een aanvaller die via `disarm_wallet_
+via_passkey` (het gemakspad, punt 2c) een gekaapte ceremonie zou misbruiken om de eigenaar
+te DoSsen in plaats van geld te stelen, is laag-ernstig (geen fondsenverlies, direct
+herstelbaar via `rearm_wallet`) en wordt hier volledigheidshalve genoemd, niet als een
+zelfstandig risico behandeld.

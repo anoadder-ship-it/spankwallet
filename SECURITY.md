@@ -45,6 +45,32 @@ upgrade (voorstel #11) is live en onafhankelijk geverifieerd (STATUS.md sectie 9
 de opgehoopte lokale commits gepusht zijn (sectie 97). Geen kwetsbaarheidsdetails stonden
 op enig moment publiek terwijl het kwetsbare programma nog live was.
 
+## Spankwallet is nooit een schrijfbare doel-map voor iets anders
+
+Vaste, doorlopende regel: geen enkel ander project, tool, of AI-sessie — nu of ooit in de
+toekomst op deze machine — mag spankwallet's repo of working tree als schrijfbaar doel
+hebben. Niet via een gedeelde working directory, niet via een filesystem-/shell-MCP-tool
+met een te brede scope, niet per ongeluk.
+
+**Aanleiding:** twee incidenten met dezelfde onderliggende oorzaak (een gedeelde of te
+breed geconfigureerde schrijfomgeving tussen onafhankelijke werksporen), in twee vormen:
+- STATUS.md sectie 81: een tweede, gelijktijdige Claude Code-sessie deelde dezelfde
+  working directory en herschreef `main`'s geschiedenis via een `git pull --rebase`.
+- active-defense's eigen STATUS.md (sectie 15, 2026-08-29): een lokaal draaiende
+  LM Studio-agent, via een MCP-filesystem-tool met schrijfscope over heel
+  `/home/michel/projects`, overschreef ongecommitte werkboom-inhoud in een ander project.
+  Hetzelfde risico geldt symmetrisch: die tool had net zo goed in spankwallet kunnen
+  schrijven.
+
+**Structurele maatregel:** elke MCP-/filesystem-/shell-tool die niet specifiek voor
+spankwallet is bedoeld, moet expliciet scope-beperkt zijn tot de mappen die hij echt nodig
+heeft, met spankwallet's pad (en alle spankwallet-afgeleide mappen, bijv.
+`spankwallet-testfixture`/`spankwallet-audit`) nooit in die lijst. Een apart useraccount of
+container per werkspoor is de enige manier om dit ook tegen een fout in de tool zelf af te
+dwingen (bestandsrechten bieden geen echte scheiding zolang alles onder hetzelfde
+OS-account draait) - een grotere herconfiguratie, bewust nog niet doorgevoerd, te
+heroverwegen als de situatie daarom vraagt.
+
 ## Wat te verwachten
 
 Dit is een klein, actief project - er is geen formeel SLA, maar meldingen worden serieus

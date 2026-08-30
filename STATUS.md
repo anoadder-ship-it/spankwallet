@@ -10876,4 +10876,38 @@ zomaar overgeslagen.** Twee bestaande unit-tests bleken door de LEN-wijziging ka
 **Diff-omvang:** uitsluitend `programs/spankwallet/src/state.rs`, 179 toevoegingen/15
 verwijderingen (`git diff --stat`) - geen ander bestand aangeraakt.
 
-**Nog niet gecommit** - diff staat klaar voor beoordeling vóór vastlegging.
+**Gecommit na beoordeling:** `a71e803` (state.rs) + `4268fc4` (deze sectie).
+
+## 117. Sectie 116/stap 3: `errors.rs` bijgewerkt - de zeven nieuwe errorcodes uit sectie 115
+
+**Uitsluitend `errors.rs` gewijzigd - niets in `state.rs`/`instructions.rs` in deze stap.**
+
+Zeven nieuwe varianten toegevoegd aan `SpankWalletError`, onder een eigen `// ---
+Spend-cap-mechanisme (STATUS.md sectie 115/116) ---`-scheiding onderaan de enum, zelfde
+`#[msg("...")]`-stijl (Nederlands, korte, directe beschrijving van wat er misging) als alle
+bestaande varianten:
+
+- `SecondPasskeyMustDifferFromInitiator` - de 2-of-2-confirm-eis (sectie 115 punt 2c).
+- `PendingActionStaleEpoch` - een pending action van vóór de laatste recovery (sectie 115
+  punt 2d).
+- `PendingActionNotConfirmed` - finalize vóór de vereiste tweede handtekening.
+- `PendingActionTimelockNotElapsed` - finalize vóór de timelock (sectie 115 punt 5).
+- `PendingActionCommitmentMismatch` - finalize met andere waarden dan oorspronkelijk
+  geautoriseerd.
+- `WalletDisarmed` - de noodstop (sectie 115 punt 2c).
+- `SpendWindowExceeded` - de cumulatieve-vensterlimiet (sectie 115 aanvulling, punt A) -
+  meldtekst verwijst expliciet naar `initiate_withdrawal` als vervolgstap, zelfde
+  "duidelijke fout i.p.v. stille afwijzing"-principe als `StaleActionNonce`.
+
+**`cargo check -p spankwallet`: groen, geen nieuwe fouten of waarschuwingen** t.o.v. sectie
+116's staat - exact dezelfde twee pre-bestaande `cfg`-waarschuwingen plus dezelfde vier
+`dead_code`-waarschuwingen voor `PendingAction`/`SpendWindow` (nog steeds ongebruikt, zoals
+verwacht - dit is nog steeds vóór `instructions.rs`). Geen nieuwe `dead_code`-waarschuwing
+voor de zeven errorcodes zelf - Anchor's `#[error_code]`-macro genereert intern gebruik voor
+elke variant, ongeacht of de rest van de codebase 'm al aanroept.
+
+**`cargo test -p spankwallet --lib`: ongewijzigd 5/5 groen** - deze stap raakt geen enkele
+bestaande test.
+
+**Diff-omvang:** uitsluitend `programs/spankwallet/src/errors.rs`, 22 toevoegingen, 0
+verwijderingen (`git diff --stat`) - geen ander bestand aangeraakt.

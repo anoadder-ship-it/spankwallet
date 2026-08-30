@@ -9989,3 +9989,79 @@ geen open/onbeantwoord punt.
 
 **GitHub-meldingenronde hiermee compleet**: 0 open CodeQL-alerts, branch-protection-rapport
 gecorrigeerd, dependency-versiecheck afgesloten.
+
+## 114. Sectie 112/113-opvolging: `Anchor.toml`/`tests/*`-fix alsnog gecommit, `DeclaredProgramIdMismatch`
+volledig uitgelegd + herhaalbaar recept vastgelegd
+
+**1. De drie ongecommitte bestanden uit sectie 112/113 uitgezocht en gesplitst naar aard, niet
+blind samen gecommit.** `Anchor.toml` (gossip_port = 8001) + `tests/hunt.ts` + `tests/
+transferToken.ts` (de vier `maxSupportedTransactionVersion: 0 → 1`) bleken inderdaad exact
+sectie 112's bewezen fix - testsuite nogmaals gedraaid tegen precies deze werkboomstaat vóór het
+committen: **80 passing, 2 pending, 0 failing**, identiek aan sectie 112's eigen resultaat.
+Gecommit als `c28009c`. `SECURITY.md` hoorde er NIET bij - dat was sectie 110's al-besloten
+"spankwallet nooit schrijfbaar doel"-regel, zonder relatie tot de v1-fix - apart gecommit als
+`a13dc3b` met een boodschap die naar sectie 110 verwijst. Geen van beide bleef nog langer
+ongecommit staan dan nodig.
+
+**2. `DeclaredProgramIdMismatch` - volledige uitleg (eerder in sectie 112 alleen terloops
+genoemd).** Twee pubkeys staan tegenover elkaar:
+
+| | Pubkey | Bron |
+|---|---|---|
+| Canoniek (bron van waarheid) | `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` | `declare_id!` in `programs/spankwallet/src/lib.rs:13`, en `Anchor.toml`'s `[programs.localnet]` |
+| Lokaal keypair-bestand | `4ywru3zEtQZv2pv5S7azb9PBMh3bDKzR7HS47QKpkBfa` | `target/deploy/spankwallet-keypair.json` - symlink naar `~/.config/spankwallet/program-keypairs/spankwallet-keypair.json` (XDG-config-pad, buiten de repo, niet door git getrackt) |
+
+Bevestigd met rechtstreeks bewijs, niet aangenomen:
+- `git diff -- programs/spankwallet/src/lib.rs` → leeg, byte-identiek aan HEAD. Het canonieke
+  adres in de broncode staat nog altijd op `9ma6...BK9`.
+- `solana program show 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9 --url devnet` → bestaat
+  echt, `executable: true`, `Owner: BPFLoaderUpgradeab1e...`, `Authority:
+  89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw` - de bekende multisig-vault-PDA. Upgrades lopen
+  dus al via de vault; dit lokale keypair-bestand is nergens de autoriteit voor iets echts.
+
+**Aard van de mismatch:** Anchor's build/test-stap eist dat `target/deploy/spankwallet-
+keypair.json` letterlijk dezelfde pubkey bevat als `declare_id!`, omdat die keypair de
+deploy-signer is voor de lokale, ephemere `solana-test-validator` - dit heeft niets met devnet/
+mainnet te maken (dat gaat via de vault-autoriteit). Het lokale bestand op deze machine bevat
+een andere, niet-bijpassende sleutel (waarschijnlijk ooit lokaal vers aangemaakt toen het
+bestand nog niet bestond, nooit gesynchroniseerd met de originele deploy-keypair). Ongewijzigd
+sinds 22 augustus (sectie 112) - geen recente manipulatie, en de mismatchte pubkey staat nergens
+live. **Puur een lokaal, wegwerpbaar testartefact - bevestigd, geen onbevoegde overschrijving
+(sectie 110's risico) en geen enkele impact op het echte, gedeployde programma.**
+
+**Waarom niet "gewoon oplossen":** voor Ed25519 kan een keypair niet met terugwerkende kracht op
+een gekozen publieke sleutel gegenereerd worden - als het origineel bijpassende geheime deel voor
+`9ma6...BK9` niet ergens gebackupt staat, is "het bestand herstellen naar de juiste sleutel" een
+dood pad. De enige twee reële opties zijn: (a) het originele geheime deel terugvinden als het
+ooit ergens gebackupt is, of (b) de bestaande, andere sleutel gewoon gebruiken voor lokale runs
+en na afloop terugzetten. Optie (b) is wat sectie 112 en deze sessie allebei deden - hieronder
+vastgelegd als herhaalbaar recept i.p.v. steeds opnieuw uitgezocht.
+
+**3. Herhaalbaar recept voor elke lokale `anchor test`/`yarn test`-run, vanaf nu de vaste
+procedure:**
+1. `declare_id!` in `programs/spankwallet/src/lib.rs` én `Anchor.toml`'s `[programs.localnet]`
+   tijdelijk zetten op de pubkey die al in `target/deploy/spankwallet-keypair.json` staat
+   (vandaag: `4ywru3zEtQZv2pv5S7azb9PBMh3bDKzR7HS47QKpkBfa` - geen nieuwe keypair nodig, hij
+   staat er al; `solana-keygen pubkey target/deploy/spankwallet-keypair.json` geeft de actuele
+   waarde als dit ooit verandert).
+2. Testsuite draaien met **`yarn test`** (alias voor `anchor test --validator legacy`) - NIET
+   een kale `anchor test` (zie punt 4 hieronder).
+3. Beide bestanden terugzetten naar `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` en met
+   `git diff -- programs/spankwallet/src/lib.rs` bevestigen dat die weer leeg is vóór er iets
+   gecommit wordt.
+
+**4. Zij-vondst tijdens het draaien: de fail-closed validator-detectie tegen surfpool werkt nog
+steeds precies zoals bedoeld - actief bevestigd, niet aangenomen.** Een kale `anchor test`
+(zonder `--validator legacy`) koos in deze workspace zichtbaar `surfpool` (de anchor-cli-fork
+hier heeft `default_value = "surfpool"` hardcoded) en de suite weigerde meteen te starten met
+een expliciete foutmelding (`tests/verifyValidatorType.ts`): geen `getVersion()`/`getIdentity()`-
+bewijs van een echte `solana-test-validator`, met een directe verwijzing naar waarom dit ertoe
+doet (surfpool's `meta.fee` kwam al eerder niet overeen met daadwerkelijk ingehouden bedragen -
+een testresultaat daartegen bewijst niets over gedrag tegen een echte validator) en naar de
+juiste workflow (`yarn test`/`npm test`, of de handmatige `solana-test-validator --reset
+--gossip-port 8001` + `build-and-deploy.sh` + `anchor test --skip-local-validator`-route).
+Met `yarn test` (dus `--validator legacy`) bevestigde `[verifyValidatorType]` vervolgens
+correct `echte validator bevestigd (http://127.0.0.1:8899): solana-core=4.1.2` en de suite
+draaide door naar de 80 passing/2 pending hierboven. Deze fail-closed poort - eerder ergens
+ingebouwd, hier voor het eerst in een sessie daadwerkelijk getriggerd en gezien werken - blijft
+dus intact en doet precies wat hij moet doen.

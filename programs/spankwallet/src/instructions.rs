@@ -1633,10 +1633,25 @@ pub fn finalize_withdrawal(
         SpankWalletError::PendingActionCommitmentMismatch
     );
 
+    // Blokkerend gat gecorrigeerd (STATUS.md sectie 118, vervolgvraag): de
+    // challenge bond zich hier voorheen alleen aan pending_action.key()
+    // (het PDA-adres, wallet-breed en inhoudsonafhankelijk) - niet aan
+    // BEDRAG/BESTEMMING zelf. Dat opende geen fondsen-omleidingsgat (de
+    // commitment-check hierboven dwingt dat al onafhankelijk af, en
+    // PendingAction is een singleton - er is nooit een TWEEDE pending
+    // action om mee te verwarren), maar de handtekening zelf legde niet
+    // vast WAT er precies bevestigd werd - alleen "wat er ook in deze slot
+    // staat". `commitment` is op dit punt al bewezen gelijk aan
+    // `pending_action.action_commitment` (de require! hierboven) - 'm nu
+    // ook in de payload opnemen bindt de handtekening zelf aan het exacte
+    // bedrag/bestemming, consistent met elke andere passkey-gated
+    // instructie in dit bestand (execute/initiate_withdrawal/
+    // cancel_recovery binden allemaal al volledig).
     let pending_action_key = ctx.accounts.pending_action.key();
-    let mut payload = Vec::with_capacity(8 + 32);
+    let mut payload = Vec::with_capacity(8 + 32 + 32);
     payload.extend_from_slice(&current_nonce.to_le_bytes());
     payload.extend_from_slice(pending_action_key.as_ref());
+    payload.extend_from_slice(&commitment);
 
     let expected_challenge =
         build_expected_challenge(&wallet_key, b"finalize_withdrawal", &payload);

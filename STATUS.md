@@ -10923,18 +10923,55 @@ een losstaande, ernstigere regressie boven water (stack-overflow-risico in een b
 ongerelateerd pad, veroorzaakt door sectie 116/stap 2) - apart onderzocht, gefixt en
 gedocumenteerd in sectie 119, hier alleen kort samengevat waar relevant.**
 
-### Vereenvoudiging t.o.v. sectie 115's oorspronkelijke ontwerp - expliciet vastgelegd
+### Vereenvoudiging t.o.v. sectie 115's oorspronkelijke ontwerp - bewuste, heroverwogen
+keuze, geen misverstand
 
-Sectie 115 beschreef een tweetraps-flow (aparte `confirm_withdrawal` + een permissionless
-`finalize_withdrawal` zonder eigen ceremonie). Tijdens implementatie bewust vereenvoudigd op
-uitdrukkelijk verzoek: `finalize_withdrawal` draagt nu ZELF de (eventueel) tweede
-passkey-ceremonie, geen apart confirm-instructie. Functioneel gelijkwaardig - dezelfde
-2-of-2-garantie, dezelfde single-passkey-degradatie - één instructie minder. Bijeffect:
-`PendingActionNotConfirmed` (sectie 117's zevende errorcode, al gecommit) blijft in dit
-consolidated ontwerp ongebruikt - was bedoeld voor de oorspronkelijke aparte confirm-stap.
-Blijft staan in `errors.rs` voor het geval een toekomstige kind-variant of een latere aparte
-confirm-stap 'm alsnog nodig heeft - geen actie ondernomen, alleen vastgelegd zodat een
-latere lezer 'm niet als vergeten/dood beschouwt zonder de reden te kennen.
+Sectie 115 beschreef een tweetraps-flow (aparte `confirm_withdrawal`, vroeg na initiate, +
+een permissionless `finalize_withdrawal` zonder eigen ceremonie, 24u later). De stap-4-
+opdracht in deze sessie instrueerde letterlijk: *"finalize_withdrawal: vereist de
+24u-timelock verstreken... en de 2-of-2-check: een tweede, ANDERE passkey dan die van
+initiate_withdrawal"* - dat is de bron van de consolidatie (finalize draagt zelf de
+tweede ceremonie), niet een eigen, ongevraagde afwijking tijdens implementatie.
+
+**Achteraf heroverwogen, expliciet niet teruggedraaid - met een eerlijke, niet-triviale
+trade-off, niet een vlakke "functioneel gelijkwaardig"-claim:**
+
+Beide ontwerpen vereisen twee ceremonies in totaal (bij een genuine 2-of-2-wallet), maar
+verschillen wél degelijk, op twee assen:
+- **Timing van de tweede ceremonie**: oorspronkelijk vroeg (kort na initiate, ver vóór de
+  daadwerkelijke geldverplaatsing); samengevoegd laat (exact op het moment dat het geld
+  beweegt). Tegen precies het dreigingsmodel waar dit hele traject voor gebouwd is
+  (WebAuthn-ceremonie-kaping, sectie 72): een late tweede ceremonie geeft de eigenaar een
+  vers controlemoment vlak vóór uitvoering, in plaats van een vroeg momentopname-akkoord dat
+  24 uur later stilzwijgend wordt uitgevoerd zonder verdere menselijke betrokkenheid - een
+  reëel, aannemelijk voordeel van de samengevoegde vorm.
+- **Permissionless uitvoerbaarheid, WEL degelijk verloren, ook voor single-passkey-
+  wallets**: het oorspronkelijke ontwerp liet `finalize_withdrawal` volledig ceremonieloos
+  (permissionless, zoals `finalize_recovery` vandaag al werkt) - na initiate (+ confirm,
+  indien van toepassing) hoeft niemand meer terug te komen, een bot/keeper kan na de
+  timelock gewoon uitvoeren. Het samengevoegde ontwerp vereist ALTIJD een verse passkey-
+  ceremonie bij finalize, OOK voor single-passkey-wallets waar 2-of-2 sowieso nooit
+  cryptografisch betekenisvol was (dezelfde sleutel tekent twee keer) - deze groep gaat van
+  "1 ceremonie ooit, dan automatisch" naar "2 ceremonies, altijd, de eigenaar moet expliciet
+  terugkomen na 24 uur of de opname blijft voor onbepaalde tijd liggen (geen timeout-
+  gebaseerde permissionless-fallback gebouwd)". Dat is een reële UX-kost voor precies de
+  gebruikersgroep (single-passkey, vermoedelijk de meerderheid, sectie 115's aanvulling punt
+  B) die van de "vers controlemoment"-voordeel het MINST profiteert, want een tweede
+  ceremonie met dezelfde sleutel op hetzelfde (mogelijk gecompromitteerde) apparaat biedt
+  geen onafhankelijke bescherming (sectie 72's eigen, al vastgestelde grens).
+
+**Conclusie: niet "functioneel gelijkwaardig" in de vlakke zin - een reële timing-/
+automatiseringsruil, met een aannemelijk voordeel voor de genuine-2-of-2-groep en een
+reële, ongecompenseerde kost voor de single-passkey-groep. Bewust zo gelaten, niet
+teruggedraaid - de trade-off is hiermee expliciet vastgelegd in plaats van weggeschreven
+als "geen verschil".**
+
+Bijeffect, ongewijzigd: `PendingActionNotConfirmed` (sectie 117's zevende errorcode, al
+gecommit) blijft in dit consolidated ontwerp ongebruikt - was bedoeld voor de
+oorspronkelijke aparte confirm-stap. Blijft staan in `errors.rs` voor het geval een
+toekomstige kind-variant of een latere aparte confirm-stap 'm alsnog nodig heeft - geen
+actie ondernomen, alleen vastgelegd zodat een latere lezer 'm niet als vergeten/dood
+beschouwt zonder de reden te kennen.
 
 ### De drie instructies, met bewijs dat de kernvereisten daadwerkelijk geïmplementeerd zijn
 (niet aangenomen op basis van "het compileert")
@@ -10963,6 +11000,39 @@ roepen geen van deze drie nieuwe instructies aan - ze bewijzen dat niets bestaan
 niets over het nieuwe gedrag zelf (echte WebAuthn-ceremonies, een echt verstreken timelock,
 een echte recovery tussen initiate/finalize, een echt tweede apparaat). Die bewijsvoering is
 sectie 115's afgesproken stap 6, hier bewust nog niet geleverd.
+
+### Vervolgvraag na oplevering: `finalize_withdrawal`'s challenge bond zich niet aan
+bedrag/bestemming - blokkerend gat, gevonden en gefixt vóór stap 5/6
+
+Bij nacontrole (met codecitaat, niet op vertrouwen) bleek `finalize_withdrawal`'s
+challenge-payload uitsluitend `nonce || pending_action.key()` te bevatten - het PDA-adres
+(wallet-breed, inhoudsonafhankelijk), NIET het bedrag of de bestemming zelf. Anders dan elke
+andere passkey-gated instructie in dit bestand (`execute`/`initiate_withdrawal`/
+`cancel_recovery` binden hun challenge allemaal volledig aan wat ze autoriseren).
+
+**Exploiteerbaarheid, precies nagegaan, niet aangenomen:** geen fondsen-omleidingsgat - de
+`action_commitment`-gelijkheidscheck (vlak vóór de challenge-opbouw, op de daadwerkelijk
+meegegeven `amount`/`recipient`-argumenten, los van wat de passkey ondertekent) dwingt
+onafhankelijk af dat alleen het BIJ INITIATE vastgelegde bedrag/bestemming ooit kan slagen,
+en `PendingAction` is een singleton-PDA - er bestaat structureel nooit een TWEEDE pending
+action om mee te verwarren. **Wél een reëel gat in wat de handtekening zelf betekent:** de
+tweede ceremonie bevestigde alleen "finalize wat er ook in deze slot staat", niet "ik keur
+dit specifieke bedrag naar deze specifieke bestemming goed" - precies de eigenschap die de
+"vers controlemoment vlak vóór uitvoering"-rechtvaardiging van de vereenvoudiging hierboven
+nodig heeft om iets anders te zijn dan een aanname over clientgedrag.
+
+**Gefixt:** de al-bewezen-gelijke `commitment` (32 bytes, uit de require! ervoor) toegevoegd
+aan de payload - `nonce || pending_action.key() || commitment`. Bindt de handtekening zelf
+nu aan het exacte bedrag/bestemming, consistent met de rest van dit bestand.
+
+**Bewijs, vóór commit:**
+- `cargo check -p spankwallet`: groen, geen nieuwe waarschuwingen.
+- `cargo test -p spankwallet --lib`: 5/5 groen, ongewijzigd.
+- `scripts/check-stack-safety.sh`: schoon, geen stackframe-regressie door deze wijziging.
+
+**Diff-omvang:** uitsluitend `programs/spankwallet/src/instructions.rs`, binnen
+`finalize_withdrawal` - geen wijziging aan `state.rs`/`errors.rs`/`lib.rs` nodig (geen
+nieuwe velden, geen nieuwe errorcode - de bestaande `commitment`-variabele wordt hergebruikt).
 
 ### Overige ontwerpdetails, kort
 

@@ -145,4 +145,26 @@ pub enum SpankWalletError {
 
     #[msg("expiry_slot ligt te ver in de toekomst - een sessie mag maximaal MAX_SESSION_DURATION_SLOTS geldig zijn")]
     SessionDurationTooLong,
+
+    // --- Spend-cap-mechanisme (STATUS.md sectie 115/116) ---
+    #[msg("De tweede, bevestigende handtekening moet van een ANDERE passkey komen dan degene die deze actie initieerde")]
+    SecondPasskeyMustDifferFromInitiator,
+
+    #[msg("Deze pending action is aangemaakt vóór de laatste recovery en is daardoor niet meer geldig - annuleer 'm en dien opnieuw in")]
+    PendingActionStaleEpoch,
+
+    #[msg("Deze pending action vereist nog een bevestiging van een tweede, andere passkey voordat hij afgerond kan worden")]
+    PendingActionNotConfirmed,
+
+    #[msg("Het wachttijdslot van deze pending action is nog niet verstreken")]
+    PendingActionTimelockNotElapsed,
+
+    #[msg("De opgegeven waarden komen niet overeen met wat oorspronkelijk voor deze pending action geautoriseerd is")]
+    PendingActionCommitmentMismatch,
+
+    #[msg("Deze wallet staat in noodstop (disarmed) - roep eerst rearm_wallet aan")]
+    WalletDisarmed,
+
+    #[msg("Dit bedrag zou de cumulatieve bestedingslimiet van het huidige glijdende venster overschrijden - gebruik initiate_withdrawal in plaats daarvan")]
+    SpendWindowExceeded,
 }

@@ -87,6 +87,36 @@ pub mod spankwallet {
         instructions::hunt(ctx, client_action_nonce, client_data_json)
     }
 
+    // spend-cap-mechanisme (STATUS.md sectie 115/118) - eerste kind-variant
+    // (SolWithdrawal), zie instructions.rs voor de volledige toelichting.
+
+    pub fn initiate_withdrawal(
+        ctx: Context<InitiateWithdrawal>,
+        recipient: Pubkey,
+        amount: u64,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::initiate_withdrawal(ctx, recipient, amount, client_action_nonce, client_data_json)
+    }
+
+    pub fn finalize_withdrawal(
+        ctx: Context<FinalizeWithdrawal>,
+        amount: u64,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::finalize_withdrawal(ctx, amount, client_action_nonce, client_data_json)
+    }
+
+    pub fn cancel_action(
+        ctx: Context<CancelAction>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::cancel_action(ctx, client_action_nonce, client_data_json)
+    }
+
     pub fn add_passkey(
         ctx: Context<AddPasskey>,
         new_passkey: [u8; PASSKEY_PUBKEY_LEN],

@@ -167,4 +167,12 @@ pub enum SpankWalletError {
 
     #[msg("Dit bedrag zou de cumulatieve bestedingslimiet van het huidige glijdende venster overschrijden - gebruik initiate_withdrawal in plaats daarvan")]
     SpendWindowExceeded,
+
+    // Toegevoegd tijdens sectie 118 (stap 4, initiate_withdrawal) - ontbrak
+    // in de oorspronkelijke lijst van zeven uit sectie 117: nodig om sectie
+    // 115 punt 1's eigen eis af te dwingen ("controleer of dit bedrag
+    // uberhaupt de wachtrij in moet"), zie STATUS.md sectie 118 voor de
+    // volledige toelichting op deze afwijking van de stap-3-scope.
+    #[msg("Dit bedrag ligt onder of op spend_threshold_lamports - gebruik execute rechtstreeks in plaats van de wachtrij")]
+    AmountEligibleForInstantExecute,
 }

@@ -525,6 +525,30 @@ fn verify_passkey_signature_multi(
     expected_challenge: &[u8],
     client_data_json: &[u8],
 ) -> Result<()> {
+    verify_passkey_signature_multi_get_pubkey(
+        ix_sysvar,
+        owner_passkey,
+        passkeys_account_info,
+        expected_challenge,
+        client_data_json,
+    )
+    .map(|_| ())
+}
+
+/// STATUS.md sectie 115/118: zelfde verificatie als verify_passkey_signature_multi
+/// hierboven, maar geeft ook de daadwerkelijk herleide passkey-publieke-sleutel
+/// terug - nodig voor het spend-cap-mechanisme (initiate_withdrawal moet
+/// vastleggen WELKE passkey initieerde, finalize_withdrawal moet controleren
+/// dat een eventuele tweede handtekening van een AFWIJKENDE passkey komt,
+/// SecondPasskeyMustDifferFromInitiator). verify_passkey_signature_multi
+/// hierboven is nu een dunne wrapper hierop, geen gedupliceerde logica.
+fn verify_passkey_signature_multi_get_pubkey(
+    ix_sysvar: &AccountInfo<'_>,
+    owner_passkey: &[u8; PASSKEY_PUBKEY_LEN],
+    passkeys_account_info: &AccountInfo<'_>,
+    expected_challenge: &[u8],
+    client_data_json: &[u8],
+) -> Result<[u8; PASSKEY_PUBKEY_LEN]> {
     let actual_pubkey = verify_passkey_signature_core(ix_sysvar, expected_challenge, client_data_json)?;
 
     let passkeys = read_passkeys_account(passkeys_account_info);
@@ -549,7 +573,23 @@ fn verify_passkey_signature_multi(
         SpankWalletError::InvalidPasskeySignature
     );
 
-    Ok(())
+    Ok(actual_pubkey)
+}
+
+/// STATUS.md sectie 115/aanvulling punt B: aantal huidige geldige passkeys -
+/// owner_passkey (tenzij ingetrokken) plus eventuele extra geregistreerde
+/// sleutels. Gebruikt door initiate_* om te bepalen of 2-of-2 bij finalize
+/// relevant kan zijn: bij <2 is een tweede, onafhankelijke bevestiging
+/// sowieso onmogelijk (single-passkey-degradatie, PendingAction.confirmed
+/// start dan al op true).
+fn count_valid_passkeys(passkeys_account_info: &AccountInfo) -> u8 {
+    let passkeys = read_passkeys_account(passkeys_account_info);
+    let owner_active = passkeys
+        .as_ref()
+        .map(|p| !p.owner_passkey_revoked)
+        .unwrap_or(true);
+    let additional_count = passkeys.as_ref().map(|p| p.count).unwrap_or(0);
+    (owner_active as u8).saturating_add(additional_count)
 }
 
 fn build_expected_challenge(wallet: &Pubkey, domain: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -1328,6 +1368,387 @@ pub fn hunt(
         .checked_add(to_incinerator)
         .ok_or(SpankWalletError::RentAccountingOverflow)?;
     **incinerator_ai.try_borrow_mut_lamports()? = new_incinerator_balance;
+
+    Ok(())
+}
+
+// spend-cap-mechanisme: PendingAction (initiate_withdrawal / finalize_withdrawal / cancel_action)
+//
+// STATUS.md sectie 115 (ontwerpdocument, goedgekeurd) / sectie 118
+// (implementatiestap 4). Eerste van vier kind-varianten (SolWithdrawal) -
+// zet het PendingAction-patroon één keer goed neer; de drie andere
+// (TokenTransfer, AdvancedAction, ThresholdChange) hergebruiken dezelfde
+// structuur in latere stappen.
+//
+// Vereenvoudiging t.o.v. sectie 115's oorspronkelijke tweetraps-ontwerp
+// (een aparte confirm_withdrawal + een permissionless finalize_withdrawal
+// zonder eigen ceremonie): hier draagt finalize_withdrawal ZELF de
+// (eventueel) tweede passkey-ceremonie, geen apart confirm-instructie
+// nodig. Functioneel gelijkwaardig - dezelfde 2-of-2-garantie, dezelfde
+// single-passkey-degradatie (sectie 115/aanvulling punt B) - één
+// instructie minder.
+//
+// Replay-bescherming: net als elke andere passkey-gated instructie in dit
+// bestand gebruiken alle drie de wallet-brede action_nonce (consistent met
+// de overige 12 aanroepplekken) - ook al zou de eenmalige existentie van
+// PendingAction zelf (via `init`/`close`) een vorm van replay-bescherming
+// op zichzelf al bieden, is er bewust geen uitzondering gemaakt op het
+// bestaande, uniforme patroon: dezelfde duidelijke StaleActionNonce-fout
+// i.p.v. een generieke Anchor-accountfout bij een verouderde/dubbele
+// aanroep, zelfde UX-reden als bij elke andere instructie hier.
+
+const PENDING_ACTION_KIND_SOL_WITHDRAWAL: u8 = 0;
+
+/// Sectie 115 punt 5: vaste programmaconstante voor een eerste versie,
+/// niet per-wallet instelbaar - zelfde bewuste vereenvoudiging als
+/// arm_wallet's duur in sectie 99 ("een vaste constante volstaat voor een
+/// eerste versie... per-wallet instelbare duur kost extra bytes,
+/// uitgesteld").
+const PENDING_ACTION_TIMELOCK_SECONDS: i64 = 24 * 60 * 60;
+
+/// Sectie 115 punt 2b: de commitment bevat BEWUST geen nonce (die
+/// beschermt uitsluitend de initiate-handtekening zelf, al voltooid zodra
+/// dit account bestaat) - finalize herberekent 'm uit de dan aangeleverde
+/// waarden en eist een exacte match, geen nieuwe autorisatie-inhoud nodig
+/// buiten wat hier al vastligt.
+fn compute_withdrawal_commitment(wallet: &Pubkey, recipient: &Pubkey, amount: u64) -> [u8; 32] {
+    let digest = hashv(&[
+        wallet.as_ref(),
+        b"pending_withdrawal",
+        recipient.as_ref(),
+        &amount.to_le_bytes(),
+    ]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_ref());
+    out
+}
+
+#[derive(Accounts)]
+pub struct InitiateWithdrawal<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// Singleton-PDA (sectie 115 punt 2b) - `init` faalt vanzelf als er al
+    /// een pending action voor deze wallet bestaat, wat "maximaal één
+    /// openstaande grote actie tegelijk" afdwingt zonder een aparte
+    /// teller/vlag.
+    #[account(
+        init,
+        payer = payer,
+        space = PendingAction::LEN,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+/// Geen `vault`-account nodig - er wordt hier nog niets verplaatst, alleen
+/// vastgelegd wat later, ná de timelock, geautoriseerd zal zijn (sectie 115
+/// punt 2c).
+pub fn initiate_withdrawal(
+    ctx: Context<InitiateWithdrawal>,
+    recipient: Pubkey,
+    amount: u64,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    // Sectie 115 punt 1: dit pad is uitsluitend voor bedragen die de
+    // instant-drempel daadwerkelijk overschrijden - een bedrag dat ook via
+    // `execute` had gemogen, hoort niet nodeloos een 24u-wachttijd te
+    // krijgen.
+    require!(
+        amount > ctx.accounts.wallet.spend_threshold_lamports,
+        SpankWalletError::AmountEligibleForInstantExecute
+    );
+
+    let mut payload = Vec::with_capacity(8 + 32 + 8);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(recipient.as_ref());
+    payload.extend_from_slice(&amount.to_le_bytes());
+
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"initiate_withdrawal", &payload);
+    let initiator_passkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    // Sectie 115/aanvulling punt B: bij <2 huidige geldige passkeys is een
+    // onafhankelijke tweede bevestiging sowieso onmogelijk - confirmed
+    // start dan al op true (single-passkey-degradatie, timelock-only-
+    // bescherming), anders op false (finalize moet dan een AFWIJKENDE
+    // passkey zien dan initiator_passkey hieronder).
+    let valid_passkey_count = count_valid_passkeys(&ctx.accounts.passkeys.to_account_info());
+    let wallet_key = ctx.accounts.wallet.key();
+    let epoch = ctx.accounts.wallet.session_epoch;
+    let action_commitment = compute_withdrawal_commitment(&wallet_key, &recipient, amount);
+    let clock = Clock::get()?;
+
+    let pending = &mut ctx.accounts.pending_action;
+    pending.wallet = wallet_key;
+    pending.bump = ctx.bumps.pending_action;
+    pending.kind = PENDING_ACTION_KIND_SOL_WITHDRAWAL;
+    pending.initiated_at = clock.unix_timestamp;
+    pending.epoch = epoch;
+    pending.action_commitment = action_commitment;
+    pending.initiator_passkey = initiator_passkey;
+    pending.confirmed = valid_passkey_count < 2;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct FinalizeWithdrawal<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    /// Sluit na een geslaagde finalize (rent naar `closer`, zie
+    /// hieronder) - de eenmalige existentie van dit account is zelf ook de
+    /// reden dat een dubbele/verouderde finalize-poging niet twee keer kan
+    /// slagen, los van de action_nonce-check hierboven.
+    #[account(
+        mut,
+        close = closer,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump = pending_action.bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: willekeurige ontvanger - zelfde principe als execute (sectie 25).
+    #[account(mut)]
+    pub recipient: UncheckedAccount<'info>,
+
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    /// Betaalt de transactiekosten, claimt de rent van de gesloten
+    /// PendingAction - zelfde "closer"-patroon als close_expired_session.
+    /// Losstaand van de passkey-ceremonie hieronder (een gewone
+    /// Solana-sleutel, geen secp256r1/WebAuthn) - wie de rent claimt hoeft
+    /// niet de eigenaar te zijn, wie tekent (owner_passkey/additional_
+    /// passkeys) bepaalt de autorisatie, niet wie betaalt.
+    #[account(mut)]
+    pub closer: Signer<'info>,
+}
+
+/// Sectie 115 punt 2c/aanvulling punt B, met zoveel woorden: als er bij
+/// `initiate_withdrawal` minder dan twee geldige passkeys bestonden, is
+/// `pending_action.confirmed` al `true` en mag DEZELFDE passkey die
+/// initieerde ook hier finalizen - timelock-only-bescherming (vertraging +
+/// zichtbaarheid), geen onafhankelijke-credential-eis, voor de
+/// vermoedelijke meerderheid van single-device-eigenaars. Bestonden er
+/// wél al twee of meer passkeys, dan is `confirmed` `false` en moet de
+/// hier herleide sleutel AFWIJKEN van `initiator_passkey`
+/// (SecondPasskeyMustDifferFromInitiator) - de 2-of-2-eis werkt dan alleen
+/// écht als die tweede passkey van een genuinely gescheiden apparaat komt,
+/// iets wat dit protocol niet kan afdwingen (sectie 115/aanvulling punt B).
+pub fn finalize_withdrawal(
+    ctx: Context<FinalizeWithdrawal>,
+    amount: u64,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    require!(
+        ctx.accounts.pending_action.epoch == ctx.accounts.wallet.session_epoch,
+        SpankWalletError::PendingActionStaleEpoch
+    );
+
+    let clock = Clock::get()?;
+    let elapsed = clock
+        .unix_timestamp
+        .checked_sub(ctx.accounts.pending_action.initiated_at)
+        .ok_or(SpankWalletError::TimestampOverflow)?;
+    require!(
+        elapsed >= PENDING_ACTION_TIMELOCK_SECONDS,
+        SpankWalletError::PendingActionTimelockNotElapsed
+    );
+
+    // Geen apart `kind`-check nodig: de commitment hieronder is per kind
+    // domain-gescheiden (b"pending_withdrawal" hier, andere domains voor
+    // de latere TokenTransfer/AdvancedAction/ThresholdChange-varianten) -
+    // een verkeerd-getypeerde pending action kan hier structureel nooit
+    // een match opleveren. `kind` zelf blijft puur informatief/voor
+    // client-side indexering (zodat een UI kan tonen WAT er openstaat
+    // zonder alle vier domains te hoeven proberen).
+    let wallet_key = ctx.accounts.wallet.key();
+    let recipient_key = ctx.accounts.recipient.key();
+    let commitment = compute_withdrawal_commitment(&wallet_key, &recipient_key, amount);
+    require!(
+        commitment == ctx.accounts.pending_action.action_commitment,
+        SpankWalletError::PendingActionCommitmentMismatch
+    );
+
+    let pending_action_key = ctx.accounts.pending_action.key();
+    let mut payload = Vec::with_capacity(8 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(pending_action_key.as_ref());
+
+    let expected_challenge =
+        build_expected_challenge(&wallet_key, b"finalize_withdrawal", &payload);
+    let actual_pubkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+
+    if !ctx.accounts.pending_action.confirmed {
+        require!(
+            actual_pubkey != ctx.accounts.pending_action.initiator_passkey,
+            SpankWalletError::SecondPasskeyMustDifferFromInitiator
+        );
+    }
+
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    // Zelfde lamport-verplaatsing als execute (sectie 25) - directe
+    // manipulatie i.p.v. een System-Program-CPI, de vault is eigendom van
+    // ONS programma.
+    let rent = Rent::get()?;
+    let min_vault_balance = rent.minimum_balance(VaultAccount::LEN);
+
+    let vault_ai = ctx.accounts.vault.to_account_info();
+    let new_vault_balance = vault_ai
+        .lamports()
+        .checked_sub(amount)
+        .ok_or(SpankWalletError::ExecuteTransferOverflow)?;
+    require!(
+        new_vault_balance >= min_vault_balance,
+        SpankWalletError::VaultWouldFallBelowRentExempt
+    );
+    **vault_ai.try_borrow_mut_lamports()? = new_vault_balance;
+
+    let recipient_ai = ctx.accounts.recipient.to_account_info();
+    let new_recipient_balance = recipient_ai
+        .lamports()
+        .checked_add(amount)
+        .ok_or(SpankWalletError::ExecuteTransferOverflow)?;
+    **recipient_ai.try_borrow_mut_lamports()? = new_recipient_balance;
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct CancelAction<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// Kind-agnostisch: sluit ongeacht `kind`, staat, of timelock - sectie
+    /// 115 punt 2d: annuleren is altijd veiliger dan doorzetten, mag nooit
+    /// geblokkeerd worden door recovery_state/disarmed (bewust GEEN van
+    /// beide constraints op `wallet` hierboven, in tegenstelling tot
+    /// initiate_withdrawal/finalize_withdrawal).
+    #[account(
+        mut,
+        close = payer,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump = pending_action.bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
+    /// het PasskeysAccount van DEZE wallet is, nooit een ander account.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    /// Elke huidige geldige passkey mag annuleren (geen 2-of-2-eis, geen
+    /// "moet dezelfde/andere zijn dan de initiator") - zelfde "veto door
+    /// een van de huidige geldige passkeys"-principe als cancel_recovery.
+    /// Ontvangt ook de rent van de gesloten PendingAction.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+}
+
+pub fn cancel_action(
+    ctx: Context<CancelAction>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+    let wallet_key = ctx.accounts.wallet.key();
+    let pending_action_key = ctx.accounts.pending_action.key();
+
+    let mut payload = Vec::with_capacity(8 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(pending_action_key.as_ref());
+
+    let expected_challenge = build_expected_challenge(&wallet_key, b"cancel_action", &payload);
+    verify_passkey_signature_multi(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     Ok(())
 }

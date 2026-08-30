@@ -2488,6 +2488,273 @@ pub fn finalize_advanced_action<'info>(
     Ok(())
 }
 
+// spend-cap-mechanisme: PendingAction kind=ThresholdChange (initiate_threshold_change / finalize_threshold_change)
+//
+// STATUS.md sectie 118 stap 4 / sectie 123 stap 5. Vierde en laatste van
+// vier kind-varianten - hergebruikt dezelfde drie gedeelde helpers en
+// dezelfde finalize-challenge-vorm als de andere drie kinds.
+//
+// Dit is de instructie die zichzelf beschermt (sectie 115 punt 3): een
+// gekaapte ceremonie mag de drempel niet in één klap kunnen verhogen om
+// daarna instant grote bedragen te laten passeren. Loopt daarom, ZONDER
+// uitzondering, via dezelfde volledige initiate/finalize-wachtrij met de
+// 24u-timelock als de andere drie kinds - OOK voor een drempelVERLAGING,
+// die op het eerste gezicht onschadelijk lijkt maar dat niet is: een
+// aanvaller met controle over de ceremonie zou een instant-verlaging
+// evengoed kunnen misbruiken om verwarring/paniek te zaaien bij de
+// eigenaar (bijv. de drempel op 0 zetten zodat elke normale uitgave
+// plots de wachtrij in moet, terwijl de eigenaar niets snapt van
+// waarom), of om te toetsen of de eigenaar wel oplet - geen enkel
+// verschil in het onderliggende ontwerpprincipe "een configuratiewijziging
+// die het bestedingsgedrag beinvloedt, gaat altijd via dezelfde poort
+// als een bestedingsactie zelf", ongeacht de richting van de wijziging.
+// Geen speciaal geval gebouwd voor verlagingen.
+//
+// Wijzigt TWEE velden tegelijk, in twee verschillende accounts: WEL
+// spend_threshold_lamports (WalletAccount, sectie 116) EN
+// window_total_cap_lamports (SpendWindow, sectie 116/aanvulling punt A) -
+// één gecombineerde config-wijziging, één wachtrij-item, zoals sectie
+// 115's aanvulling al vaststelde ("geen apart vijfde kind nodig").
+
+/// Beide nieuwe waarden (drempel EN window-cap) zijn onderdeel van de
+/// commitment, vanaf het begin - dezelfde discipline die bij
+/// finalize_withdrawal pas achteraf gerepareerd moest worden (sectie
+/// 118's vervolgvraag), hier meteen goed zoals bij Kind 1/2.
+fn compute_threshold_change_commitment(
+    wallet: &Pubkey,
+    new_spend_threshold_lamports: u64,
+    new_window_total_cap_lamports: u64,
+) -> [u8; 32] {
+    let digest = hashv(&[
+        wallet.as_ref(),
+        b"pending_threshold_change",
+        &new_spend_threshold_lamports.to_le_bytes(),
+        &new_window_total_cap_lamports.to_le_bytes(),
+    ]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_ref());
+    out
+}
+
+#[derive(Accounts)]
+pub struct InitiateThresholdChange<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        init,
+        payer = payer,
+        space = PendingAction::LEN,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+/// Geen `spend_window`-account nodig bij initiate - er wordt nog niets
+/// gewijzigd, alleen de twee nieuwe waarden vastgelegd (sectie 115 punt
+/// 2c). `finalize_threshold_change` maakt/wijzigt SpendWindow pas na de
+/// timelock.
+pub fn initiate_threshold_change(
+    ctx: Context<InitiateThresholdChange>,
+    new_spend_threshold_lamports: u64,
+    new_window_total_cap_lamports: u64,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let mut payload = Vec::with_capacity(8 + 8 + 8);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(&new_spend_threshold_lamports.to_le_bytes());
+    payload.extend_from_slice(&new_window_total_cap_lamports.to_le_bytes());
+
+    let expected_challenge = build_expected_challenge(
+        &ctx.accounts.wallet.key(),
+        b"initiate_threshold_change",
+        &payload,
+    );
+    let initiator_passkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    let valid_passkey_count = count_valid_passkeys(&ctx.accounts.passkeys.to_account_info());
+    let wallet_key = ctx.accounts.wallet.key();
+    let epoch = ctx.accounts.wallet.session_epoch;
+    let action_commitment = compute_threshold_change_commitment(
+        &wallet_key,
+        new_spend_threshold_lamports,
+        new_window_total_cap_lamports,
+    );
+    let clock = Clock::get()?;
+
+    init_pending_action(
+        &mut ctx.accounts.pending_action,
+        wallet_key,
+        ctx.bumps.pending_action,
+        PENDING_ACTION_KIND_THRESHOLD_CHANGE,
+        clock.unix_timestamp,
+        epoch,
+        action_commitment,
+        initiator_passkey,
+        valid_passkey_count,
+    );
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct FinalizeThresholdChange<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// `init_if_needed` is hier veilig, zelfde argument als PolicyAccount
+    /// (sectie 26): een PDA die uitsluitend van wallet.key() afhangt kan
+    /// nooit een ander accounttype "per ongeluk" hergebruiken. Een wallet
+    /// die nog nooit een drempelwijziging heeft afgerond, heeft dit
+    /// account nog niet - `finalize_threshold_change` moet 'm dan
+    /// aanmaken, niet crashen op een ontbrekend account.
+    #[account(
+        init_if_needed,
+        payer = closer,
+        space = SpendWindow::LEN,
+        seeds = [b"spend_window", wallet.key().as_ref()],
+        bump,
+    )]
+    pub spend_window: Account<'info, SpendWindow>,
+
+    #[account(
+        mut,
+        close = closer,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump = pending_action.bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    /// Zelfde "closer"-patroon als de andere drie kinds - betaalt hier
+    /// ook de eventuele eerste-aanmaak-rent van SpendWindow, niet alleen
+    /// de transactiekosten.
+    #[account(mut)]
+    pub closer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn finalize_threshold_change(
+    ctx: Context<FinalizeThresholdChange>,
+    new_spend_threshold_lamports: u64,
+    new_window_total_cap_lamports: u64,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let clock = Clock::get()?;
+    check_pending_action_finalizable(
+        &ctx.accounts.pending_action,
+        ctx.accounts.wallet.session_epoch,
+        clock.unix_timestamp,
+    )?;
+
+    let wallet_key = ctx.accounts.wallet.key();
+    let commitment = compute_threshold_change_commitment(
+        &wallet_key,
+        new_spend_threshold_lamports,
+        new_window_total_cap_lamports,
+    );
+    require!(
+        commitment == ctx.accounts.pending_action.action_commitment,
+        SpankWalletError::PendingActionCommitmentMismatch
+    );
+
+    let pending_action_key = ctx.accounts.pending_action.key();
+    let mut payload = Vec::with_capacity(8 + 32 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(pending_action_key.as_ref());
+    payload.extend_from_slice(&commitment);
+
+    let expected_challenge =
+        build_expected_challenge(&wallet_key, b"finalize_threshold_change", &payload);
+    let actual_pubkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    check_pending_action_second_signer(&ctx.accounts.pending_action, &actual_pubkey)?;
+
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    // Beide velden daadwerkelijk toegepast - niet alleen de eerste.
+    ctx.accounts.wallet.spend_threshold_lamports = new_spend_threshold_lamports;
+
+    // Eerste-gebruik-init (zelfde patroon als PolicyAccount in
+    // add_allowed_program): een net door init_if_needed aangemaakt
+    // account heeft wallet == Pubkey::default() (een echte WalletAccount-
+    // PDA is dat nooit) - alleen dan wallet/bump/window_started_at/
+    // spent_lamports_this_window zetten. Bij een AL bestaand account
+    // blijven window_started_at/spent_lamports_this_window ONGEMOEID -
+    // een drempelwijziging mag een lopend venster niet stilzwijgend
+    // resetten (zou een aanvaller anders een manier geven om de
+    // cumulatieve teller "wit te wassen" via een niet-gerelateerde
+    // config-wijziging).
+    let spend_window = &mut ctx.accounts.spend_window;
+    if spend_window.wallet == Pubkey::default() {
+        spend_window.wallet = wallet_key;
+        spend_window.bump = ctx.bumps.spend_window;
+        spend_window.window_started_at = clock.unix_timestamp;
+        spend_window.spent_lamports_this_window = 0;
+    }
+    spend_window.window_total_cap_lamports = new_window_total_cap_lamports;
+
+    Ok(())
+}
+
 // multi-passkey (add_passkey / remove_passkey)
 //
 // LazorKit-geinspireerd (eigen PDA per geautoriseerde sleutel, met rollen),

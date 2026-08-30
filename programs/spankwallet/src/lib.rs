@@ -174,6 +174,38 @@ pub mod spankwallet {
         )
     }
 
+    pub fn initiate_threshold_change(
+        ctx: Context<InitiateThresholdChange>,
+        new_spend_threshold_lamports: u64,
+        new_window_total_cap_lamports: u64,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::initiate_threshold_change(
+            ctx,
+            new_spend_threshold_lamports,
+            new_window_total_cap_lamports,
+            client_action_nonce,
+            client_data_json,
+        )
+    }
+
+    pub fn finalize_threshold_change(
+        ctx: Context<FinalizeThresholdChange>,
+        new_spend_threshold_lamports: u64,
+        new_window_total_cap_lamports: u64,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::finalize_threshold_change(
+            ctx,
+            new_spend_threshold_lamports,
+            new_window_total_cap_lamports,
+            client_action_nonce,
+            client_data_json,
+        )
+    }
+
     pub fn add_passkey(
         ctx: Context<AddPasskey>,
         new_passkey: [u8; PASSKEY_PUBKEY_LEN],

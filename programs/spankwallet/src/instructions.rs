@@ -2105,6 +2105,389 @@ pub fn finalize_token_transfer(
     Ok(())
 }
 
+// spend-cap-mechanisme: PendingAction kind=AdvancedAction (initiate_advanced_action / finalize_advanced_action)
+//
+// STATUS.md sectie 118 stap 4 / sectie 122 stap 5. Derde van vier
+// kind-varianten - hergebruikt dezelfde drie gedeelde helpers
+// (init_pending_action/check_pending_action_finalizable/
+// check_pending_action_second_signer) en dezelfde finalize-challenge-
+// vorm (nonce || pending_action.key() || commitment) als de eerste twee
+// kinds. `cancel_action` blijft kind-agnostisch, geen aparte variant nodig.
+//
+// GEEN drempel-eligibiliteitscheck, bewust, net als TokenTransfer: sectie
+// 115 punt 2e stelde vast dat CPI-instructiedata ondoorzichtige bytes
+// zijn tegen een willekeurig, door de eigenaar zelf toegestaan extern
+// programma - er bestaat geen generieke manier om daar een lamport-
+// equivalent uit te destilleren zonder per-programma-specifieke parsers.
+// Elke execute_advanced-achtige aanroep gaat daarom in v1 ALTIJD via de
+// wachtrij, ongeacht wat de CPI feitelijk verplaatst.
+//
+// Het meest ongewone van de drie kinds: er is geen "bedrag/bestemming" in
+// de gebruikelijke zin. `action_commitment` bindt zich in plaats daarvan
+// aan het VOLLEDIGE CPI-doel - programma-ID, ELKE meegegeven account MET
+// zijn schrijf-/signer-vlag, EN de volledige instructiedata - exact
+// dezelfde velden die `execute_advanced`'s eigen, al-bewezen challenge al
+// bindt (sectie 25/32), hier alleen zonder nonce (zelfde reden als de
+// andere twee kinds: nonce beschermt uitsluitend de initiate-
+// handtekening zelf).
+
+/// Herbruikbare bouwsteen, gedeeld tussen initiate/finalize: bouwt zowel
+/// de rauwe metadata-bytes (voor de challenge/commitment-hash) als de
+/// AccountMeta/AccountInfo-lijsten (voor de daadwerkelijke invoke_signed
+/// bij finalize) in ÉÉN doorloop van remaining_accounts - identieke logica
+/// als execute_advanced's bestaande lus, hier als functie i.p.v. drie keer
+/// apart geschreven (initiate se challenge, initiate se commitment,
+/// finalize se herberekening + daadwerkelijke CPI).
+///
+/// Ambiguïteit-bestendig, met opzet, niet toevallig: elke account draagt
+/// een VASTE breedte (32 bytes sleutel + 1 byte schrijf-vlag + 1 byte
+/// signer-vlag = 34 bytes, aaneengesloten) - twee verschillende CPI's
+/// kunnen nooit dezelfde bytes-reeks opleveren door bijvoorbeeld een
+/// account te herschikken (volgorde zit in de reeks zelf, niet los
+/// vermeld) of een writable/signer-vlag te laten "wegvallen" in een
+/// andere account se sleutelbytes (vaste breedte, geen scheidingstekens
+/// om mee te knoeien). `account_count` en de instructiedata-lengte worden
+/// BEIDE expliciet vóór hun eigen veld meegehashet (zelfde patroon als
+/// execute_advanced's bestaande payload) - zodat het einde van de
+/// metadata-reeks en het begin van de instructiedata nooit dubbelzinnig
+/// kan zijn, ook niet bij een instructiedata die toevallig begint met
+/// bytes die op nog een accountje lijken.
+fn build_cpi_account_metadata<'info>(
+    remaining_accounts: &[AccountInfo<'info>],
+    vault_key: &Pubkey,
+) -> (Vec<u8>, Vec<AccountMeta>, Vec<AccountInfo<'info>>) {
+    let mut metadata_bytes = Vec::with_capacity(remaining_accounts.len() * 34);
+    let mut account_metas = Vec::with_capacity(remaining_accounts.len());
+    let mut account_infos = Vec::with_capacity(remaining_accounts.len() + 1);
+
+    for account_info in remaining_accounts.iter() {
+        let is_vault = account_info.key == vault_key;
+        let is_signer = is_vault || account_info.is_signer;
+        let is_writable = account_info.is_writable;
+
+        metadata_bytes.extend_from_slice(account_info.key.as_ref());
+        metadata_bytes.push(is_writable as u8);
+        metadata_bytes.push(is_signer as u8);
+
+        account_metas.push(AccountMeta {
+            pubkey: *account_info.key,
+            is_signer,
+            is_writable,
+        });
+        account_infos.push(account_info.clone());
+    }
+
+    (metadata_bytes, account_metas, account_infos)
+}
+
+/// Zie de toelichting hierboven bij `build_cpi_account_metadata` voor
+/// waarom deze vorm ambiguïteit-bestendig is. Geen nonce, zelfde reden als
+/// bij de andere twee kinds.
+fn compute_advanced_action_commitment(
+    wallet: &Pubkey,
+    cpi_program_id: &Pubkey,
+    account_count: u16,
+    account_metadata_bytes: &[u8],
+    cpi_instruction_data: &[u8],
+) -> [u8; 32] {
+    let digest = hashv(&[
+        wallet.as_ref(),
+        b"pending_advanced_action",
+        cpi_program_id.as_ref(),
+        &account_count.to_le_bytes(),
+        account_metadata_bytes,
+        &(cpi_instruction_data.len() as u32).to_le_bytes(),
+        cpi_instruction_data,
+    ]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_ref());
+    out
+}
+
+#[derive(Accounts)]
+pub struct InitiateAdvancedAction<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    #[account(
+        init,
+        payer = payer,
+        space = PendingAction::LEN,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: bewust UncheckedAccount, zelfde BPF-stackreden en zelfde
+    /// tolerante lees-patroon als in ExecuteAdvanced hierboven.
+    #[account(
+        seeds = [b"policy", wallet.key().as_ref()],
+        bump,
+    )]
+    pub policy: UncheckedAccount<'info>,
+
+    /// CHECK: het CPI-doelprogramma - moet expliciet op policy.allowed_programs
+    /// staan EN executable zijn (beide gecontroleerd hieronder, eager,
+    /// zelfde stijl als execute_advanced - een gedoemde CPI wordt nooit
+    /// gequeued).
+    pub cpi_program: UncheckedAccount<'info>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn initiate_advanced_action<'info>(
+    ctx: Context<'info, InitiateAdvancedAction<'info>>,
+    cpi_instruction_data: Vec<u8>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+    let cpi_program_id = ctx.accounts.cpi_program.key();
+
+    require!(cpi_program_id != crate::ID, SpankWalletError::SelfCpiNotAllowed);
+    require!(
+        ctx.accounts.cpi_program.executable,
+        SpankWalletError::CpiTargetNotExecutable
+    );
+
+    let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
+    let is_allowed = policy
+        .as_ref()
+        .map(|p| p.allowed_programs[..p.count as usize].iter().any(|prog| *prog == cpi_program_id))
+        .unwrap_or(false);
+    require!(is_allowed, SpankWalletError::ProgramNotAllowed);
+
+    let vault_key = ctx.accounts.vault.key();
+    let (metadata_bytes, _account_metas, _account_infos) =
+        build_cpi_account_metadata(ctx.remaining_accounts, &vault_key);
+    let account_count = ctx.remaining_accounts.len() as u16;
+
+    let mut payload = Vec::with_capacity(
+        8 + 32 + 2 + metadata_bytes.len() + 4 + cpi_instruction_data.len(),
+    );
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(cpi_program_id.as_ref());
+    payload.extend_from_slice(&account_count.to_le_bytes());
+    payload.extend_from_slice(&metadata_bytes);
+    payload.extend_from_slice(&(cpi_instruction_data.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&cpi_instruction_data);
+
+    let expected_challenge = build_expected_challenge(
+        &ctx.accounts.wallet.key(),
+        b"initiate_advanced_action",
+        &payload,
+    );
+    let initiator_passkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    let valid_passkey_count = count_valid_passkeys(&ctx.accounts.passkeys.to_account_info());
+    let wallet_key = ctx.accounts.wallet.key();
+    let epoch = ctx.accounts.wallet.session_epoch;
+    let action_commitment = compute_advanced_action_commitment(
+        &wallet_key,
+        &cpi_program_id,
+        account_count,
+        &metadata_bytes,
+        &cpi_instruction_data,
+    );
+    let clock = Clock::get()?;
+
+    init_pending_action(
+        &mut ctx.accounts.pending_action,
+        wallet_key,
+        ctx.bumps.pending_action,
+        PENDING_ACTION_KIND_ADVANCED_ACTION,
+        clock.unix_timestamp,
+        epoch,
+        action_commitment,
+        initiator_passkey,
+        valid_passkey_count,
+    );
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct FinalizeAdvancedAction<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    #[account(
+        mut,
+        close = closer,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump = pending_action.bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: OPNIEUW gecontroleerd bij finalize, niet gecached vanaf
+    /// initiate - zelfde principe als execute_advanced_via_session's
+    /// live-PolicyAccount-herverificatie (sectie 76/ontwerppunt 2): de
+    /// eigenaar kan het programma tussen initiate en finalize van de
+    /// allowlist verwijderd hebben (bijv. omdat het inmiddels verdacht
+    /// blijkt) - een reeds-geautoriseerde CPI mag dan niet alsnog
+    /// uitgevoerd worden alsof er niets veranderd is.
+    #[account(
+        seeds = [b"policy", wallet.key().as_ref()],
+        bump,
+    )]
+    pub policy: UncheckedAccount<'info>,
+
+    /// CHECK: het CPI-doelprogramma - identiteit wordt hieronder tegen de
+    /// opgeslagen commitment geverifieerd, executable/allowlist-status
+    /// OPNIEUW gecontroleerd (zie policy-veld hierboven).
+    pub cpi_program: UncheckedAccount<'info>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    /// Zelfde "closer"-patroon als de andere twee kinds.
+    #[account(mut)]
+    pub closer: Signer<'info>,
+}
+
+pub fn finalize_advanced_action<'info>(
+    ctx: Context<'info, FinalizeAdvancedAction<'info>>,
+    cpi_instruction_data: Vec<u8>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+    let cpi_program_id = ctx.accounts.cpi_program.key();
+
+    let clock = Clock::get()?;
+    check_pending_action_finalizable(
+        &ctx.accounts.pending_action,
+        ctx.accounts.wallet.session_epoch,
+        clock.unix_timestamp,
+    )?;
+
+    // Opnieuw gecontroleerd, niet vertrouwd op wat bij initiate al gold -
+    // zie het policy-veldcommentaar hierboven.
+    require!(cpi_program_id != crate::ID, SpankWalletError::SelfCpiNotAllowed);
+    require!(
+        ctx.accounts.cpi_program.executable,
+        SpankWalletError::CpiTargetNotExecutable
+    );
+    let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
+    let is_allowed = policy
+        .as_ref()
+        .map(|p| p.allowed_programs[..p.count as usize].iter().any(|prog| *prog == cpi_program_id))
+        .unwrap_or(false);
+    require!(is_allowed, SpankWalletError::ProgramNotAllowed);
+
+    let wallet_key = ctx.accounts.wallet.key();
+    let vault_key = ctx.accounts.vault.key();
+    let (metadata_bytes, account_metas, mut account_infos) =
+        build_cpi_account_metadata(ctx.remaining_accounts, &vault_key);
+    let account_count = ctx.remaining_accounts.len() as u16;
+
+    let commitment = compute_advanced_action_commitment(
+        &wallet_key,
+        &cpi_program_id,
+        account_count,
+        &metadata_bytes,
+        &cpi_instruction_data,
+    );
+    require!(
+        commitment == ctx.accounts.pending_action.action_commitment,
+        SpankWalletError::PendingActionCommitmentMismatch
+    );
+
+    let pending_action_key = ctx.accounts.pending_action.key();
+    let mut payload = Vec::with_capacity(8 + 32 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(pending_action_key.as_ref());
+    payload.extend_from_slice(&commitment);
+
+    let expected_challenge =
+        build_expected_challenge(&wallet_key, b"finalize_advanced_action", &payload);
+    let actual_pubkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    check_pending_action_second_signer(&ctx.accounts.pending_action, &actual_pubkey)?;
+
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    // Zelfde invoke_signed als execute_advanced - bewust gedupliceerd,
+    // zie de toelichting bovenaan dit blok.
+    account_infos.push(ctx.accounts.cpi_program.to_account_info());
+
+    let instruction = Instruction {
+        program_id: cpi_program_id,
+        accounts: account_metas,
+        data: cpi_instruction_data,
+    };
+
+    let seeds = &[
+        b"vault".as_ref(),
+        wallet_key.as_ref(),
+        &[ctx.accounts.vault.bump],
+    ];
+    let signer_seeds = &[&seeds[..]];
+
+    invoke_signed(&instruction, &account_infos, signer_seeds)?;
+
+    Ok(())
+}
+
 // multi-passkey (add_passkey / remove_passkey)
 //
 // LazorKit-geinspireerd (eigen PDA per geautoriseerde sleutel, met rollen),

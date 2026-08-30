@@ -146,6 +146,34 @@ pub mod spankwallet {
         instructions::finalize_token_transfer(ctx, amount, client_action_nonce, client_data_json)
     }
 
+    pub fn initiate_advanced_action<'info>(
+        ctx: Context<'info, InitiateAdvancedAction<'info>>,
+        cpi_instruction_data: Vec<u8>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::initiate_advanced_action(
+            ctx,
+            cpi_instruction_data,
+            client_action_nonce,
+            client_data_json,
+        )
+    }
+
+    pub fn finalize_advanced_action<'info>(
+        ctx: Context<'info, FinalizeAdvancedAction<'info>>,
+        cpi_instruction_data: Vec<u8>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::finalize_advanced_action(
+            ctx,
+            cpi_instruction_data,
+            client_action_nonce,
+            client_data_json,
+        )
+    }
+
     pub fn add_passkey(
         ctx: Context<AddPasskey>,
         new_passkey: [u8; PASSKEY_PUBKEY_LEN],

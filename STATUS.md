@@ -11264,3 +11264,36 @@ bewust gedupliceerd hield i.p.v. gedeeld met hun niet-sessie-tegenhangers).
 **Diff-omvang:** `programs/spankwallet/src/instructions.rs` (+399/-33, inclusief de
 retrofit van `initiate_withdrawal`/`finalize_withdrawal` naar de nieuwe gedeelde helpers),
 `lib.rs` (+29, twee nieuwe wrapper-instructies) - geen wijziging aan `state.rs`/`errors.rs`.
+
+## 121. WAARSCHUWING, geldig voor het VOLLEDIGE spend-cap-traject sinds sectie 99: de
+wachtrij-infrastructuur biedt vandaag NUL functionele bescherming - een gekaapte ceremonie
+kan hem volledig omzeilen
+
+**Voor wie alleen deze paragraaf leest: alles wat sinds sectie 115 gebouwd is
+(`PendingAction`, `initiate_withdrawal`/`finalize_withdrawal`, `initiate_token_transfer`/
+`finalize_token_transfer`, en de nog te bouwen `AdvancedAction`/`ThresholdChange`-kinds,
+plus `SpendWindow`) is UITSLUITEND infrastructuur. Geen van deze bestaande, gecommitte code
+begrenst vandaag ook maar één transactie. `execute`, `hunt`, `transfer_token` en
+`execute_advanced` - de vier daadwerkelijk fondsen-bewegende instructies - zijn sinds het
+begin van dit traject GEEN VAN ALLE gewijzigd. Ze lezen `spend_threshold_lamports` niet, ze
+kennen `wallet.disarmed` niet, ze weten niet dat `PendingAction`/`SpendWindow` bestaan.**
+
+Concreet: een aanvaller die vandaag een WebAuthn-ceremonie kaapt (het dreigingsmodel waar
+dit hele traject sinds sectie 99/115 voor gebouwd wordt) kan gewoon rechtstreeks `execute`
+of `transfer_token` of `execute_advanced` laten ondertekenen voor een willekeurig groot
+bedrag, in één keer, instant, zonder enige drempel, timelock, of noodstop die hem tegenhoudt
+- exact zoals vóór sectie 115 begon. De wachtrij bestaat, maar niets dwingt een cliënt of
+aanvaller om hem te GEBRUIKEN in plaats van de nog altijd volledig open, ongewijzigde directe
+paden.
+
+**Dit is geen fout en geen vergeten stap - het staat zo in de oorspronkelijke, bewust
+gekozen bouwvolgorde (eerst de wachtrij-infrastructuur zelf bewijzen, dan pas de
+bestaande, live paden eraan koppelen) - maar het risico van die volgorde is reëel genoeg
+om hier, los van welke tussenstap dan ook, expliciet te benoemen: tot de LAATSTE bouwstap
+(`execute`/`hunt`/`transfer_token`/`execute_advanced` zelf aanpassen om
+`spend_threshold_lamports`/`wallet.disarmed`/de wachtrij te respecteren) is dit hele
+traject, hoe grondig ook getest en gedocumenteerd, FUNCTIONEEL INERT.** Niets hiervan mag
+als "de bescherming is er al" gelezen worden vóór die laatste stap voltooid en bewezen is.
+Zie sectie 120 voor de eerste, specifieke constatering hiervan (bij `ThresholdChange`'s
+eigen nut) - deze paragraaf tilt 'm op tot een projectbrede waarschuwing, niet beperkt tot
+één kind.

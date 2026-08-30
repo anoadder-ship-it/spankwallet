@@ -117,6 +117,35 @@ pub mod spankwallet {
         instructions::cancel_action(ctx, client_action_nonce, client_data_json)
     }
 
+    pub fn initiate_token_transfer(
+        ctx: Context<InitiateTokenTransfer>,
+        recipient_token_account: Pubkey,
+        token_mint: Pubkey,
+        amount: u64,
+        vault_token_account: Pubkey,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::initiate_token_transfer(
+            ctx,
+            recipient_token_account,
+            token_mint,
+            amount,
+            vault_token_account,
+            client_action_nonce,
+            client_data_json,
+        )
+    }
+
+    pub fn finalize_token_transfer(
+        ctx: Context<FinalizeTokenTransfer>,
+        amount: u64,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::finalize_token_transfer(ctx, amount, client_action_nonce, client_data_json)
+    }
+
     pub fn add_passkey(
         ctx: Context<AddPasskey>,
         new_passkey: [u8; PASSKEY_PUBKEY_LEN],

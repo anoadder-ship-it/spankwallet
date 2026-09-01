@@ -11600,3 +11600,48 @@ eigen `--sbf-out-dir`, geen cache-hergebruik):
    "Detected sbpf_version required by the executable which are not enabled") - dat gold
    voor beide varianten identiek en is dus geen OSABI-symptoom; met `--arch v3` verdween
    het voor beide.
+
+## 125. Stap 6, eerste helft gestart: kind=0/1/3 groen, kind=2 een test-harness-bug gevonden en
+gefixt, één onverklaarde en NIET gereproduceerde `StaleActionNonce`-flakiness op kind=0
+
+**Wat gedraaid is:** `tests/pendingAction.ts` voor het eerst daadwerkelijk uitgevoerd tegen een
+echte lokale validator (`yarn test:pending-action`, via het in sectie 124 al vastgelegde
+recept: `declare_id!`/`Anchor.toml` tijdelijk naar het lokale testadres, ná afloop teruggezet
+- bevestigd met `git diff` telkens leeg).
+
+**Eerste volledige run:** kind=0 (SolWithdrawal) 8/8, kind=1 (TokenTransfer) 4/4, kind=3
+(ThresholdChange) 5/5 - allemaal groen. kind=2 (AdvancedAction) 4/4 rood, allemaal met
+dezelfde oorzaak: `Signature verification failed. Missing signature for public key`.
+
+**kind=2's oorzaak, geen programmabug:** `build_cpi_account_metadata` (instructions.rs) leest
+`is_signer` bewust LIVE van de daadwerkelijk ingediende `AccountInfo`, niet van een
+client-opgegeven vlag - correct, want anders zou een client kunnen liegen over welke accounts
+straks bij finalize zullen (mee)tekenen. Gevolg: een remaining account met `isSigner: true`
+moet dus OOK de `initiate_advanced_action`-transactie al echt mee-ondertekenen, niet alleen de
+latere finalize - Solana's eigen handtekeningcontrole eist dat sowieso, los van wat het
+programma ermee doet. `callInitiateAdvancedAction` in `tests/pendingAction.ts` miste een
+`.signers([...])`-aanroep (had 'm alleen op de finalize-tegenhanger). Gefixt: `extraSigners`-
+parameter toegevoegd, `[target]` doorgegeven op alle vier de call-sites in kind=2's
+`describe`-blok. Na de fix: kind=2 4/4 groen.
+
+**Onverklaarde flakiness, NIET opgelost:** dezelfde herdraai (na de kind=2-fix) gaf kind=0's
+testpunt 7 ("drempel-eligibiliteit") één keer `StaleActionNonce` i.p.v. het verwachte
+`AmountEligibleForInstantExecute` - exact dezelfde, ongewijzigde testcode die in de EERSTE run
+nog gewoon slaagde. Vijf aparte herhalingen daarna (elk tegen een verse validator, via
+hetzelfde recept) gaven **5/5 groen, 21/21 tests geslaagd, geen enkele failure** - de fout is
+NIET gereproduceerd.
+
+**Dit telt bewust NIET als opgelost.** Er is geen diagnose gedaan (geen root cause gevonden,
+geen wijziging aangebracht die de fout zou kunnen verklaren) - de enige empirische stand is
+"1 keer gezien, 5 keer niet gereproduceerd". Onbekend of dit een race in de testharness zit
+(bijv. `fetchActionNonce`'s commitment-niveau t.o.v. de voorafgaande `finalize_threshold_change`-
+confirmatie) of, veel ernstiger, een race in de programma-eigen nonce-check zelf
+(`check_current_action_nonce`/`consume_action_nonce`, instructions.rs). **Als dit terugkomt: dit
+is dan een STOP-signaal voor de rest van stap 6, geen "toevallige flakiness meer negeren"** - een
+race in de on-chain nonce-check zou zwaarder wegen dan de resterende testpunten. Vastgelegd
+zodat een toekomstige sessie dit niet als "altijd al groen geweest" aanneemt.
+
+**Openstaand voor de rest van stap 6's eerste helft:** kind=1/2/3 missen nog een losse
+`cancel_action`-test (kind=0 heeft 'm al, 8a/8b), en kind=2 mist nog een losse, letterlijke
+timelock-test (kind=3's timelock-gedrag zit impliciet in de drempelverlaging-test, maar niet
+als eigen, herkenbaar testpunt). Niet gebouwd deze sessie - sessielimiet.

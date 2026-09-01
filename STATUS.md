@@ -11482,3 +11482,119 @@ gecontroleerd op stackveiligheid vóór commit.
    inert: er is nu een correct werkende wachtrij, maar niets dat een cliënt of aanvaller
    dwingt hem te gebruiken in plaats van de nog altijd volledig open directe paden. Sectie
    121 geldt onverkort.
+
+## 124. Stap 6-opzet: een testbare 24u-timelock, zonder de productiewaarde ooit te wijzigen
+
+Vóór er ook maar één `finalize_*`-test tegen een echte validator kon draaien, moest eerst een
+praktisch probleem opgelost worden: `PENDING_ACTION_TIMELOCK_SECONDS` (sectie 118) is een
+vaste `24 * 60 * 60`-constante, geen runtime-parameter zoals `recovery_timelock_seconds`. De
+bestaande `advanceOnChainClockPast`-helper (gebruikt voor `recovery`/`sessionKeys`-tests met
+timelocks van 3-10s) werkt door net zolang echte transacties te versturen tot de on-chain
+Clock-sysvar de doeltijd gepasseerd is - dat werkt voor een paar seconden, maar een echte
+`solana-test-validator`-klok loopt niet sneller te warpen dan de werkelijke slotproductie
+(~400ms/slot vloer): 24 uur warpen zou ~24 echte klokuren kosten, ongeacht hoeveel transacties
+je erdoorheen jaagt.
+
+**Gekozen oplossing: een default-off Cargo-feature (`test-fast-pending-timelock`,
+`programs/spankwallet/Cargo.toml`) die UITSLUITEND de ingebakken waarde van
+`PENDING_ACTION_TIMELOCK_SECONDS` verandert (24u → 3s) - de vergelijking zelf
+(`elapsed >= PENDING_ACTION_TIMELOCK_SECONDS` in `check_pending_action_finalizable`) blijft
+LETTERLIJK ongewijzigd, in beide varianten identiek codepad:**
+
+```rust
+#[cfg(not(feature = "test-fast-pending-timelock"))]
+const PENDING_ACTION_TIMELOCK_SECONDS: i64 = 24 * 60 * 60;
+#[cfg(feature = "test-fast-pending-timelock")]
+const PENDING_ACTION_TIMELOCK_SECONDS: i64 = 3;
+```
+
+**Twee afgewezen alternatieven, en waarom:**
+1. **De constante runtime-instelbaar maken** (zoals `recovery_timelock_seconds`, per wallet
+   instelbaar bij `init_wallet`). Afgewezen: dat is een ONTWERPWIJZIGING (nieuw veld,
+   bytebudget-impact op `WalletAccount`, extra argumenten op elke `initiate_*`/`finalize_*`),
+   geen testfaciliteit - sectie 115 punt 5/118 koos hier bewust voor een vaste, niet
+   per-wallet instelbare constante ("een vaste constante volstaat voor een eerste versie");
+   dat besluit staat los van hoe je 'm test en zou hier niet omwille van test-gemak
+   heropengebroken moeten worden.
+2. **Alleen een geïsoleerde Rust-eenheidstest van de vergelijking, niet tegen een echte
+   validator.** Afgewezen: dit project se staande discipline (elke sectie hierboven) is
+   bewijs tegen een ECHTE validator - de daadwerkelijke Clock-sysvar-uitlezing, de
+   account-`close`-afhandeling, de volledige instructie-flow. Een losstaande eenheidstest van
+   `elapsed >= CONST` bewijst niets over of `finalize_withdrawal` z'n eigen
+   `Clock::get()?.unix_timestamp` correct doorgeeft, of de PDA daadwerkelijk sluit, enz. -
+   precies het soort aanname dat sectie 87/95/e.a. herhaaldelijk "bewijs het functioneel, neem
+   niets aan" noemen.
+
+**Het reële restrisico van de gekozen aanpak, niet verzwegen:** een Cargo-feature die de
+daadwerkelijke beveiligingswaarde verandert is gevaarlijk als hij ooit per ongeluk in een
+gedeployed binary terechtkomt. Daarom twee onafhankelijke vangnetten, niet alleen "staat
+standaard uit":
+- `default = []` in `Cargo.toml` bevat de feature niet - een gewone `cargo build-sbf`/
+  `anchor build` zonder expliciete `--features` bouwt altijd de echte 24u-constante.
+- **Actieve, byte-niveau-controle** (`scripts/verify-no-test-features-in-binary.ts`, zelfde
+  stijl als `verify-program-id-in-binary.ts`): `check_pending_action_finalizable`
+  (`instructions.rs`) roept, uitsluitend als de feature actief is, `msg!("SPANKWALLET_TEST_FAST_TIMELOCK_V1")`
+  aan - zie de root-cause-toelichting hieronder voor waarom dit geen `#[used]`-static
+  meer is. Het script scant het gecompileerde `.so` op exact die bytes en faalt hard
+  (exit 1) als ze aanwezig zijn - dit vertrouwt niet op hoe de compiler de verkorte
+  `i64`-waarde zelf codeert/inlinet (onbetrouwbaar om op te scannen), alleen op de
+  expliciete marker. Ingebouwd in `scripts/build-devnet-buffer.sh` (de daadwerkelijke
+  devnet-buildroute) vlak na de byte-niveau-programma-ID-controle, en als extra vangnet
+  ook in `scripts/build-and-deploy.sh` (lokaal-only, maar goedkoop om ook daar te
+  controleren).
+
+**Empirisch bewezen, niet alleen beweerd:** twee losse `cargo-build-sbf --arch v3`-builds
+(eigen `CARGO_TARGET_DIR`, geen cache-hergebruik) - één zonder de feature, één met
+`--features test-fast-pending-timelock` - en de controle tegen beide gedraaid:
+- Zonder de feature: `OK (geen test-feature-marker aangetroffen)`, exit code 0.
+- Mét de feature: `FOUT (TEST-FEATURE AANGETROFFEN IN BINARY)` op een concrete byte-offset,
+  exit code 1 - exact het scenario waartegen dit vangnet moet beschermen (een reflexmatige
+  `--features test-fast-pending-timelock` in een echte deploy-aanroep).
+
+**Testcommando's, bewust gescheiden (niet toegevoegd aan het standaard `yarn test`):** alle
+tien testpunten voor de vier `PendingAction`-kinds vereisen de verkorte timelock (niet alleen
+de timelock-grens-test zelf - ELKE happy-path-test roept ook `finalize_*` aan), dus de hele
+nieuwe suite (`tests/pendingAction.ts`) draait via een eigen commando:
+`yarn test:pending-action` (`anchor test --validator legacy --run tests/pendingAction.ts --
+--features test-fast-pending-timelock`, met `PENDING_ACTION_FAST_TIMELOCK=1` gezet). Het
+gewone `yarn test` blijft **ongewijzigd** tegen de echte 24u-constante bouwen, exact zoals
+productie - een bewuste correctie op een eerder voorstel deze wijziging in het standaard
+testcommando te verwerken, afgewezen omdat dat elke gewone testrun stilzwijgend aan een
+verzwakte binary zou laten wennen. `tests/pendingAction.ts` draagt bovendien een eigen
+`before`-guard (leest `PENDING_ACTION_FAST_TIMELOCK`) die de suite zichtbaar `this.skip()`t
+met een duidelijke console-melding als hij per ongeluk op een andere manier gedraaid wordt -
+zie stap 6's testverslag hieronder voor het empirische bewijs dat die guard zelf werkt.
+
+**Root cause van de deploy-ELF-fout op de `#[used]`-marker-static (vier eerdere
+diagnoserondes eerst uitgesloten: niet `#[no_mangle]`, niet `pub`, niet de feature-vlag zelf,
+niet de `cfg`-swap):** `#[used]` vertaalt naar de ELF-sectievlag `SHF_GNU_RETAIN` (voorkomt
+dat de linker de static als "nooit gelezen" weglaat). GNU `as` zet `EI_OSABI` in de
+ELF-header op `ELFOSABI_GNU` (03) i.p.v. `ELFOSABI_NONE` (00) zodra een sectie die vlag
+draagt - zie LLVM-review [D95730](https://reviews.llvm.org/D95730) en
+[binutils bug 27282](https://sourceware.org/bugzilla/show_bug.cgi?id=27282). De Solana
+SBF-loader accepteert die OSABI-waarde niet, dus elke build mét de feature weigerde te
+deployen - een probleem in de linker-output, niet in de Rust-code zelf, vandaar dat de vier
+eerdere codepad-diagnoses niets vonden.
+
+**Fix:** de static vervangen door `msg!("SPANKWALLET_TEST_FAST_TIMELOCK_V1")` in het
+cfg-gated pad van `check_pending_action_finalizable` zelf - de stringliteral belandt net zo
+goed als bytes in `.rodata` (dus `verify-no-test-features-in-binary.ts` blijft ongewijzigd
+werken) maar zonder `#[used]`/`SHF_GNU_RETAIN`, dus zonder de OSABI-flip. Bijkomend voordeel:
+een testbuild logt de marker nu zichtbaar in elke transactie die de timelock-check raakt -
+een vangnet dat de stille static niet had.
+
+**Alle vier bewezen, niet alleen beweerd** (`cargo-build-sbf --arch v3`, beide varianten,
+eigen `--sbf-out-dir`, geen cache-hergebruik):
+1. `xxd -l 16` op beide `.so`-bestanden: `EI_OSABI` (byte-offset 7) is `00` in zowel de
+   normale als de feature-build.
+2. `verify-no-test-features-in-binary.ts` tegen de feature-build: marker gevonden, exit 1.
+3. Dezelfde controle tegen de normale build: marker niet gevonden, exit 0.
+4. De feature-build daadwerkelijk gedeployed naar een lokale `solana-test-validator`
+   (`solana program deploy`, los draaiende validator op non-standaard poorten i.v.m. een
+   reeds bezette poort 8000) - slaagt zonder ELF-fout (`Program Id: HHBf6fbFSXNKYNbJS26ch6YywwbrY5otiDLoLaVSXenQ`,
+   `solana program show` bevestigt `Owner: BPFLoaderUpgradeab1e11111111111111111111111`),
+   en weer opgeruimd (`solana program close`). Ter vergelijking faalde de normale build
+   zonder `--arch v3` op een ANDER, reeds gedocumenteerd probleem (sectie 4.6,
+   "Detected sbpf_version required by the executable which are not enabled") - dat gold
+   voor beide varianten identiek en is dus geen OSABI-symptoom; met `--arch v3` verdween
+   het voor beide.

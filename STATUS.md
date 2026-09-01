@@ -11717,3 +11717,55 @@ van het hele spend-cap-traject: `execute`/`hunt`/`transfer_token`/`execute_advan
 daadwerkelijk aan de wachtrij koppelen (vandaag bestaat de wachtrij volledig los van de
 directe paden, sectie 121), plus de glijdende-vensterhandhaving zelf bouwen (bestaat nog
 niet, zie hierboven). Nog niet gestart.
+
+## 126. `disarmed`: een dode byte met een belofte eraan vast - zelfde foutklasse als H-2
+
+Gevonden tijdens het onderzoek voor de ontwerpnotitie over stap A (sectie 127) - niet gezocht,
+tegengekomen terwijl `execute`/`hunt`/`transfer_token`/`execute_advanced` op drempel-
+gerelateerde constraints werden nagelezen. Verdient een eigen sectie, geen bijvangst-alinea:
+dit is dezelfde foutklasse als H-2 (sectie 76/77: README.md beloofde dat `finalize_recovery`
+sessiesleutels ongeldig maakte na een recovery, empirisch bevestigd dat dat niet gebeurde) -
+**documentatie die een beveiliging belooft die niet bestaat.**
+
+**De belofte** (`state.rs`, doc-comment bij `WalletAccount.disarmed`, vóór deze sectie's fix):
+
+> "Blokkeert execute/transfer_token/execute_advanced/hunt EN elke initiate_*/finalize_* op
+> PendingAction, totdat `rearm_wallet` het terugzet."
+
+**De werkelijkheid, geverifieerd tegen de broncode zelf, niet aangenomen:**
+- De vier genoemde instructies (`Execute`, `Hunt`, `TransferToken`, `ExecuteAdvanced`
+  `Accounts`-structs, `instructions.rs`) zijn stuk voor stuk nagelezen: **geen van de vier
+  heeft een `!wallet.disarmed`-constraint.** Alleen `wallet.recovery_state.is_none()` staat
+  erop (`Hunt` zelfs dat niet - de enige passkey-gated instructie zonder die constraint,
+  bewust, zie de eigen doc-comment daar). De vier `initiate_*` PendingAction-varianten hebben
+  de `!wallet.disarmed`-constraint WEL (geverifieerd: `initiate_withdrawal`,
+  `initiate_token_transfer`, `initiate_advanced_action`, `initiate_threshold_change` alle
+  vier) - dus de belofte klopt voor de helft van wat hij beweert.
+- `disarm_wallet_via_backup_authority`, `disarm_wallet_via_passkey` en `rearm_wallet` - de
+  drie instructies die de doc-comment noemt als enige manier om dit veld ooit te zetten of
+  terug te zetten - **bestaan niet** in `lib.rs`'s huidige 28 instructies (volledige lijst
+  gecontroleerd, `grep -oP "pub fn \K\w+"`).
+
+**Gevolg:** `disarmed` kan vandaag NOOIT `true` worden (geen enkel schrijfpad bestaat), en
+zelfs in het ondenkbare geval dat een toekomstige bug het veld toch op `true` zou zetten,
+zouden `execute`/`hunt`/`transfer_token`/`execute_advanced` het gewoon negeren. Het is een
+gereserveerde byte in `WalletAccount` (onderdeel van de 256-byte worst-case-som, sectie 115)
+die nul functionele betekenis heeft - niet "een noodstop die nog niet gebruikt is", maar een
+noodstop die niet bestaat, met een doc-comment die het tegendeel beweert.
+
+**Waarom dit dezelfde foutklasse is als H-2, expliciet:** H-2 was een claim in README.md over
+gedrag dat empirisch getest en weerlegd werd (de sessie overleefde de recovery echt). Dit is
+een claim in een doc-comment over een mechanisme dat nooit gebouwd is - geen regressie, geen
+weerlegd gedrag, maar wel exact hetzelfde onderliggende risico: **iemand die de documentatie
+leest (toekomstige sessie, externe auditor, of de eigenaar zelf) neemt aan dat een
+bescherming bestaat die niet bestaat**, en bouwt daar mogelijk verder op (bijv. door
+`disarm_wallet_via_passkey` als bestaand aan te nemen bij het ontwerpen van een UI-noodknop).
+
+**Fix in deze sectie, uitsluitend documentatie, geen gedragswijziging:** `state.rs`'s
+doc-comment op `disarmed` herschreven om de werkelijkheid te beschrijven - veld gereserveerd,
+mechanisme nog niet gebouwd, geen van de vier genoemde instructies raadpleegt het, geen
+schrijfpad bestaat - zodat niemand er in de tussentijd op vertrouwt. Het veld zelf, zijn
+waarde (altijd `false` vandaag) en de vier `PendingAction`-instructies die het WEL al
+correct checken blijven ongewijzigd - dit is geen sectie-A-achtige bugfix, er is niets
+kapots om te repareren, alleen een belofte om terug te trekken tot ze waargemaakt kan
+worden.

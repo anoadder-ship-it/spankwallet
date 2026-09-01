@@ -11601,8 +11601,9 @@ eigen `--sbf-out-dir`, geen cache-hergebruik):
    voor beide varianten identiek en is dus geen OSABI-symptoom; met `--arch v3` verdween
    het voor beide.
 
-## 125. Stap 6, eerste helft gestart: kind=0/1/3 groen, kind=2 een test-harness-bug gevonden en
-gefixt, één onverklaarde en NIET gereproduceerde `StaleActionNonce`-flakiness op kind=0
+## 125. Stap 6, eerste helft compleet: alle vier kinds 26/26 groen, kind=2's test-harness-bug
+gevonden en gefixt, één onverklaarde en NIET gereproduceerde `StaleActionNonce`-flakiness op
+kind=0
 
 **Wat gedraaid is:** `tests/pendingAction.ts` voor het eerst daadwerkelijk uitgevoerd tegen een
 echte lokale validator (`yarn test:pending-action`, via het in sectie 124 al vastgelegde
@@ -11641,7 +11642,32 @@ is dan een STOP-signaal voor de rest van stap 6, geen "toevallige flakiness meer
 race in de on-chain nonce-check zou zwaarder wegen dan de resterende testpunten. Vastgelegd
 zodat een toekomstige sessie dit niet als "altijd al groen geweest" aanneemt.
 
-**Openstaand voor de rest van stap 6's eerste helft:** kind=1/2/3 missen nog een losse
-`cancel_action`-test (kind=0 heeft 'm al, 8a/8b), en kind=2 mist nog een losse, letterlijke
-timelock-test (kind=3's timelock-gedrag zit impliciet in de drempelverlaging-test, maar niet
-als eigen, herkenbaar testpunt). Niet gebouwd deze sessie - sessielimiet.
+**Stap 2 - de ontbrekende basispunten gebouwd, eerste helft nu compleet:** vijf nieuwe tests
+toegevoegd - `cancel_action` voor kind=1/2/3 (kind=0 had 'm al als 8a/8b), plus een losse
+timelock-test voor kind=2 en voor kind=3. Elke `cancel_action`-test bevestigt niet alleen dat
+de PDA sluit en de rent teruggaat, maar ook dat er NIETS is toegepast wat de actie zou hebben
+gedaan (kind=1: tokenbalansen ongewijzigd; kind=2: `target` blijft eigendom van System
+Program, de CPI is nooit uitgevoerd; kind=3: `spend_threshold_lamports` blijft 0, `SpendWindow`
+is nooit aangemaakt).
+
+**Waarom kind=3 een EIGEN timelock-test kreeg, ook al bestond er al impliciete dekking:** de
+"drempelVERLAGING"-test bewees het timelock-gedrag al terzijde, maar die test se naam en
+primaire doel is iets anders (geen instant-pad voor verlagingen bewijzen) - zonder een eigen,
+herkenbaar "4. timelock"-testpunt zou de basale timelock-garantie stilzwijgend van de dekking
+kunnen verdwijnen als die andere test ooit herzien of verwijderd wordt. Dezelfde reden waarom
+kind=0/1/2 elk al hun eigen timelock-test hadden - kind=3 kreeg 'm nu ook, consistent met de
+andere drie i.p.v. als enige uitzondering op toevallige dekking te blijven leunen.
+
+**Volledige suite na deze aanvulling: 26/26 groen (was 21), geen enkele failure.** Geen
+`StaleActionNonce` in deze zesde run. Dit verandert de status van sectie 125's eerdere,
+onverklaarde failure NIET: nog steeds niet gereproduceerd (nu 6 van de 6 daaropvolgende runs
+zonder), nog steeds niet verklaard, en nog steeds een stopsignaal voor de rest van stap 6 als
+hij ooit terugkomt - een reeks groene runs is geen bewijs van afwezigheid van een race, alleen
+bewijs dat hij zich deze keren niet manifesteerde.
+
+**Openstaand voor stap 6's TWEEDE helft** (single-passkey-degradatie, 2-of-2-afdwinging,
+recovery-tijdens-pending-action, drempel-eligibiliteit voor de overige kinds, de
+allowlist-herbevestiging bij AdvancedAction, de SpendWindow-controles bij ThresholdChange):
+zie de kind-per-kind-beoordeling in het gesprek zelf voor wat van deze punten al impliciet
+gedekt is door de huidige 26 tests en wat nog daadwerkelijk gebouwd moet worden - hier bewust
+niet herhaald om dubbele, mogelijk uit elkaar lopende boekhouding te voorkomen.

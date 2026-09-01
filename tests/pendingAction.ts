@@ -1056,6 +1056,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       );
       const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
       assert.equal(pendingAfterInitiate.kind, 1);
+      // single-passkey-degradatie: confirmed moet al true zijn na initiate.
+      assert.isTrue(pendingAfterInitiate.confirmed, "confirmed had na initiate met 1 passkey al true moeten zijn");
 
       await advanceOnChainClockPast(
         provider.connection,
@@ -1195,6 +1197,52 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       );
       const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
       assert.isNull(closedInfo);
+    });
+
+    it("5. recovery tijdens pending: finalize faalt met PendingActionStaleEpoch na een voltooide recovery", async () => {
+      const recoveryTimelockSeconds = 3;
+      const { passkey, backupAuthority, walletPda, vaultPda, passkeysPda, pendingActionPda } =
+        await createWallet(recoveryTimelockSeconds);
+      const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(
+        vaultPda,
+        provider.wallet.publicKey,
+        1_000
+      );
+      const amount = new BN(250);
+      await callInitiateTokenTransfer(
+        passkey,
+        walletPda,
+        pendingActionPda,
+        passkeysPda,
+        recipientTokenAccount.publicKey,
+        mint.publicKey,
+        amount,
+        vaultTokenAccount.publicKey
+      );
+
+      await callInitiateRecovery(backupAuthority, walletPda, dummyNewOwnerPasskey());
+      const walletAfterRecoveryInitiate = await program.account.walletAccount.fetch(walletPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        walletAfterRecoveryInitiate.recoveryState.initiatedAt.toNumber() + recoveryTimelockSeconds
+      );
+      await callFinalizeRecovery(walletPda, passkeysPda);
+
+      await expectAnchorError(
+        callFinalizeTokenTransfer(
+          passkey,
+          walletPda,
+          vaultPda,
+          pendingActionPda,
+          passkeysPda,
+          vaultTokenAccount.publicKey,
+          recipientTokenAccount.publicKey,
+          mint.publicKey,
+          amount
+        ),
+        "PendingActionStaleEpoch"
+      );
     });
 
     it("6. commitment-mismatch: finalize met een ander bedrag dan bij initiate faalt met PendingActionCommitmentMismatch", async () => {
@@ -1473,6 +1521,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       );
       const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
       assert.equal(pendingAfterInitiate.kind, 2);
+      // single-passkey-degradatie: confirmed moet al true zijn na initiate.
+      assert.isTrue(pendingAfterInitiate.confirmed, "confirmed had na initiate met 1 passkey al true moeten zijn");
 
       await advanceOnChainClockPast(
         provider.connection,
@@ -1739,6 +1789,55 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       assert.isNull(closedInfo);
     });
 
+    it("5. recovery tijdens pending: finalize faalt met PendingActionStaleEpoch na een voltooide recovery", async () => {
+      const recoveryTimelockSeconds = 3;
+      const { passkey, backupAuthority, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } =
+        await createWallet(recoveryTimelockSeconds);
+      await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      const remainingAccounts: RemainingAccountSpec[] = [
+        { pubkey: target.publicKey, isWritable: true, isSigner: true },
+      ];
+
+      await callInitiateAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        SystemProgram.programId,
+        remainingAccounts,
+        assignIx.data,
+        [target]
+      );
+
+      await callInitiateRecovery(backupAuthority, walletPda, dummyNewOwnerPasskey());
+      const walletAfterRecoveryInitiate = await program.account.walletAccount.fetch(walletPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        walletAfterRecoveryInitiate.recoveryState.initiatedAt.toNumber() + recoveryTimelockSeconds
+      );
+      await callFinalizeRecovery(walletPda, passkeysPda);
+
+      await expectAnchorError(
+        callFinalizeAdvancedAction(
+          passkey,
+          walletPda,
+          vaultPda,
+          pendingActionPda,
+          policyPda,
+          passkeysPda,
+          SystemProgram.programId,
+          remainingAccounts,
+          assignIx.data,
+          [target]
+        ),
+        "PendingActionStaleEpoch"
+      );
+    });
+
     it("8a. cancel_action sluit de PDA en betaalt de rent terug aan de canceller, geen CPI uitgevoerd", async () => {
       const { passkey, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } = await createWallet();
       await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
@@ -1795,6 +1894,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       await callInitiateThresholdChange(passkey, walletPda, pendingActionPda, passkeysPda, newThreshold, newWindowCap);
       const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
       assert.equal(pendingAfterInitiate.kind, 3);
+      // single-passkey-degradatie: confirmed moet al true zijn na initiate.
+      assert.isTrue(pendingAfterInitiate.confirmed, "confirmed had na initiate met 1 passkey al true moeten zijn");
       await advanceOnChainClockPast(
         provider.connection,
         (provider.wallet as anchor.Wallet).payer,
@@ -2074,6 +2175,37 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       assert.equal(walletAfter.spendThresholdLamports.toString(), newThreshold.toString());
       const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
       assert.isNull(closedInfo);
+    });
+
+    it("5. recovery tijdens pending: finalize faalt met PendingActionStaleEpoch na een voltooide recovery", async () => {
+      const recoveryTimelockSeconds = 3;
+      const { passkey, backupAuthority, walletPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet(recoveryTimelockSeconds);
+      const newThreshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      const newWindowCap = new BN(anchor.web3.LAMPORTS_PER_SOL);
+      await callInitiateThresholdChange(passkey, walletPda, pendingActionPda, passkeysPda, newThreshold, newWindowCap);
+
+      await callInitiateRecovery(backupAuthority, walletPda, dummyNewOwnerPasskey());
+      const walletAfterRecoveryInitiate = await program.account.walletAccount.fetch(walletPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        walletAfterRecoveryInitiate.recoveryState.initiatedAt.toNumber() + recoveryTimelockSeconds
+      );
+      await callFinalizeRecovery(walletPda, passkeysPda);
+
+      await expectAnchorError(
+        callFinalizeThresholdChange(
+          passkey,
+          walletPda,
+          pendingActionPda,
+          passkeysPda,
+          spendWindowPda,
+          newThreshold,
+          newWindowCap
+        ),
+        "PendingActionStaleEpoch"
+      );
     });
 
     it("8a. cancel_action sluit de PDA en betaalt de rent terug aan de canceller, drempel ongewijzigd", async () => {

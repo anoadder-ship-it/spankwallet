@@ -7432,8 +7432,9 @@ Elk nog open punt nagelopen, niet op vertrouwen aangenomen:
   geen half gebouwde functie die een migratie-overweging zou vereisen - er is structureel
   NIETS gebouwd (spend-caps bestaan uitsluitend op `SessionKeyAccount`, nooit voor de
   owner-eigen-passkey-route), consistent met de "gelaagde privileges" als nog-niet-begonnen
-  roadmap-item (sectie 1755/2043/5114). Terecht buiten scope: er is geen bestaand veld of
-  gedrag om mee rekening te houden.
+  roadmap-item (sectie 26, zie ook regels 1755/2043/5114 hierboven voor eerdere vermeldingen
+  van diezelfde roadmap). Terecht buiten scope: er is geen bestaand veld of gedrag om mee
+  rekening te houden.
 
 **Conclusie: niets van wat nu al gebouwd is (op `main`) vereist een programmawijziging die
 niet al in B1-B7 zit.** Alles wat openstaat is client-side, documentatie, of - voor de
@@ -11563,7 +11564,8 @@ testcommando te verwerken, afgewezen omdat dat elke gewone testrun stilzwijgend 
 verzwakte binary zou laten wennen. `tests/pendingAction.ts` draagt bovendien een eigen
 `before`-guard (leest `PENDING_ACTION_FAST_TIMELOCK`) die de suite zichtbaar `this.skip()`t
 met een duidelijke console-melding als hij per ongeluk op een andere manier gedraaid wordt -
-zie stap 6's testverslag hieronder voor het empirische bewijs dat die guard zelf werkt.
+het empirische bewijs dat die guard zelf werkt wordt vastgelegd zodra stap 6 daadwerkelijk
+is uitgevoerd (nog niet gebeurd op het moment van schrijven).
 
 **Root cause van de deploy-ELF-fout op de `#[used]`-marker-static (vier eerdere
 diagnoserondes eerst uitgesloten: niet `#[no_mangle]`, niet `pub`, niet de feature-vlag zelf,

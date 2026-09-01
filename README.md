@@ -192,7 +192,7 @@ in twee delen:
    voor de volledige, actuele instructies. Twee van de drie leden (telefoon, hoofdpc,
    Windows-pc) moeten goedkeuren, en de 72u-timelock moet verstrijken voordat uitvoering
    mogelijk is. Zie STATUS.md sectie 41-46 voor de volledige achtergrond, inclusief een
-   aantal reeel tegengekomen valkuilen (SDK-foutvertaalbugs, ProgramData-headroom-tekort,
+   aantal reëel tegengekomen valkuilen (SDK-foutvertaalbugs, ProgramData-headroom-tekort,
    RPC-timing-races, browsercaching, transactionIndex-verwarring) die de moeite waard
    zijn om te kennen voordat je dit voor het eerst zelf doet.
 

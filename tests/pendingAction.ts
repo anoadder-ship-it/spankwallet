@@ -1250,6 +1250,44 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         amount
       );
     });
+
+    it("8a. cancel_action sluit de PDA en betaalt de rent terug aan de canceller, geen tokens verplaatst", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda } = await createWallet();
+      const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(
+        vaultPda,
+        provider.wallet.publicKey,
+        1_000
+      );
+      const amount = new BN(250);
+      await callInitiateTokenTransfer(
+        passkey,
+        walletPda,
+        pendingActionPda,
+        passkeysPda,
+        recipientTokenAccount.publicKey,
+        mint.publicKey,
+        amount,
+        vaultTokenAccount.publicKey
+      );
+
+      const pendingInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNotNull(pendingInfo);
+      const rentLamports = pendingInfo!.lamports;
+
+      const balanceBefore = await provider.connection.getBalance(provider.wallet.publicKey);
+      await callCancelAction(passkey, walletPda, pendingActionPda, passkeysPda);
+      const balanceAfter = await provider.connection.getBalance(provider.wallet.publicKey);
+
+      const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNull(closedInfo, "PendingAction-PDA had gesloten moeten zijn na cancel_action");
+      assert.isAbove(balanceAfter - balanceBefore, rentLamports - 20_000);
+
+      // Geannuleerd, dus geen enkele token had verplaatst mogen zijn.
+      const vaultInfo = await provider.connection.getAccountInfo(vaultTokenAccount.publicKey);
+      const recipientInfo = await provider.connection.getAccountInfo(recipientTokenAccount.publicKey);
+      assert.equal(readTokenAccountAmount(vaultInfo!.data), BigInt(1_000));
+      assert.equal(readTokenAccountAmount(recipientInfo!.data), BigInt(0));
+    });
   });
 
   // ================= AdvancedAction (kind=2) =================
@@ -1633,6 +1671,112 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         "ProgramNotAllowed"
       );
     });
+
+    it("4. timelock: finalize faalt vóór 3s, slaagt erna", async () => {
+      const { passkey, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } = await createWallet();
+      await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      const remainingAccounts: RemainingAccountSpec[] = [
+        { pubkey: target.publicKey, isWritable: true, isSigner: true },
+      ];
+
+      await callInitiateAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        SystemProgram.programId,
+        remainingAccounts,
+        assignIx.data,
+        [target]
+      );
+
+      await expectAnchorError(
+        callFinalizeAdvancedAction(
+          passkey,
+          walletPda,
+          vaultPda,
+          pendingActionPda,
+          policyPda,
+          passkeysPda,
+          SystemProgram.programId,
+          remainingAccounts,
+          assignIx.data,
+          [target]
+        ),
+        "PendingActionTimelockNotElapsed"
+      );
+
+      // De CPI mag zeker niet stiekem toch al uitgevoerd zijn na de
+      // geweigerde finalize-poging.
+      const infoBeforeTimelock = await provider.connection.getAccountInfo(target.publicKey);
+      assert.equal(infoBeforeTimelock!.owner.toBase58(), SystemProgram.programId.toBase58());
+
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+
+      await callFinalizeAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        SystemProgram.programId,
+        remainingAccounts,
+        assignIx.data,
+        [target]
+      );
+      const infoAfterTimelock = await provider.connection.getAccountInfo(target.publicKey);
+      assert.equal(infoAfterTimelock!.owner.toBase58(), program.programId.toBase58());
+      const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNull(closedInfo);
+    });
+
+    it("8a. cancel_action sluit de PDA en betaalt de rent terug aan de canceller, geen CPI uitgevoerd", async () => {
+      const { passkey, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } = await createWallet();
+      await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      const remainingAccounts: RemainingAccountSpec[] = [
+        { pubkey: target.publicKey, isWritable: true, isSigner: true },
+      ];
+
+      await callInitiateAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        SystemProgram.programId,
+        remainingAccounts,
+        assignIx.data,
+        [target]
+      );
+
+      const pendingInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNotNull(pendingInfo);
+      const rentLamports = pendingInfo!.lamports;
+
+      const balanceBefore = await provider.connection.getBalance(provider.wallet.publicKey);
+      await callCancelAction(passkey, walletPda, pendingActionPda, passkeysPda);
+      const balanceAfter = await provider.connection.getBalance(provider.wallet.publicKey);
+
+      const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNull(closedInfo, "PendingAction-PDA had gesloten moeten zijn na cancel_action");
+      assert.isAbove(balanceAfter - balanceBefore, rentLamports - 20_000);
+
+      // Geannuleerd, dus de CPI (System::Assign naar spankwallet) mag nooit
+      // uitgevoerd zijn - target blijft eigendom van System Program.
+      const targetInfo = await provider.connection.getAccountInfo(target.publicKey);
+      assert.equal(targetInfo!.owner.toBase58(), SystemProgram.programId.toBase58());
+    });
   });
 
   // ================= ThresholdChange (kind=3) dedicated tests =================
@@ -1878,6 +2022,84 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         newThreshold,
         newWindowCap
       );
+    });
+
+    // Bewust een EIGEN, herkenbaar testpunt, ook al zit hetzelfde gedrag al
+    // impliciet in de "drempelVERLAGING"-test hierboven (die primair iets
+    // anders bewijst: dat een verlaging geen instant-pad krijgt). Zonder
+    // deze losse test zou de basale timelock-garantie stilzwijgend van de
+    // dekking kunnen verdwijnen als die andere test ooit herzien wordt -
+    // zelfde reden waarom kind=0/1/2 elk hun eigen "N. timelock"-test
+    // hebben, niet alleen een toevallige door-elkaar-heen-bewezen variant.
+    it("4. timelock: finalize faalt vóór 3s, slaagt erna", async () => {
+      const { passkey, walletPda, passkeysPda, pendingActionPda, spendWindowPda } = await createWallet();
+      const newThreshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      const newWindowCap = new BN(anchor.web3.LAMPORTS_PER_SOL);
+      await callInitiateThresholdChange(passkey, walletPda, pendingActionPda, passkeysPda, newThreshold, newWindowCap);
+
+      await expectAnchorError(
+        callFinalizeThresholdChange(
+          passkey,
+          walletPda,
+          pendingActionPda,
+          passkeysPda,
+          spendWindowPda,
+          newThreshold,
+          newWindowCap
+        ),
+        "PendingActionTimelockNotElapsed"
+      );
+
+      // Nog niet toegepast na de geweigerde poging.
+      const walletBeforeTimelock = await program.account.walletAccount.fetch(walletPda);
+      assert.equal(walletBeforeTimelock.spendThresholdLamports.toString(), "0");
+
+      const pending = await program.account.pendingAction.fetch(pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        pending.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+
+      await callFinalizeThresholdChange(
+        passkey,
+        walletPda,
+        pendingActionPda,
+        passkeysPda,
+        spendWindowPda,
+        newThreshold,
+        newWindowCap
+      );
+      const walletAfter = await program.account.walletAccount.fetch(walletPda);
+      assert.equal(walletAfter.spendThresholdLamports.toString(), newThreshold.toString());
+      const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNull(closedInfo);
+    });
+
+    it("8a. cancel_action sluit de PDA en betaalt de rent terug aan de canceller, drempel ongewijzigd", async () => {
+      const { passkey, walletPda, passkeysPda, pendingActionPda, spendWindowPda } = await createWallet();
+      const newThreshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      const newWindowCap = new BN(anchor.web3.LAMPORTS_PER_SOL);
+      await callInitiateThresholdChange(passkey, walletPda, pendingActionPda, passkeysPda, newThreshold, newWindowCap);
+
+      const pendingInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNotNull(pendingInfo);
+      const rentLamports = pendingInfo!.lamports;
+
+      const balanceBefore = await provider.connection.getBalance(provider.wallet.publicKey);
+      await callCancelAction(passkey, walletPda, pendingActionPda, passkeysPda);
+      const balanceAfter = await provider.connection.getBalance(provider.wallet.publicKey);
+
+      const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
+      assert.isNull(closedInfo, "PendingAction-PDA had gesloten moeten zijn na cancel_action");
+      assert.isAbove(balanceAfter - balanceBefore, rentLamports - 20_000);
+
+      // Geannuleerd, dus de drempel zelf mag niet gewijzigd zijn, en
+      // SpendWindow had nog niet aangemaakt mogen worden.
+      const walletAfter = await program.account.walletAccount.fetch(walletPda);
+      assert.equal(walletAfter.spendThresholdLamports.toString(), "0");
+      const spendWindowInfo = await provider.connection.getAccountInfo(spendWindowPda);
+      assert.isNull(spendWindowInfo, "SpendWindow had niet aangemaakt moeten zijn na een geannuleerde wijziging");
     });
   });
 });

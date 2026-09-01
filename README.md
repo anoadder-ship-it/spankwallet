@@ -3,7 +3,7 @@
 Non-custodial Solana wallet met **passkey-authenticatie** (WebAuthn / secp256r1) in plaats van seed phrases.
 
 - Passkey i.p.v. seed phrase, met optioneel meerdere gelijkwaardige passkeys per wallet
-- Tijdelijke, smal-gescopede **session keys** (LazorKit-geinspireerd, slot-gebonden expiry) voor dApp/game-gebruik zonder herhaalde WebAuthn-prompts
+- Tijdelijke, smal-gescopede **session keys** (LazorKit-geïnspireerd, slot-gebonden expiry) voor dApp/game-gebruik zonder herhaalde WebAuthn-prompts
 - Programma-allowlist: gecontroleerde CPI naar externe programma's, uitsluitend naar zelf goedgekeurde programma-ID's
 - Anti-spam: `hunt` burnt/sluit ongevraagde spam-tokens, teruggewonnen rent 50/50 gesplitst tussen de hunter en Solana's incinerator-adres (permanent uit omloop)
 - Recovery via offline Ed25519 backup-authority met 72u-timelock + owner-veto
@@ -78,6 +78,15 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | remove_allowed_program          | Passkey                              | Programma-ID verwijderen van de allowlist                           |
 | execute_advanced                | Passkey                              | CPI naar een programma dat op de eigen allowlist staat               |
 | hunt                            | Passkey                              | Spam-token burnen + account sluiten (50/50 rent)                    |
+| initiate_withdrawal              | Passkey                              | SOL-opname aankondigen (queued, timelock) - opent PendingAction (kind=SolWithdrawal) |
+| finalize_withdrawal              | Passkey                              | Aangekondigde SOL-opname afronden, ná de timelock                    |
+| cancel_action                    | Passkey                              | Een openstaande PendingAction annuleren, ongeacht kind/staat/timelock |
+| initiate_token_transfer          | Passkey                              | SPL-token-overdracht aankondigen (queued, timelock) - opent PendingAction (kind=TokenTransfer) |
+| finalize_token_transfer          | Passkey                              | Aangekondigde SPL-token-overdracht afronden, ná de timelock          |
+| initiate_advanced_action         | Passkey                              | CPI naar een toegestaan programma aankondigen (queued, timelock) - opent PendingAction (kind=AdvancedAction) |
+| finalize_advanced_action         | Passkey                              | Aangekondigde CPI afronden, ná de timelock                            |
+| initiate_threshold_change        | Passkey                              | Wijziging van spend_threshold_lamports/window_total_cap_lamports aankondigen (queued, timelock) - opent PendingAction (kind=ThresholdChange) |
+| finalize_threshold_change        | Passkey                              | Aangekondigde drempelwijziging afronden, ná de timelock               |
 | add_passkey                     | Een van de al geldige passkeys        | Extra, gelijkwaardige passkey registreren (multi-passkey)           |
 | remove_passkey                  | Een van de al geldige passkeys        | Passkey intrekken (lockout-beschermd: nooit de laatste verwijderen) |
 | initiate_recovery                | Backup authority                     | Recovery starten                                                    |
@@ -96,9 +105,9 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 ```
 spankwallet/
 programs/spankwallet/       - Anchor-programma (Rust)
-  src/lib.rs                 - #[program]-entrypoints (19 instructies)
+  src/lib.rs                 - #[program]-entrypoints (28 instructies)
   src/state.rs                - WalletAccount, VaultAccount, RecoveryState, PolicyAccount,
-                                 PasskeysAccount, SessionKeyAccount
+                                 PasskeysAccount, SessionKeyAccount, PendingAction, SpendWindow
   src/instructions.rs          - alle instructielogica + gedeelde verificatiehelpers
   src/errors.rs
 client/                      - Vite/TS-testpagina (passkey + Phantom), 20 teststappen
@@ -235,7 +244,7 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
 - Session keys zijn een lager-vertrouwde, tijdelijke autorisatielaag naast passkeys: gewone
   Ed25519-Solana-signers (geen WebAuthn-ceremonie nodig per spend), altijd smal gescoped
   (welke instructiesoorten, welke sub-allowlist), altijd slot-gebonden begrensd, en kunnen
-  zichzelf nooit verlengen of nieuwe bevoegdheid creeren - alleen aanmaken/intrekken via een
+  zichzelf nooit verlengen of nieuwe bevoegdheid creëren - alleen aanmaken/intrekken via een
   echte passkey.
 - Recovery heeft een 72u-timelock + owner-veto (cancel_recovery), en wist bij succes de
   volledige extra-passkey-set - geen stale, mogelijk-gecompromitteerde passkeys overleven

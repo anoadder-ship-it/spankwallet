@@ -1290,7 +1290,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     passkeysPda: PublicKey,
     cpiProgramId: PublicKey,
     remainingAccounts: RemainingAccountSpec[],
-    data: Buffer
+    data: Buffer,
+    extraSigners: Keypair[] = []
   ) {
     const nonce = await fetchActionNonce(provider.connection, walletPda);
     const rawPayload = buildAdvancedActionMetadataPayload(cpiProgramId, vaultPda, remainingAccounts, data);
@@ -1328,6 +1329,13 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         remainingAccounts.map((a) => ({ pubkey: a.pubkey, isWritable: a.isWritable, isSigner: a.isSigner }))
       )
       .preInstructions([secp256r1Ix])
+      // build_cpi_account_metadata (instructions.rs) leest is_signer LIVE
+      // van de daadwerkelijk ingediende AccountInfo, niet van een
+      // client-opgegeven vlag - dus een remaining account met isSigner:true
+      // moet ook déze initiate-transactie al écht mee-ondertekenen, anders
+      // faalt Solana's eigen handtekeningcontrole al vóór het programma
+      // draait (los van wat initiate zelf met die handtekening doet).
+      .signers(extraSigners)
       .rpc();
   }
 
@@ -1422,7 +1430,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         passkeysPda,
         SystemProgram.programId,
         remainingAccounts,
-        assignIx.data
+        assignIx.data,
+        [target]
       );
       const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
       assert.equal(pendingAfterInitiate.kind, 2);
@@ -1472,7 +1481,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         passkeysPda,
         SystemProgram.programId,
         remainingAccounts,
-        assignIx.data
+        assignIx.data,
+        [target]
       );
       const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
       await advanceOnChainClockPast(
@@ -1534,7 +1544,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         passkeysPda,
         SystemProgram.programId,
         remainingAccounts,
-        assignIx.data
+        assignIx.data,
+        [target]
       );
       const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
       await advanceOnChainClockPast(
@@ -1590,7 +1601,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         passkeysPda,
         SystemProgram.programId,
         remainingAccounts,
-        assignIx.data
+        assignIx.data,
+        [target]
       );
 
       // Eigenaar verwijdert het programma weer van de allowlist TERWIJL de

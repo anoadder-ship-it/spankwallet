@@ -111,16 +111,31 @@ pub struct WalletAccount {
     /// ondermijnen.
     pub spend_threshold_lamports: u64,
 
-    /// STATUS.md sectie 115: noodstop-vlag. `false` = normaal. Primair
-    /// gezet door `disarm_wallet_via_backup_authority` (NIET via een
-    /// WebAuthn-ceremonie - zie sectie 115 punt 2c voor waarom dat de kern
-    /// van dit mechanisme is tegen het ceremonie-kapingsdreigingsmodel uit
-    /// sectie 72), secundair via `disarm_wallet_via_passkey`. Blokkeert
-    /// execute/transfer_token/execute_advanced/hunt EN elke
-    /// initiate_*/finalize_* op PendingAction, totdat `rearm_wallet` het
-    /// terugzet. `cancel_action`/`cancel_recovery` dragen bewust GEEN
-    /// `!disarmed`-constraint (een verdedigende actie mag nooit geblokkeerd
-    /// worden door de staat waar hij tegen beschermt).
+    /// STATUS.md sectie 115/126: GERESERVEERDE noodstop-vlag, mechanisme
+    /// NOG NIET GEBOUWD - dit veld heeft vandaag geen functionele
+    /// betekenis. `false` altijd, want er bestaat geen enkel schrijfpad:
+    /// `disarm_wallet_via_backup_authority`/`disarm_wallet_via_passkey`/
+    /// `rearm_wallet` (de instructies die dit veld ooit zouden moeten
+    /// zetten/terugzetten) bestaan niet in lib.rs. Van de instructies die
+    /// dit veld ZOUDEN moeten blokkeren, doen dat vandaag alleen de vier
+    /// `initiate_*`-varianten op `PendingAction` (geverifieerd:
+    /// `!wallet.disarmed`-constraint staat er daadwerkelijk op) -
+    /// `execute`/`transfer_token`/`execute_advanced`/`hunt` hebben GEEN
+    /// van alle de constraint, ongeacht wat een eerdere versie van deze
+    /// comment beweerde. Zie STATUS.md sectie 126 voor de volledige
+    /// bevinding (zelfde foutklasse als H-2: documentatie die een
+    /// beveiliging belooft die niet bestaat) - deze comment is de
+    /// correctie erop, geen gedragswijziging.
+    ///
+    /// Ontwerpintentie voor als het mechanisme ooit wél gebouwd wordt,
+    /// vastgelegd zodat die niet verloren gaat: primair gezet via
+    /// `disarm_wallet_via_backup_authority` (NIET via een WebAuthn-
+    /// ceremonie - zie sectie 115 punt 2c voor waarom dat de kern van dit
+    /// mechanisme is tegen het ceremonie-kapingsdreigingsmodel uit sectie
+    /// 72), secundair via `disarm_wallet_via_passkey`. `cancel_action`/
+    /// `cancel_recovery` moeten dan bewust GEEN `!disarmed`-constraint
+    /// dragen (een verdedigende actie mag nooit geblokkeerd worden door
+    /// de staat waar hij tegen beschermt) - vandaag al zo, blijft zo.
     pub disarmed: bool,
 }
 

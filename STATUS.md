@@ -11769,3 +11769,97 @@ waarde (altijd `false` vandaag) en de vier `PendingAction`-instructies die het W
 correct checken blijven ongewijzigd - dit is geen sectie-A-achtige bugfix, er is niets
 kapots om te repareren, alleen een belofte om terug te trekken tot ze waargemaakt kan
 worden.
+
+## 127. Ontwerpplan (nog niet gebouwd): stap A, Route 2 - drempel-gating voor execute/hunt
+
+Vervolg op de ontwerpnotitie hierboven (in het gesprek, niet als aparte sectie vastgelegd -
+de aanbeveling zelf staat hier). **Beslist: Route 2** (bewuste, expliciete keuze van de
+eigenaar via de al-bestaande `initiate_threshold_change`/`finalize_threshold_change`, geen
+nieuwe instructie nodig). Route 3b (impliciete default via `created_at`) viel af: een
+permanente cutover-constante zou twee wallets met identieke velden onzichtbaar verschillend
+laten gedragen, puur op basis van aanmaakdatum - exact het soort onzichtbaar tijdgebonden
+gedrag dat dit project elders al bewust vermijdt (zelfde argument als sectie 99's afwijzing
+van een vast tijdvenster).
+
+**Expliciet vastgelegd waarom "opt-in die misschien nooit gebeurt" hier GEEN geldig bezwaar
+is, in tegenstelling tot bij een normale gebruikersbasis:** er zijn zeventien wallets, alle
+zeventien van de eigenaar zelf, alle op devnet. De eigenaar zet de drempel gewoon zelf aan -
+geen anonieme derde die de prompt kan negeren. **Deze beslissing moet heroverwogen worden
+zodra er ooit wallets van derden bijkomen** - op dat moment geldt het "opt-in die nooit
+gebeurt"-bezwaar wél, en zou Route 2 alleen als default-voor-nieuwe-wallets (met een
+verplichte keuze bij `init_wallet`, niet als vrijblijvende latere prompt) heroverwogen moeten
+worden.
+
+### Code, execute/hunt: hoe 0 geïnterpreteerd wordt
+
+De naïeve vertaling van `initiate_withdrawal`'s bestaande check (`amount > threshold` →
+queue-eligible) naar een omgekeerde check op `execute` (`amount <= threshold` →
+instant-eligible) zou bij `threshold = 0` alles blokkeren (niets is `<= 0` behalve een
+bedrag van exact nul) - het TEGENOVERGESTELDE van Route 2's bedoeling. De check moet dus
+expliciet 0 als sentinel behandelen, niet als letterlijke bovengrens:
+
+```rust
+// execute(), na de bestaande handtekeningverificatie, vóór de lamport-manipulatie:
+if ctx.accounts.wallet.spend_threshold_lamports > 0 {
+    require!(
+        amount <= ctx.accounts.wallet.spend_threshold_lamports,
+        SpankWalletError::AmountExceedsInstantThreshold
+    );
+}
+```
+
+Bij `threshold == 0`: de `if` slaat de check helemaal over, `execute` gedraagt zich exact
+zoals vandaag - ongewijzigd voor elke wallet die nooit een drempel gezet heeft. Zodra
+`threshold > 0` (via de al-bestaande wachtrij gezet): elk bedrag `> threshold` wordt
+geweigerd door `execute` met een expliciete verwijzing naar de wachtrij, symmetrisch aan
+`initiate_withdrawal`'s bestaande `AmountEligibleForInstantExecute` (die dan omgekeerd
+bedragen `<= threshold` weigert te queuen). Samen partitioneren ze het bedrag-bereik
+volledig zodra een drempel actief is: elk bedrag hoort dan bij precies één van de twee paden,
+nooit bij beide, nooit bij geen van beide.
+
+**Nieuwe errorcode nodig:** `AmountExceedsInstantThreshold` (naam voorlopig) - geen van de
+bestaande past. `AmountEligibleForInstantExecute` is de tegenovergestelde richting.
+`SpendWindowExceeded` bestaat al in `errors.rs` (sectie 116-lijst) maar is voor de
+glijdende-vensterlimiet (stap B, cumulatief over tijd) - qua boodschap en betekenis iets
+anders dan "dit ENE bedrag ligt boven de per-transactie-drempel". Errorcodes kosten geen
+accountbytes (compile-time enum, geen per-account-opslag) - bevestigt punt 4 uit de
+ontwerpnotitie: geen layoutwijziging nodig voor deze route.
+
+**`hunt` is qua vorm anders, niet automatisch een kopie van `execute`'s check:** `hunt` heeft
+geen `amount`-parameter - het teruggewonnen rentbedrag (`reclaimed`, gesplitst 50/50 tussen
+`rent_destination` en de incinerator) wordt ON-CHAIN berekend uit het balansverschil van de
+vault vóór/na het sluiten van het spam-token-account, niet vooraf door de client opgegeven.
+Een drempelcheck zou dus NA die berekening moeten staan (`reclaimed / 2` tegen de drempel,
+niet een client-opgegeven `amount`), een ander codepad-vorm dan `execute`'s eigen check. De
+bedragen zijn bovendien inherent klein (rent-exempt-minima van één tokenaccount, ~0,002 SOL)
+en dus een veel kleiner doelwit dan `execute`'s onbegrensde vault-brede bedrag - `hunt` staat
+in de oorspronkelijke `SpendWindow`-doc-comment (sectie 115 aanvulling punt A) wel expliciet
+naast `execute` genoemd als instant-pad, dus voor consistentie hoort de gating er wel bij,
+maar het is een kleiner, apart te bouwen stukje, geen kopieerwerk.
+
+### Client: hoe de eigenaar om een drempelkeuze gevraagd wordt
+
+Geen nieuwe on-chain instructie nodig (zie hierboven) - dit is uitsluitend een client-
+wijziging. Wanneer de client een wallet laadt met `spend_threshold_lamports == 0`: een
+zichtbare, niet-blokkerende banner/prompt tonen ("geen bestedingsdrempel ingesteld - bedragen
+boven [aanbevolen richtwaarde] gaan altijd direct, zonder wachttijd") die de eigenaar naar de
+al-bestaande `initiate_threshold_change`-flow leidt (dezelfde UI-kaart-aanpak als de rest van
+UI-fase 1, sectie 49-73 - dit zou een nieuwe kaart in diezelfde stijl worden, geen apart
+project). Geen geforceerde modal, geen blokkade van de rest van de wallet-functionaliteit -
+een banner die genegeerd kan worden, want op de huidige schaal (zeventien eigen wallets) is
+"genegeerd" in de praktijk "de eigenaar heeft het nog niet gedaan", niet "een anonieme
+gebruiker die nooit zal reageren".
+
+### Wallets die nooit een drempel zetten
+
+Blijven, expliciet en bewust, onbeperkt onbeschermd voor de instant-paden - exact het gedrag
+van vandaag, voor onbepaalde tijd, zolang de eigenaar de banner niet opvolgt. Dit is de prijs
+van Route 2, aanvaard omdat de eigenaar en de wallets dezelfde persoon/entiteit zijn op
+devnet - geen enkele wallet is een derde die deze keuze niet zelf in de hand heeft. Zodra dat
+niet meer waar is (zie de heroverweeg-trigger hierboven), is dit niet langer aanvaardbaar en
+moet Route 2 herzien worden, niet stilzwijgend voortgezet.
+
+**Status: plan, niets gebouwd.** Volgende stap (na akkoord): de code hierboven daadwerkelijk
+implementeren in `execute`/`hunt`, `errors.rs` uitbreiden, tests voor beide interpretaties (0
+= ongewijzigd gedrag, > 0 = daadwerkelijke gating) tegen een echte validator, dan pas de
+client-banner.

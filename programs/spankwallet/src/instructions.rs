@@ -708,6 +708,23 @@ pub fn execute(
     )?;
     consume_action_nonce(&mut ctx.accounts.wallet)?;
 
+    // STATUS.md sectie 127/128 (stap A, Route 2): 0 is een sentinel voor
+    // "geen drempel geconfigureerd" (de fail-safe default sinds sectie
+    // 115), geen letterlijke bovengrens - anders zou elke bestaande
+    // wallet (alle zeventien staan op 0) hier INSTANT alles geblokkeerd
+    // zien in plaats van niets, het omgekeerde van wat Route 2 beoogt.
+    // Bewust NA de handtekeningverificatie/nonce-consumptie hierboven maar
+    // VÓÓR elke lamport-manipulatie hieronder: een geweigerde poging mag
+    // aantoonbaar niets aanraken. Samen met initiate_withdrawal's
+    // AmountEligibleForInstantExecute-check partitioneert dit het
+    // volledige bedragbereik zodra een drempel actief is.
+    if ctx.accounts.wallet.spend_threshold_lamports > 0 {
+        require!(
+            amount <= ctx.accounts.wallet.spend_threshold_lamports,
+            SpankWalletError::AmountExceedsInstantThreshold
+        );
+    }
+
     // Directe lamport-manipulatie i.p.v. een System-Program-CPI: de vault is
     // eigendom van ONS programma, niet van System Program (zelfde situatie
     // als in hunt, zie STATUS.md sectie 17) - System::transfer zou hier
@@ -1342,6 +1359,29 @@ pub fn hunt(
     let to_user = reclaimed
         .checked_sub(to_incinerator)
         .ok_or(SpankWalletError::RentAccountingOverflow)?;
+
+    // STATUS.md sectie 127/128 (stap A, Route 2): zelfde sentinel-
+    // interpretatie van 0 als execute's check, maar bewust een ANDERE
+    // VORM, geen kopie - `hunt` heeft geen door de client opgegeven
+    // `amount`-parameter, er is dus niets om vóór de handtekening-
+    // verificatie tegen te toetsen (in tegenstelling tot `execute`). Het
+    // bedrag dat hier telt is `to_user` (wat daadwerkelijk naar
+    // `rent_destination` gaat) - NIET het volledige `reclaimed` en NIET
+    // `to_incinerator`: de incinerator-helft is altijd exact de helft,
+    // nooit door een aanvaller stuurbaar en nooit aanvaller-begunstigend,
+    // ongeacht wie `hunt` aanroept - buiten het dreigingsmodel dat deze
+    // drempel beschermt (een gekaapte ceremonie die geld naar een door de
+    // aanvaller gekozen bestemming laat gaan). Bewust vóór de
+    // lamport-herverdeling hieronder: een geweigerde poging mag
+    // aantoonbaar niets aanraken - de burn/close-CPI's hierboven draaiden
+    // dan wel al, maar Solana se transactie-atomiciteit rolt die net zo
+    // goed terug als de rest van deze instructie faalt.
+    if ctx.accounts.wallet.spend_threshold_lamports > 0 {
+        require!(
+            to_user <= ctx.accounts.wallet.spend_threshold_lamports,
+            SpankWalletError::AmountExceedsInstantThreshold
+        );
+    }
 
     // Directe lamport-herverdeling, geen System-Program-CPI: de vault is
     // eigendom van ONS programma (niet van System Program), en alleen de

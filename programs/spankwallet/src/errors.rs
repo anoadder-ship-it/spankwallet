@@ -175,4 +175,20 @@ pub enum SpankWalletError {
     // volledige toelichting op deze afwijking van de stap-3-scope.
     #[msg("Dit bedrag ligt onder of op spend_threshold_lamports - gebruik execute rechtstreeks in plaats van de wachtrij")]
     AmountEligibleForInstantExecute,
+
+    // Toegevoegd tijdens STATUS.md sectie 127/128 (stap A, Route 2): de
+    // OMGEKEERDE richting van AmountEligibleForInstantExecute - samen
+    // partitioneren de twee foutcodes het volledige bedragbereik zodra een
+    // wallet een niet-nul spend_threshold_lamports heeft: een bedrag hoort
+    // dan bij PRECIES één van de twee paden, nooit bij beide, nooit bij
+    // geen van beide. `execute`/`hunt` gooien deze fout als het bedrag
+    // BOVEN de drempel ligt (hoort in de wachtrij, via
+    // initiate_withdrawal); `initiate_withdrawal` gooit
+    // AmountEligibleForInstantExecute als het bedrag OP of ONDER de
+    // drempel ligt (hoort rechtstreeks via execute). Bij
+    // spend_threshold_lamports == 0 (de fail-safe default, sectie 115)
+    // wordt deze fout nooit gegooid - 0 is een sentinel voor "geen drempel
+    // geconfigureerd", geen letterlijke bovengrens, zie sectie 127.
+    #[msg("Dit bedrag ligt boven spend_threshold_lamports - gebruik initiate_withdrawal om het via de wachtrij te laten verlopen")]
+    AmountExceedsInstantThreshold,
 }

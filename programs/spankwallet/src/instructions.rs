@@ -1407,7 +1407,34 @@ const PENDING_ACTION_KIND_THRESHOLD_CHANGE: u8 = 3;
 /// arm_wallet's duur in sectie 99 ("een vaste constante volstaat voor een
 /// eerste versie... per-wallet instelbare duur kost extra bytes,
 /// uitgesteld").
+///
+/// STATUS.md sectie 124 (stap 6-opzet): de `elapsed >=
+/// PENDING_ACTION_TIMELOCK_SECONDS`-vergelijking in
+/// `check_pending_action_finalizable` hieronder blijft LETTERLIJK
+/// ongewijzigd ongeacht welke variant hieronder actief is - alleen de
+/// INGEBAKKEN WAARDE verschilt, nooit het codepad. Reden voor een
+/// Cargo-feature i.p.v. de twee overwogen alternatieven:
+/// 1. Runtime-instelbaar maken (zoals recovery_timelock_seconds) - afgewezen:
+///    dat is een ontwerpwijziging (nieuw veld, bytebudget, initiate/finalize-
+///    argumenten), geen testfaciliteit - sectie 115/118 koos hier bewust
+///    voor een vaste constante, dat besluit staat los van hoe je 'm test.
+/// 2. Alleen isoleren als losstaande Rust-eenheidstest, niet tegen een echte
+///    validator - afgewezen: dit project se staande discipline is bewijs
+///    tegen een ECHTE validator, niet tegen geïsoleerde logica (zie elke
+///    andere sectie in STATUS.md over dit onderwerp) - een geïsoleerde test
+///    zou nooit de daadwerkelijke on-chain Clock-sysvar-uitlezing/
+///    account-flow bewijzen, alleen de vergelijking zelf.
+/// Een reëel restrisico van DEZE aanpak, niet verzwegen: een Cargo-feature
+/// die de daadwerkelijke, gedeployde beveiligingswaarde verandert is
+/// gevaarlijk als hij ooit per ongeluk aanstaat bij een echte build - vandaar
+/// dat dit NOOIT in `default` staat (Cargo.toml) EN vandaar de actieve,
+/// bytecontrole in scripts/verify-no-test-features-in-binary.ts (zie de
+/// msg!()-marker in check_pending_action_finalizable hieronder) - "staat
+/// standaard uit" is hier bewust NIET het enige vangnet.
+#[cfg(not(feature = "test-fast-pending-timelock"))]
 const PENDING_ACTION_TIMELOCK_SECONDS: i64 = 24 * 60 * 60;
+#[cfg(feature = "test-fast-pending-timelock")]
+const PENDING_ACTION_TIMELOCK_SECONDS: i64 = 3;
 
 /// Sectie 115 punt 2b: de commitment bevat BEWUST geen nonce (die
 /// beschermt uitsluitend de initiate-handtekening zelf, al voltooid zodra
@@ -1471,6 +1498,22 @@ fn check_pending_action_finalizable(
     wallet_session_epoch: u64,
     now: i64,
 ) -> Result<()> {
+    // STATUS.md sectie 124 (root cause): dit was een `#[used] static
+    // PENDING_ACTION_TEST_TIMELOCK_MARKER: [u8; 33]`. Root cause van vier
+    // mislukte diagnoserondes (niet #[no_mangle], niet pub, niet de
+    // feature-vlag, niet de cfg-swap): #[used] vertaalt naar de ELF-
+    // sectievlag SHF_GNU_RETAIN, en GNU as zet daarbij EI_OSABI op
+    // ELFOSABI_GNU (03) i.p.v. ELFOSABI_NONE (00) - zie LLVM review D95730
+    // en binutils bug 27282. De Solana SBF-loader accepteert die OSABI niet,
+    // dus elke build met de test-feature weigerde te deployen. Een
+    // stringliteral via msg!() belandt net zo goed als bytes in .rodata
+    // (dus verify-no-test-features-in-binary.ts blijft ongewijzigd werken)
+    // zonder SHF_GNU_RETAIN, én logt zichtbaar in elke transactie die dit
+    // codepad raakt tijdens een testbuild - een extra vangnet dat de stille
+    // static niet had.
+    #[cfg(feature = "test-fast-pending-timelock")]
+    msg!("SPANKWALLET_TEST_FAST_TIMELOCK_V1");
+
     require!(
         pending.epoch == wallet_session_epoch,
         SpankWalletError::PendingActionStaleEpoch

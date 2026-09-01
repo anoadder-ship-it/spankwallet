@@ -14,6 +14,18 @@ no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+# STATUS.md sectie 124 (stap 6-opzet): verkort UITSLUITEND
+# PENDING_ACTION_TIMELOCK_SECONDS (instructions.rs) voor lokale
+# testbinaries - een echte 24u-wachttijd is op een echte
+# solana-test-validator niet in redelijke tijd te warpen (de klok volgt
+# echte slotproductie, geen instant-warp-RPC zoals BanksClient/LiteSVM).
+# Default-off, NOOIT in default features, en actief gecontroleerd (niet
+# alleen "staat standaard uit") door
+# scripts/verify-no-test-features-in-binary.ts vóór elke devnet-buffer-build
+# (build-devnet-buffer.sh) - zie de instructions.rs-commentaar bij de
+# constante zelf voor waarom dit de gekozen aanpak is t.o.v. de twee
+# afgewezen alternatieven.
+test-fast-pending-timelock = []
 default = []
 
 [lints.rust]

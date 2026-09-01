@@ -122,6 +122,18 @@ interface RemainingAccountSpec {
   isSigner: boolean;
 }
 
+// --- Zelfde hunt-constanten/encodering als tests/hunt.ts/spendThreshold.ts
+// (bewust gedupliceerd) - nodig voor het execute/hunt-drempel-gating-
+// describe-blok onderaan dit bestand (STATUS.md sectie 127/128). ---
+const INCINERATOR = new PublicKey("1nc1nerator11111111111111111111111111111111");
+const HUNT_DISCRIMINATOR = Buffer.from([0x94, 0x1e, 0x1c, 0x39, 0x31, 0xf9, 0x1d, 0x41]);
+
+function encodeBorshVecU8(bytes: Uint8Array): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE(bytes.length, 0);
+  return Buffer.concat([len, Buffer.from(bytes)]);
+}
+
 describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier kinds (STATUS.md sectie 124)", function () {
   // --- Guard: deze hele suite vereist de fast-timelock-testbuild ---
   before(function () {
@@ -507,6 +519,135 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       })
       .preInstructions([secp256r1Ix])
       .rpc();
+  }
+
+  // --- execute/hunt (STATUS.md sectie 127/128, stap A/Route 2's
+  // drempel-gating) - nodig voor het describe-blok onderaan dit bestand
+  // dat de threshold>0-gating en de symmetrie met initiate_withdrawal
+  // bewijst. Draait hier (i.p.v. in het aparte, timelock-vrije
+  // spendThreshold.ts) omdat een niet-nul drempel zetten
+  // finalize_threshold_change vereist, en dus de verkorte testtimelock. ---
+
+  async function callExecute(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    vaultPda: PublicKey,
+    passkeysPda: PublicKey,
+    recipient: PublicKey,
+    amount: BN
+  ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([
+      nonceLeBytes(nonce),
+      recipient.toBuffer(),
+      amount.toArrayLike(Buffer, "le", 8),
+    ]);
+    const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "execute", payload);
+    const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
+      signingPasskey,
+      expectedChallenge
+    );
+    const secp256r1Ix = buildSecp256r1Instruction(
+      signingPasskey.compressedPublicKey,
+      signedMessage,
+      rawSignature
+    );
+
+    return program.methods
+      .execute(amount, new BN(nonce.toString()), clientDataJSON)
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        recipient,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .preInstructions([secp256r1Ix])
+      .rpc();
+  }
+
+  /// Handmatig opgebouwd, niet via program.methods.hunt().accounts() -
+  /// zelfde reden als tests/hunt.ts: Hunt::token_mint draagt bewust geen
+  /// #[account(mut)] (Anchor muteert 'm nooit rechtstreeks), maar de
+  /// SPL-Token Burn-CPI erin vereist wél writable op transactieniveau.
+  async function callHunt(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    vaultPda: PublicKey,
+    passkeysPda: PublicKey,
+    targetTokenAccount: PublicKey,
+    tokenMint: PublicKey,
+    rentDestination: PublicKey
+  ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payload = Buffer.concat([
+      nonceLeBytes(nonce),
+      targetTokenAccount.toBuffer(),
+      rentDestination.toBuffer(),
+    ]);
+    const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "hunt", payload);
+    const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
+      signingPasskey,
+      expectedChallenge
+    );
+    const secp256r1Ix = buildSecp256r1Instruction(
+      signingPasskey.compressedPublicKey,
+      signedMessage,
+      rawSignature
+    );
+
+    const data = Buffer.concat([HUNT_DISCRIMINATOR, nonceLeBytes(nonce), encodeBorshVecU8(clientDataJSON)]);
+    const huntIx = new TransactionInstruction({
+      programId: program.programId,
+      keys: [
+        { pubkey: walletPda, isSigner: false, isWritable: true },
+        { pubkey: vaultPda, isSigner: false, isWritable: true },
+        { pubkey: targetTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: tokenMint, isSigner: false, isWritable: true },
+        { pubkey: rentDestination, isSigner: false, isWritable: true },
+        { pubkey: INCINERATOR, isSigner: false, isWritable: true },
+        { pubkey: passkeysPda, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data,
+    });
+
+    const tx = new anchor.web3.Transaction().add(secp256r1Ix, huntIx);
+    return provider.sendAndConfirm(tx);
+  }
+
+  async function setupSpamTokenAccount(
+    vaultPda: PublicKey,
+    mintAmount: number
+  ): Promise<{ mint: Keypair; tokenAccount: Keypair }> {
+    const mint = Keypair.generate();
+    const tokenAccount = Keypair.generate();
+    const mintRent = await provider.connection.getMinimumBalanceForRentExemption(MINT_LEN);
+    const tokenAccountRent =
+      await provider.connection.getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_LEN);
+
+    const setupTx = new anchor.web3.Transaction().add(
+      SystemProgram.createAccount({
+        fromPubkey: provider.wallet.publicKey,
+        newAccountPubkey: mint.publicKey,
+        lamports: mintRent,
+        space: MINT_LEN,
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      encodeInitializeMintIx(mint.publicKey, 0, provider.wallet.publicKey),
+      SystemProgram.createAccount({
+        fromPubkey: provider.wallet.publicKey,
+        newAccountPubkey: tokenAccount.publicKey,
+        lamports: tokenAccountRent,
+        space: TOKEN_ACCOUNT_LEN,
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      encodeInitializeAccountIx(tokenAccount.publicKey, mint.publicKey, vaultPda),
+      encodeMintToIx(mint.publicKey, tokenAccount.publicKey, provider.wallet.publicKey, mintAmount)
+    );
+    await provider.sendAndConfirm(setupTx, [mint, tokenAccount]);
+    return { mint, tokenAccount };
   }
 
   async function expectAnchorError(promise: Promise<unknown>, errorCode: string) {
@@ -2232,6 +2373,155 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       assert.equal(walletAfter.spendThresholdLamports.toString(), "0");
       const spendWindowInfo = await provider.connection.getAccountInfo(spendWindowPda);
       assert.isNull(spendWindowInfo, "SpendWindow had niet aangemaakt moeten zijn na een geannuleerde wijziging");
+    });
+  });
+
+  // ================= execute/hunt drempel-gating (STATUS.md sectie 127/128, stap A/Route 2) =================
+  // Alleen de threshold > 0-gevallen - threshold = 0 (ongewijzigd gedrag)
+  // staat in tests/spendThreshold.ts, dat geen wachtrij/timelock nodig
+  // heeft. Hier WEL nodig: een niet-nul drempel zetten vereist
+  // finalize_threshold_change, dus de verkorte testtimelock van dit
+  // bestand.
+
+  async function setThreshold(
+    passkey: TestPasskey,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey,
+    spendWindowPda: PublicKey,
+    threshold: BN
+  ) {
+    const windowCap = threshold.mul(new BN(10)).add(new BN(anchor.web3.LAMPORTS_PER_SOL));
+    await callInitiateThresholdChange(passkey, walletPda, pendingActionPda, passkeysPda, threshold, windowCap);
+    const pending = await program.account.pendingAction.fetch(pendingActionPda);
+    await advanceOnChainClockPast(
+      provider.connection,
+      (provider.wallet as anchor.Wallet).payer,
+      pending.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+    );
+    await callFinalizeThresholdChange(
+      passkey,
+      walletPda,
+      pendingActionPda,
+      passkeysPda,
+      spendWindowPda,
+      threshold,
+      windowCap
+    );
+  }
+
+  describe("execute/hunt drempel-gating, threshold > 0", () => {
+    it("execute: bedrag op of onder de drempel gaat instant door", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const threshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold);
+
+      const recipient = Keypair.generate().publicKey;
+      const vaultBefore = await provider.connection.getBalance(vaultPda);
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, threshold);
+      const vaultAfter = await provider.connection.getBalance(vaultPda);
+
+      assert.equal(vaultBefore - vaultAfter, threshold.toNumber());
+      assert.equal(await provider.connection.getBalance(recipient), threshold.toNumber());
+    });
+
+    it("execute: bedrag boven de drempel wordt geweigerd met AmountExceedsInstantThreshold, aantoonbaar niets verplaatst", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const threshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold);
+
+      const recipient = Keypair.generate().publicKey;
+      const vaultBefore = await provider.connection.getBalance(vaultPda);
+      await expectAnchorError(
+        callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, threshold.add(new BN(1))),
+        "AmountExceedsInstantThreshold"
+      );
+      const vaultAfter = await provider.connection.getBalance(vaultPda);
+
+      assert.equal(vaultBefore, vaultAfter, "vault-balans had ongewijzigd moeten blijven na de weigering");
+      assert.equal(await provider.connection.getBalance(recipient), 0, "recipient had niets moeten ontvangen");
+    });
+
+    it("hunt: to_user (wat naar rent_destination gaat) op of onder de drempel slaagt normaal", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const { mint, tokenAccount } = await setupSpamTokenAccount(vaultPda, 1000);
+
+      const tokenAccountRent = await provider.connection.getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_LEN);
+      const toIncinerator = Math.floor(tokenAccountRent / 2);
+      const toUser = tokenAccountRent - toIncinerator;
+      const threshold = new BN(toUser); // exact op de grens - moet nog slagen (<=).
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold);
+
+      const rentDestination = Keypair.generate().publicKey;
+      await callHunt(passkey, walletPda, vaultPda, passkeysPda, tokenAccount.publicKey, mint.publicKey, rentDestination);
+
+      const closedInfo = await provider.connection.getAccountInfo(tokenAccount.publicKey);
+      assert.isNull(closedInfo, "target_token_account had gesloten moeten zijn na hunt");
+      assert.equal(await provider.connection.getBalance(rentDestination), toUser);
+    });
+
+    it("hunt: to_user boven de drempel wordt geweigerd met AmountExceedsInstantThreshold, aantoonbaar niets verplaatst/gesloten", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const { mint, tokenAccount } = await setupSpamTokenAccount(vaultPda, 1000);
+
+      const tokenAccountRent = await provider.connection.getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_LEN);
+      const toIncinerator = Math.floor(tokenAccountRent / 2);
+      const toUser = tokenAccountRent - toIncinerator;
+      const threshold = new BN(toUser - 1); // net onder wat hunt zou uitkeren - moet weigeren.
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold);
+
+      const rentDestination = Keypair.generate().publicKey;
+      const vaultBefore = await provider.connection.getBalance(vaultPda);
+      const tokenAccountInfoBefore = await provider.connection.getAccountInfo(tokenAccount.publicKey);
+      assert.isNotNull(tokenAccountInfoBefore);
+
+      await expectAnchorError(
+        callHunt(passkey, walletPda, vaultPda, passkeysPda, tokenAccount.publicKey, mint.publicKey, rentDestination),
+        "AmountExceedsInstantThreshold"
+      );
+
+      // Solana se transactie-atomiciteit: de burn/close-CPI's die vóór de
+      // check in instructions.rs::hunt draaiden, zijn net zo goed
+      // teruggedraaid als de rest van de instructie faalt - het
+      // spam-token-account bestaat dus nog gewoon, ongewijzigd.
+      const tokenAccountInfoAfter = await provider.connection.getAccountInfo(tokenAccount.publicKey);
+      assert.isNotNull(tokenAccountInfoAfter, "target_token_account had NIET gesloten moeten zijn na de weigering");
+      assert.equal(await provider.connection.getBalance(vaultPda), vaultBefore);
+      assert.equal(await provider.connection.getBalance(rentDestination), 0);
+    });
+
+    it("symmetrie: een bedrag dat execute weigert wordt door initiate_withdrawal geaccepteerd, en omgekeerd", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const threshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold);
+
+      const recipient = Keypair.generate().publicKey;
+
+      // Boven de drempel: execute weigert, initiate_withdrawal accepteert.
+      const amountOver = threshold.add(new BN(1));
+      await expectAnchorError(
+        callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, amountOver),
+        "AmountExceedsInstantThreshold"
+      );
+      await callInitiateWithdrawal(passkey, walletPda, pendingActionPda, passkeysPda, recipient, amountOver);
+      const queuedOver = await program.account.pendingAction.fetch(pendingActionPda);
+      assert.equal(queuedOver.kind, 0, "initiate_withdrawal had moeten slagen voor het bedrag dat execute weigerde");
+      // Opruimen zodat de singleton-PDA vrij is voor de volgende helft van
+      // deze test - bewijst meteen dat cancel_action ook hier werkt.
+      await callCancelAction(passkey, walletPda, pendingActionPda, passkeysPda);
+
+      // Op of onder de drempel: execute accepteert, initiate_withdrawal weigert.
+      const amountUnder = threshold;
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, amountUnder);
+      await expectAnchorError(
+        callInitiateWithdrawal(passkey, walletPda, pendingActionPda, passkeysPda, recipient, amountUnder),
+        "AmountEligibleForInstantExecute"
+      );
     });
   });
 });

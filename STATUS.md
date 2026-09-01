@@ -11601,9 +11601,9 @@ eigen `--sbf-out-dir`, geen cache-hergebruik):
    voor beide varianten identiek en is dus geen OSABI-symptoom; met `--arch v3` verdween
    het voor beide.
 
-## 125. Stap 6, eerste helft compleet: alle vier kinds 26/26 groen, kind=2's test-harness-bug
-gevonden en gefixt, één onverklaarde en NIET gereproduceerde `StaleActionNonce`-flakiness op
-kind=0
+## 125. Stap 6, eerste helft volledig afgerond: alle vier kinds 29/29 groen, kind=2's
+test-harness-bug gevonden en gefixt, één onverklaarde en NIET gereproduceerde
+`StaleActionNonce`-flakiness op kind=0
 
 **Wat gedraaid is:** `tests/pendingAction.ts` voor het eerst daadwerkelijk uitgevoerd tegen een
 echte lokale validator (`yarn test:pending-action`, via het in sectie 124 al vastgelegde
@@ -11665,9 +11665,55 @@ zonder), nog steeds niet verklaard, en nog steeds een stopsignaal voor de rest v
 hij ooit terugkomt - een reeks groene runs is geen bewijs van afwezigheid van een race, alleen
 bewijs dat hij zich deze keren niet manifesteerde.
 
-**Openstaand voor stap 6's TWEEDE helft** (single-passkey-degradatie, 2-of-2-afdwinging,
-recovery-tijdens-pending-action, drempel-eligibiliteit voor de overige kinds, de
-allowlist-herbevestiging bij AdvancedAction, de SpendWindow-controles bij ThresholdChange):
-zie de kind-per-kind-beoordeling in het gesprek zelf voor wat van deze punten al impliciet
-gedekt is door de huidige 26 tests en wat nog daadwerkelijk gebouwd moet worden - hier bewust
-niet herhaald om dubbele, mogelijk uit elkaar lopende boekhouding te voorkomen.
+**Stap 3 - laatste twee basispunten gebouwd, eerste helft nu VOLLEDIG af:** per kind
+beoordeeld welke van de zes oorspronkelijk voor de "tweede helft" geplande punten al
+(impliciet) gedekt waren door de bestaande 26 tests, en welke nog daadwerkelijk gebouwd
+moesten worden:
+- **single-passkey-degradatie** - alleen expliciet getest voor kind=0. Impliciet al bewezen
+  voor kind=1/2/3 (hun happy-path-tests initiëren EN finalizen met dezelfde ene passkey en
+  slagen - dat kan alleen als `confirmed` na initiate al `true` was, want de al-bestaande
+  2-of-2-test in datzelfde kind bewijst dat een `false` `confirmed` een gelijke-passkey-
+  finalize met `SecondPasskeyMustDifferFromInitiator` had geweigerd). Toch alsnog expliciet
+  gemaakt voor kind=1/2/3 (`assert.isTrue(pendingAfterInitiate.confirmed, ...)` in elke
+  happy-path-test) - impliciet bewezen is niet hetzelfde als expliciet getest, zelfde
+  redenering als bij kind=3's timelock-test hierboven.
+- **2-of-2-afdwinging** - was al volledig gebouwd voor alle vier kinds (elk kind se eigen
+  "3. two-of-two-afdwinging"-test).
+- **recovery-tijdens-pending-action** - alleen expliciet getest voor kind=0. De check zelf
+  (`check_pending_action_finalizable`'s epoch-vergelijking) is een gedeelde functie, identiek
+  voor alle vier kinds - maar dat is precies waarom kind=0's test niet de enige plek mocht
+  blijven waar het bewijs hangt. Toegevoegd: "5. recovery tijdens pending" voor kind=1/2/3,
+  zelfde patroon als kind=0's bestaande test.
+- **drempel-eligibiliteit voor de overige kinds** - NIET van toepassing, bevestigd in de
+  broncode zelf: `AmountEligibleForInstantExecute` komt precies één keer voor in
+  `instructions.rs`, uitsluitend in `initiate_withdrawal`. `initiate_token_transfer` heeft
+  een eigen doc-comment die uitlegt waarom bewust GEEN drempelcheck bestaat (geen
+  betrouwbare cross-denominatie-vergelijking tussen lamports en een willekeurig SPL-
+  tokenbedrag - elke tokenoverdracht gaat in v1 altijd via de wachtrij). `initiate_advanced_
+  action` heeft om dezelfde reden geen drempelcheck (arbitraire CPI is niet zinvol tegen een
+  lamportbedrag te vergelijken). Niets te bouwen.
+- **allowlist-herbevestiging bij AdvancedAction** - was al gebouwd (de bestaande
+  "herverificatie bij finalize... ProgramNotAllowed"-test in kind=2, één van de
+  oorspronkelijke, al vóór deze sessie geschreven tests).
+- **SpendWindow-controles bij ThresholdChange** - gedekt voor zover er sowieso iets te
+  testen valt: aanmaak-bij-eerste-gebruik en `window_started_at`-persistentie zijn beide al
+  getest. Uitdrukkelijk GECONTROLEERD (niet aangenomen) of `execute`/`hunt` (de instant-
+  paden) `spend_window.spent_lamports_this_window` ooit lezen of bijwerken:
+  **`grep -n "SpendWindow\|spend_window" instructions.rs` toont dat dit account UITSLUITEND
+  door `finalize_threshold_change` zelf wordt aangeraakt** - geen enkele instant-pad
+  raadpleegt of vult 'm. De daadwerkelijke glijdende-vensterhandhaving bestaat dus nog
+  helemaal niet in het programma. Dit is dus GEEN testgat maar een bevestiging, met code, van
+  sectie 121's staande waarschuwing ("wachtrij-infrastructuur biedt vandaag nul functionele
+  bescherming") - er valt niets te testen totdat die handhaving gebouwd is.
+
+**Eindstand: volledige suite 29/29 groen (was 26), geen enkele failure.** Geen
+`StaleActionNonce` in deze zevende run op rij sinds de eerste, onverklaarde failure (was 6/6,
+nu 7/7 zonder). Status ongewijzigd: nog steeds niet gereproduceerd, niet verklaard, en nog
+steeds een stopsignaal voor toekomstig werk aan dit codepad als hij ooit terugkomt.
+
+**Stap 6's eerste helft is hiermee volledig af.** Wat rest is stap 6's tweede helft in de
+oorspronkelijke planning (nu leeg gebleken, zie hierboven) en, veel groter, de laatste stap
+van het hele spend-cap-traject: `execute`/`hunt`/`transfer_token`/`execute_advanced`
+daadwerkelijk aan de wachtrij koppelen (vandaag bestaat de wachtrij volledig los van de
+directe paden, sectie 121), plus de glijdende-vensterhandhaving zelf bouwen (bestaat nog
+niet, zie hierboven). Nog niet gestart.

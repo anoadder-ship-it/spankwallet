@@ -11863,3 +11863,55 @@ moet Route 2 herzien worden, niet stilzwijgend voortgezet.
 implementeren in `execute`/`hunt`, `errors.rs` uitbreiden, tests voor beide interpretaties (0
 = ongewijzigd gedrag, > 0 = daadwerkelijke gating) tegen een echte validator, dan pas de
 client-banner.
+
+## 128. Sectie 127 gebouwd: execute/hunt drempel-gating, bewezen tegen een echte validator
+
+Vervolg op sectie 127 - het plan daar is nu code, in de daar beschreven volgorde: `errors.rs`
+eerst, dan `execute`, dan `hunt` (bewust apart, geen kopie), dan tests, dan beide suites.
+
+**`errors.rs`:** `AmountExceedsInstantThreshold` toegevoegd, met een doc-comment die de
+partitionering met `AmountEligibleForInstantExecute` expliciet benoemt (welke van de twee
+gooit wanneer, en dat `spend_threshold_lamports == 0` geen van beide ooit triggert).
+
+**`execute`:** `if spend_threshold_lamports > 0 { require!(amount <= threshold, ...) }`, ná
+`consume_action_nonce`, vóór de eerste lamport-manipulatie - exact zoals sectie 127
+voorschreef. Bij `threshold == 0` (alle zeventien bestaande wallets) slaat de `if` de check
+volledig over.
+
+**`hunt`:** dezelfde sentinel-interpretatie, andere vorm - geen `amount`-parameter om vooraf
+te toetsen, dus de check staat ná de on-chain berekening van `reclaimed`/`to_incinerator`/
+`to_user`, tegen `to_user` specifiek (niet het volledige `reclaimed`, niet
+`to_incinerator` - die helft is nooit aanvaller-stuurbaar, buiten het dreigingsmodel). Het
+codecommentaar in `instructions.rs` legt dit onderscheid expliciet uit, zoals gevraagd.
+
+**Tests, empirisch bewezen, niet beredeneerd:**
+- `tests/spendThreshold.ts` (nieuw, `yarn test`, geen timelock nodig): `threshold = 0` laat
+  `execute`/`hunt` exact ongewijzigd - de belangrijkste test, bewijst dat de zeventien
+  bestaande wallets niet breken.
+- `tests/pendingAction.ts` (nieuw describe-blok, `yarn test:pending-action` - een niet-nul
+  drempel zetten vereist `finalize_threshold_change`, dus de verkorte testtimelock):
+  `execute`/`hunt` op de grens slagen, erboven geweigerd met `AmountExceedsInstantThreshold`
+  én aantoonbaar niets verplaatst (voor `hunt`: het spam-token-account bestaat na de
+  weigering nog gewoon - Solana se transactie-atomiciteit rolt de burn/close-CPI's die al
+  draaiden vóór de check net zo goed terug). Een losse symmetrietest bevestigt de
+  partitionering uit sectie 127 empirisch: een bedrag dat `execute` weigert wordt door
+  `initiate_withdrawal` geaccepteerd, en een bedrag dat `execute` accepteert wordt door
+  `initiate_withdrawal` geweigerd met `AmountEligibleForInstantExecute` - nooit allebei,
+  nooit geen van beide.
+
+**Volledige suite, beide keren:** `yarn test` **82 passing / 36 pending (verwachte skips,
+`pendingAction.ts`'s eigen guard) / 0 failing**. `yarn test:pending-action` **34 passing / 0
+failing** (29 van sectie 125 + 5 nieuw). `declare_id!`/`Anchor.toml` na afloop beide keren
+schoon teruggezet, bevestigd met `git diff`.
+
+**Geen `StaleActionNonce` in geen van beide runs.** Sectie 125's eerdere, onverklaarde
+failure blijft op dezelfde status: niet gereproduceerd (nu twee runs extra zonder, sinds de
+5/5 herhaling in sectie 125), niet verklaard, nog steeds een stopsignaal mocht hij ooit
+terugkomen - deze twee schone runs bewijzen niet dat hij niet meer kan optreden, alleen dat
+hij zich hier weer niet manifesteerde.
+
+**Status: stap A (Route 2) is gebouwd en bewezen voor `execute`/`hunt`.** Nog niet gedaan,
+bewust apart gehouden (zie sectie 127): de client-banner die de eigenaar naar
+`initiate_threshold_change` leidt, en de beslissing over `transfer_token`/`execute_advanced`
+(sectie 127, punt 3 - wacht totdat de SOL-kant in de praktijk bevestigd is, niet alleen
+lokaal getest).

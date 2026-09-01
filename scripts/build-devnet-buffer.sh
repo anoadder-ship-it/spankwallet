@@ -108,6 +108,10 @@ echo "==> Byte-niveau-controle (positief: exact het devnet-adres; negatief: geen
 node_modules/.bin/ts-node --transpile-only scripts/verify-program-id-in-binary.ts \
     "$SO_PATH" "$SPANKWALLET_DEVNET_PROGRAM_ID"
 
+echo "==> Byte-niveau-controle (STATUS.md sectie 124): geen test-only Cargo-feature (verkorte PendingAction-timelock) in dit binary"
+node_modules/.bin/ts-node --transpile-only scripts/verify-no-test-features-in-binary.ts \
+    "$SO_PATH"
+
 # Kopieer het geverifieerde bestand naar een STABIELE plek buiten de
 # worktree, VOOR de trap de worktree opruimt - dit is het enige deel van de
 # worktree dat het script overleeft.

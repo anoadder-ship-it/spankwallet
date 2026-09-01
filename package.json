@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "bash scripts/check-stack-safety.sh && anchor test --validator legacy"
+    "test": "bash scripts/check-stack-safety.sh && anchor test --validator legacy",
+    "test:pending-action": "PENDING_ACTION_FAST_TIMELOCK=1 TEST_GLOB=tests/pendingAction.ts anchor test --validator legacy -- --features test-fast-pending-timelock"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",

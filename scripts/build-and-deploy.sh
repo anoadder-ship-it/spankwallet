@@ -214,6 +214,10 @@ fi
 SO_SIZE=$(stat -c%s target/deploy/spankwallet.so 2>/dev/null || stat -f%z target/deploy/spankwallet.so)
 echo "==> Build klaar: target/deploy/spankwallet.so (${SO_SIZE} bytes)"
 
+echo "==> Byte-niveau-controle (STATUS.md sectie 124, extra vangnet - dit script deployt sowieso alleen lokaal): geen test-only Cargo-feature in dit binary"
+node_modules/.bin/ts-node --transpile-only scripts/verify-no-test-features-in-binary.ts \
+    target/deploy/spankwallet.so
+
 echo "==> Deploy naar ${RPC_URL} (rechtstreeks via solana, NIET via anchor deploy)"
 solana program deploy target/deploy/spankwallet.so \
     --program-id target/deploy/spankwallet-keypair.json \

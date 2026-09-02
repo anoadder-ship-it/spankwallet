@@ -267,7 +267,7 @@ describe("spankwallet: spend_window-accountlijst-uitbreiding op execute/hunt (ST
       keys: [
         { pubkey: walletPda, isSigner: false, isWritable: true },
         { pubkey: vaultPda, isSigner: false, isWritable: true },
-        { pubkey: spendWindowPda, isSigner: false, isWritable: false },
+        { pubkey: spendWindowPda, isSigner: false, isWritable: true },
         { pubkey: targetTokenAccount, isSigner: false, isWritable: true },
         { pubkey: tokenMint, isSigner: false, isWritable: true },
         { pubkey: rentDestination, isSigner: false, isWritable: true },

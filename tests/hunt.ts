@@ -288,7 +288,7 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
       keys: [
         { pubkey: walletPda, isSigner: false, isWritable: true },
         { pubkey: vaultPda, isSigner: false, isWritable: true },
-        { pubkey: spendWindowPda, isSigner: false, isWritable: false },
+        { pubkey: spendWindowPda, isSigner: false, isWritable: true },
         { pubkey: targetTokenAccount, isSigner: false, isWritable: true },
         { pubkey: tokenMint, isSigner: false, isWritable: true },
         { pubkey: rentDestination, isSigner: false, isWritable: true },

@@ -627,7 +627,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       keys: [
         { pubkey: walletPda, isSigner: false, isWritable: true },
         { pubkey: vaultPda, isSigner: false, isWritable: true },
-        { pubkey: spendWindowPda, isSigner: false, isWritable: false },
+        { pubkey: spendWindowPda, isSigner: false, isWritable: true },
         { pubkey: targetTokenAccount, isSigner: false, isWritable: true },
         { pubkey: tokenMint, isSigner: false, isWritable: true },
         { pubkey: rentDestination, isSigner: false, isWritable: true },
@@ -2564,10 +2564,15 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     pendingActionPda: PublicKey,
     passkeysPda: PublicKey,
     spendWindowPda: PublicKey,
-    threshold: BN
+    threshold: BN,
+    // STATUS.md sectie 132/133/134 (stap c): optioneel, standaard ruim
+    // boven de drempel (zodat de bestaande drempel-gating-tests hierboven
+    // nooit toevallig tegen de venstercap aanlopen) - de SpendWindow-
+    // handhavingstests hieronder geven een expliciet KRAPPE cap mee.
+    windowCap?: BN
   ) {
-    const windowCap = threshold.mul(new BN(10)).add(new BN(anchor.web3.LAMPORTS_PER_SOL));
-    await callInitiateThresholdChange(passkey, walletPda, pendingActionPda, passkeysPda, threshold, windowCap);
+    const cap = windowCap ?? threshold.mul(new BN(10)).add(new BN(anchor.web3.LAMPORTS_PER_SOL));
+    await callInitiateThresholdChange(passkey, walletPda, pendingActionPda, passkeysPda, threshold, cap);
     const pending = await program.account.pendingAction.fetch(pendingActionPda);
     await advanceOnChainClockPast(
       provider.connection,
@@ -2581,7 +2586,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       passkeysPda,
       spendWindowPda,
       threshold,
-      windowCap
+      cap
     );
   }
 
@@ -2696,6 +2701,195 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       await expectAnchorError(
         callInitiateWithdrawal(passkey, walletPda, pendingActionPda, passkeysPda, recipient, amountUnder),
         "AmountEligibleForInstantExecute"
+      );
+    });
+  });
+
+  // ================= SpendWindow-handhaving (STATUS.md sectie 132/133/134, stap B/stap c) =================
+  // De drie tests hieronder testen de cap zelf (nooit een rollover) - ze
+  // hebben geen korte WINDOW_DURATION_SECONDS nodig en draaien gewoon mee
+  // onder de bestaande yarn test:pending-action. setThreshold's windowCap-
+  // parameter (hierboven uitgebreid) geeft ze een expliciet KRAPPE cap,
+  // i.p.v. de ruime 10x-standaard die de drempel-gating-tests hierboven
+  // gebruiken - anders zou geen van die tests ooit de cap raken.
+  describe("SpendWindow-handhaving (execute/hunt, threshold > 0)", () => {
+    it("happy path: bedragen binnen de cap slagen, spent_lamports_this_window telt correct op over twee aanroepen", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const threshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      // Exact 2x threshold: twee aanroepen op de drempel passen precies,
+      // bewijst dat de teller optelt over meerdere aanroepen, niet alleen
+      // een enkele aanroep tegen de cap toetst.
+      const windowCap = threshold.mul(new BN(2));
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold, windowCap);
+
+      const recipient = Keypair.generate().publicKey;
+
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, threshold);
+      let spendWindow = await program.account.spendWindow.fetch(spendWindowPda);
+      assert.equal(
+        spendWindow.spentLamportsThisWindow.toString(),
+        threshold.toString(),
+        "na de eerste aanroep moet de teller exact het eerste bedrag bevatten"
+      );
+
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, threshold);
+      spendWindow = await program.account.spendWindow.fetch(spendWindowPda);
+      assert.equal(
+        spendWindow.spentLamportsThisWindow.toString(),
+        windowCap.toString(),
+        "na de tweede aanroep moet de teller de SOM van beide bedragen bevatten, exact op de cap"
+      );
+      assert.equal(await provider.connection.getBalance(recipient), windowCap.toNumber());
+    });
+
+    it("weigering boven de cap: SpendWindowExceeded, aantoonbaar niets verplaatst, teller ongewijzigd", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const threshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      // Cap exact gelijk aan de drempel: de eerste aanroep gebruikt 'm
+      // volledig op, dus ZELFS 1 lamport erbovenop moet nu weigeren.
+      const windowCap = threshold;
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold, windowCap);
+
+      const recipient = Keypair.generate().publicKey;
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, threshold);
+
+      const vaultBefore = await provider.connection.getBalance(vaultPda);
+      await expectAnchorError(
+        callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, new BN(1)),
+        "SpendWindowExceeded"
+      );
+      const vaultAfter = await provider.connection.getBalance(vaultPda);
+
+      assert.equal(vaultBefore, vaultAfter, "vault-balans had ongewijzigd moeten blijven na de weigering");
+      const spendWindow = await program.account.spendWindow.fetch(spendWindowPda);
+      assert.equal(
+        spendWindow.spentLamportsThisWindow.toString(),
+        threshold.toString(),
+        "de teller mag door de geweigerde poging niet zijn opgehoogd"
+      );
+    });
+
+    it("hunt deelt dezelfde SpendWindow-teller als execute (één gedeeld venster voor beide instant-paden)", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const { mint, tokenAccount } = await setupSpamTokenAccount(vaultPda, 1000);
+      const tokenAccountRent = await provider.connection.getMinimumBalanceForRentExemption(TOKEN_ACCOUNT_LEN);
+      const toIncinerator = Math.floor(tokenAccountRent / 2);
+      const toUser = tokenAccountRent - toIncinerator;
+
+      const threshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10); // ruim boven executeAmount/toUser - nooit de reden van een weigering hier.
+      const executeAmount = new BN(toUser);
+      // Net te weinig ruimte over voor hunt's to_user na execute's bijdrage.
+      const windowCap = executeAmount.add(new BN(toUser)).sub(new BN(1));
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold, windowCap);
+
+      const recipient = Keypair.generate().publicKey;
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, executeAmount);
+
+      const rentDestination = Keypair.generate().publicKey;
+      await expectAnchorError(
+        callHunt(passkey, walletPda, vaultPda, passkeysPda, tokenAccount.publicKey, mint.publicKey, rentDestination),
+        "SpendWindowExceeded"
+      );
+
+      // Solana se transactie-atomiciteit: hunt's burn/close-CPI's die vóór
+      // de check draaiden, zijn teruggedraaid - het spam-token-account
+      // bestaat nog gewoon.
+      const tokenAccountInfoAfter = await provider.connection.getAccountInfo(tokenAccount.publicKey);
+      assert.isNotNull(
+        tokenAccountInfoAfter,
+        "target_token_account had NIET gesloten moeten zijn na de geweigerde hunt"
+      );
+      assert.equal(await provider.connection.getBalance(rentDestination), 0);
+
+      // De teller bevat uitsluitend execute's geslaagde bijdrage - hunt's
+      // geweigerde poging heeft 'm niet aangeraakt. Bewijst dat het
+      // GEDEELDE venster is (hunt's poging zag execute's eerdere
+      // bijdrage al), niet dat hunt zijn eigen, losse teller heeft.
+      const spendWindow = await program.account.spendWindow.fetch(spendWindowPda);
+      assert.equal(spendWindow.spentLamportsThisWindow.toString(), executeAmount.toString());
+    });
+  });
+
+  // ================= SpendWindow-rollover (STATUS.md sectie 132/133/134) =================
+  // Vereist de test-fast-spend-window-Cargo-feature (WINDOW_DURATION_SECONDS
+  // 24u -> 3s) BOVENOP de al-actieve test-fast-pending-timelock - zonder
+  // die verkorting zou deze test 24 echte uren moeten wachten
+  // (advanceOnChainClockPast wacht ECHTE tijd af, warpt de klok niet, zie
+  // STATUS.md sectie 124/132). Eigen guard, eigen commando
+  // (yarn test:spend-window-rollover) - de drie tests hierboven hebben dit
+  // niet nodig en blijven gewoon onder yarn test:pending-action draaien.
+  describe("SpendWindow-rollover (vereist test-fast-spend-window)", function () {
+    const FAST_WINDOW_DURATION_SECONDS = 3;
+
+    before(function () {
+      if (process.env.SPEND_WINDOW_FAST_DURATION !== "1") {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "\n    [pendingAction.ts] SpendWindow-rollover OVERGESLAGEN:\n" +
+            "    deze test vereist de verkorte testvensterduur (Cargo-feature\n" +
+            "    test-fast-spend-window, WINDOW_DURATION_SECONDS=3s i.p.v. de\n" +
+            "    echte 24u). Draai 'yarn test:spend-window-rollover' om deze\n" +
+            "    test daadwerkelijk uit te voeren.\n"
+        );
+        this.skip();
+      }
+    });
+
+    it("reset-dan-optellen: een aanroep NA het verstrijken van het venster reset eerst, telt dan pas op - empirisch bewezen, niet aangenomen", async () => {
+      const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda, spendWindowPda } =
+        await createWallet();
+      const threshold = new BN(anchor.web3.LAMPORTS_PER_SOL / 10);
+      // Cap exact gelijk aan de drempel: één aanroep vult 'm precies, dus
+      // een tweede aanroep BINNEN hetzelfde venster moet al weigeren -
+      // scherp contrast met wat NA de reset hoort te gebeuren.
+      const windowCap = threshold;
+      await setThreshold(passkey, walletPda, pendingActionPda, passkeysPda, spendWindowPda, threshold, windowCap);
+
+      const recipient = Keypair.generate().publicKey;
+
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, threshold);
+      const windowAfterFirst = await program.account.spendWindow.fetch(spendWindowPda);
+      assert.equal(
+        windowAfterFirst.spentLamportsThisWindow.toString(),
+        threshold.toString(),
+        "eerste aanroep moet de volledige cap opgebruiken"
+      );
+
+      // Binnen hetzelfde venster: nog een lamport erbovenop moet weigeren.
+      await expectAnchorError(
+        callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, new BN(1)),
+        "SpendWindowExceeded"
+      );
+
+      // Venster laten verlopen (FAST_WINDOW_DURATION_SECONDS onder deze featurebuild).
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        windowAfterFirst.windowStartedAt.toNumber() + FAST_WINDOW_DURATION_SECONDS
+      );
+
+      // NA het verstrijken: dezelfde drempel moet weer volledig slagen -
+      // bewijst reset-dan-optellen. Was de volgorde omgekeerd (optellen
+      // tegen het oude, nog-niet-gereset totaal), dan zou dit alsnog
+      // SpendWindowExceeded geven, want threshold + threshold > windowCap.
+      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, threshold);
+      const windowAfterReset = await program.account.spendWindow.fetch(spendWindowPda);
+      assert.equal(
+        windowAfterReset.spentLamportsThisWindow.toString(),
+        threshold.toString(),
+        "na de reset moet de teller weer bij nul beginnen (dan optellen), niet doortellen vanaf het oude totaal"
+      );
+      assert.isTrue(
+        windowAfterReset.windowStartedAt.toNumber() > windowAfterFirst.windowStartedAt.toNumber(),
+        "window_started_at moet zijn opgeschoven naar het moment van de resettende aanroep"
+      );
+      assert.equal(
+        await provider.connection.getBalance(recipient),
+        threshold.toNumber() * 2,
+        "recipient moet in totaal 2x threshold ontvangen hebben (twee losse, geslaagde vensters), niet meer"
       );
     });
   });

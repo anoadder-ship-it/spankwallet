@@ -16,6 +16,7 @@ import {
 } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
+import { deriveSpendWindowPda } from "./spendWindow";
 
 const EXECUTE_DISCRIMINATOR = Uint8Array.from([
   0x82, 0xdd, 0xf2, 0x9a, 0x0d, 0xc1, 0xbd, 0x1d,
@@ -78,6 +79,10 @@ export async function buildExecuteTransaction(
       // action_nonce nu atomisch bij - was hier ten onrechte false.
       { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
+      // STATUS.md sectie 132/133 (stap B): SpendWindow, nog niet
+      // gelezen/geschreven (stap c) - moet wel al meegestuurd worden,
+      // zelfde volgorde als Execute in instructions.rs.
+      { pubkey: deriveSpendWindowPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: recipient, isSigner: false, isWritable: true },
       { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },

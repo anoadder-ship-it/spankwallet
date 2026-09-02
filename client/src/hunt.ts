@@ -28,6 +28,7 @@ import {
 } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
+import { deriveSpendWindowPda } from "./spendWindow";
 
 const HUNT_DISCRIMINATOR = Uint8Array.from([
   0x94, 0x1e, 0x1c, 0x39, 0x31, 0xf9, 0x1d, 0x41,
@@ -143,6 +144,10 @@ export async function buildHuntTransaction(
       // action_nonce nu atomisch bij - was hier ten onrechte false.
       { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
+      // STATUS.md sectie 132/133 (stap B): SpendWindow, nog niet
+      // gelezen/geschreven (stap c) - moet wel al meegestuurd worden,
+      // zelfde volgorde als Hunt in instructions.rs.
+      { pubkey: deriveSpendWindowPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: targetTokenAccount, isSigner: false, isWritable: true },
       { pubkey: tokenMint, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: false, isWritable: true },

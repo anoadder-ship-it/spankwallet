@@ -12387,3 +12387,79 @@ voor bestaande wallets.** De daadwerkelijke rollover-/optel-/cap-logica (stap c)
 `SpendWindowExceeded`-weigering, de reset-dan-optellen-volgorde empirisch bewezen, en de
 handmatige `UncheckedAccount`-load/write naar het `load_session_account`/
 `write_session_account`-patroon - volgt als eigen, apart te documenteren stap.
+
+## 134. Sectie 132/133 vervolg: stap c gebouwd - de daadwerkelijke handhaving, met een echte
+`mut`-bug gevonden en gefixt tijdens het testen
+
+**De handhaving zelf.** `load_spend_window`/`write_spend_window` (niet-tolerant laden/
+terugschrijven, zelfde patroon als `load_session_account`/`write_session_account`) en
+`apply_spend_window` (reset-dan-optellen - sectie 132 vraag 5, de enige correcte volgorde,
+geen ontwerpkeuze) toegevoegd aan `instructions.rs`. `execute`/`hunt` roepen dit aan binnen
+dezelfde `spend_threshold_lamports > 0`-poort als stap A's per-transactie-check (sectie 132
+vraag 1), tegen dezelfde gedeelde `SpendWindow`-PDA (vraag 3 - één venster voor beide
+instant-paden), `hunt` getoetst tegen `to_user` net als zijn `AmountExceedsInstantThreshold`-
+check. Nieuwe errorcode `SpendWindowOverflow` (naast het al-bestaande `SpendWindowExceeded`
+uit sectie 116-117), zelfde `checked_add`-tegen-overflow-discipline als `SessionSpendOverflow`.
+
+**De bug: `spend_window` miste `#[account(mut)]`, gevonden door de eerste testrun daadwerkelijk
+te draaien, niet door de code te lezen.** Stap b liet `mut` bewust weg op `spend_window` in
+zowel `Execute` als `Hunt` (er was toen nog niets om te schrijven). Bij het bouwen van stap c
+is vergeten die `mut` alsnog toe te voegen tegelijk met de nieuwe schrijflogica. Resultaat:
+`yarn test:pending-action`'s eerste run na stap c faalde hard op alle drie de nieuwe
+`SpendWindow-handhaving`-tests met `"instruction modified data of a read-only account"` -
+Solana's runtime weigert terecht een schrijfpoging naar een account dat niet als writable is
+aangemerkt in de transactie. **Fix:** `mut` toegevoegd aan `spend_window` in beide
+Accounts-structs, plus de zes plekken waar clients/tests het account handmatig als
+`isWritable: false` meegaven (`client/src/execute.ts`, `client/src/hunt.ts`, `tests/hunt.ts`,
+`tests/spendThreshold.ts`, `tests/pendingAction.ts`, `tests/spendWindow.ts`) naar
+`isWritable: true` - Anchors `.methods().accounts()`-aanroepen (execute in de meeste
+testbestanden) hadden geen aparte wijziging nodig, die leiden `isWritable` automatisch af uit
+de opnieuw gegenereerde IDL na de `mut`-toevoeging. Alle drie de testinvocaties daarna
+**vanaf nul opnieuw gedraaid**, niet alleen de gefaalde - dit is precies het soort fout die
+"ik heb de code gelezen en het klopt" niet had gevangen, alleen het daadwerkelijk draaien
+ervan.
+
+**Nieuwe tests, drie testsuites:**
+- `tests/pendingAction.ts`, nieuw describe-blok "SpendWindow-handhaving (execute/hunt,
+  threshold > 0)" - drie tests die nooit een rollover nodig hebben (draaien mee onder de
+  bestaande `yarn test:pending-action`): een happy path die bewijst dat de teller optelt over
+  twee aanroepen (niet alleen een enkele aanroep tegen de cap toetst), een weigering exact op
+  de cap-grens (`SpendWindowExceeded`, teller aantoonbaar ongewijzigd), en een test die bewijst
+  dat `hunt` DEZELFDE teller deelt als `execute` (execute's geslaagde bijdrage telt al mee
+  vóórdat hunt geprobeerd wordt, hunt's eigen geweigerde poging telt zelf niet mee - bewijst
+  een gedeeld venster, niet twee losse tellers per instructie).
+- `tests/pendingAction.ts`, nieuw describe-blok "SpendWindow-rollover" - de reset-dan-
+  optellen-volgorde **empirisch bewezen, niet alleen beredeneerd**: cap exact gelijk aan de
+  drempel, één aanroep vult 'm precies op, een tweede aanroep BINNEN hetzelfde venster weigert
+  (zelfs voor 1 lamport), het venster laten verlopen (`advanceOnChainClockPast`, een echte
+  wachttijd van `FAST_WINDOW_DURATION_SECONDS`), en dezelfde drempel slaagt daarna weer
+  volledig. Was de volgorde omgekeerd (optellen tegen het oude, nog-niet-gereset totaal), dan
+  zou deze laatste aanroep alsnog `SpendWindowExceeded` gegeven hebben (`threshold + threshold
+  > windowCap`) - het contrast bewijst de volgorde, niet alleen dat een reset ooit gebeurt.
+  Vereist de nieuwe `test-fast-spend-window`-Cargo-feature BOVENOP de al-actieve
+  `test-fast-pending-timelock` (anders 24 echte uren wachten) - eigen guard
+  (`SPEND_WINDOW_FAST_DURATION`), eigen `package.json`-commando
+  (`yarn test:spend-window-rollover`), dezelfde discipline als `PENDING_ACTION_FAST_TIMELOCK`.
+
+**Bewezen, drie volledige testinvocaties, allemaal ná de `mut`-fix vanaf nul gedraaid:**
+- `yarn test`: **94 passing / 42 pending (verwachte skips) / 0 failing** (ongewijzigd t.o.v.
+  sectie 133 - de vier nieuwe stap-c-tests staan allemaal in `tests/pendingAction.ts`, dat
+  onder gewoon `yarn test` zichtbaar overgeslagen wordt).
+- `yarn test:pending-action`: **39 passing / 1 pending / 0 failing** (36 bestaand + de drie
+  nieuwe `SpendWindow-handhaving`-tests; de rollover-test blijft hier correct overgeslagen,
+  zichtbaar met de nieuwe waarschuwing).
+- `yarn test:spend-window-rollover`: **40 passing / 0 failing** (alle 39 hierboven + de
+  rollover-test zelf, nu niet overgeslagen).
+
+Geen `StaleActionNonce`-anomalie in geen van de drie runs (de enige treffers zijn de tests die
+'m doelbewust triggeren). Geen nieuwe BPF-stackframe-waarschuwing (`check-stack-safety.sh`).
+`cargo check`, met/zonder `test-fast-spend-window`: schoon. `client/`'s
+`tsc --noEmit && vite build`: schoon.
+
+**Status: stap B (glijdende-vensterlimiet) is volledig gebouwd en bewezen - infrastructuur
+(stap a), accountlijst (stap b), en de daadwerkelijke handhaving (stap c).** Sectie 99/115's
+spend-cap-traject is hiermee afgerond voor de instant-paden. Nog steeds bewust niet gebouwd:
+een daadwerkelijke client-ingang (knop/route) naar een van de vier `initiate_*`/`finalize_*`-
+paren (waaronder `initiate_threshold_change`/`finalize_threshold_change`, dat nu zowel de
+drempel als de venstercap zet) - het enige van de vier paren zonder client-UI, en het
+onderwerp van het vervolgstuk van dit traject.

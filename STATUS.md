@@ -12093,3 +12093,106 @@ met terugwerkende kracht gecorrigeerd voor de Dependabot-categorie specifiek. Ee
 upgrade van `solana-sdk`/Tauri's gtk-rs-stack blijft een open, bewust uitgesteld traject - niet
 omdat het risico nu onaanvaardbaar is, maar omdat een major-versiesprong een eigen
 onderzoeks-/testtraject verdient, geen bijvangst van een Dependabot-opruimronde.
+
+## 131. Vervolg op sectie 127-130: transfer_token/execute_advanced permanent naar de wachtrij -
+geen drempel, geen opt-in, een harde knip
+
+**De heroverwogen-maar-bevestigde beslissing.** Sectie 115 legde al vast dat `transfer_token`
+en `execute_advanced` altijd via de `PendingAction`-wachtrij moeten, zonder drempel - er
+bestaat geen betrouwbare vergelijking tussen een lamport-drempel en een willekeurig
+SPL-tokenbedrag of ondoorzichtige CPI-instructiedata. Die beslissing is deze sessie
+heroverwogen (in gesprek, niet in code) en bevestigd: **geen opt-in-vlag, geen schakelaar.**
+Twee redenen: op de huidige schaal (zeventien wallets, allemaal van de eigenaar, op devnet) is
+een eenmalige, bewuste breuk in hoe deze twee instructies aangeroepen worden beheersbaar; en
+een schakelaar zou complexiteit toevoegen aan precies het stuk dat al "geen betrouwbare
+vergelijking mogelijk" heet - het probleem verplaatsen, niet oplossen.
+
+**Belangrijk verschil met stap A (sectie 127/128).** Bij `execute`/`hunt` bewaarde
+`spend_threshold_lamports == 0` het oude gedrag volledig - een sentinel-uitweg. Hier bestaat
+zo'n uitweg niet: **"altijd wachtrijen" is een harde knip, geen geleidelijke overgang.** Elke
+bestaande directe aanroep breekt zodra dit gebouwd is - vandaar de inventarisatie hieronder
+vóór er iets gebouwd werd.
+
+**Stap 1 (code-geverifieerd, niet aangenomen): levende directe aanroepen.** Zes `it()`-blokken
+in drie testbestanden (`tests/transferToken.ts:295/364`, `tests/policy.ts:403/429/472`,
+`tests/actionNonce.ts:216`) plus drie `runStep`-functies in de client-demopagina
+(`client/src/main.ts` stap 7/9/10) riepen een van beide instructies rechtstreeks aan. Bevestigd
+met code, niet met redenering: `transfer_token_via_session`/`execute_advanced_via_session` zijn
+volledig losstaande implementaties (instructions.rs's eigen commentaar: "Zelfde SPL-CPI als
+transfer_token() - **bewust gedupliceerd**"), dus de elf `_via_session`-tests in
+`tests/sessionKeys.ts` en `tests/writability_check.ts`'s sessiesleutel-policyvelden vallen
+buiten bereik - bevestigd door de suite daadwerkelijk te draaien, niet alleen door de code te
+lezen.
+
+**`errors.rs`/`instructions.rs`:** twee nieuwe errorcodes, `TransferMustUseQueue` en
+`AdvancedActionMustUseQueue`, en `require!(false, SpankWalletError::...)` als **allereerste
+statement** in zowel `transfer_token` als `execute_advanced` - vóór de nonce-check, vóór
+handtekeningverificatie, vóór alles. Onvoorwaardelijk, geen if-conditie, geen drempel.
+`cargo check -p spankwallet` blijft schoon (geen nieuwe unreachable-code-/dead-code-warnings
+voor het nu ongebruikte restant van beide functies).
+
+**Testherschikking, zes tests, drie uitkomsten:**
+- **Herschreven, blijven in `yarn test`:** `tests/transferToken.ts`'s B6
+  (vault_token_account-challenge-binding) en `tests/policy.ts`'s ProgramNotAllowed-weigering
+  - beide bewijzen dezelfde eigenschap nu tegen `initiate_token_transfer`/
+  `initiate_advanced_action`, die exact dezelfde challenge-binding/allowlist-checks herhalen.
+- **Bevestigd redundant, NIET gedupliceerd:** `tests/policy.ts`'s System::Assign-CPI-test
+  bleek al 1:1 overlappen met `tests/pendingAction.ts` kind=2's bestaande "1. happy path" -
+  verwijderd zonder vervanging, met die bevestiging expliciet in de code vastgelegd. Zelfde
+  voor `tests/transferToken.ts`'s happy path tegenover kind=1's eigen "1. happy path".
+- **Genuine nieuwe dekking, toegevoegd aan `tests/pendingAction.ts`'s kind=2-blok (dus
+  `yarn test:pending-action`, een echte CPI loopt nu via `finalize_advanced_action` ná de
+  timelock):** de Token::transfer-CPI-test uit `tests/policy.ts` (geen bestaand equivalent) en
+  de stale-nonce-test uit `tests/actionNonce.ts` (nergens anders in `pendingAction.ts` werd
+  `StaleActionNonce` al tegen een `initiate_*`-functie bewezen).
+
+**Correctie tijdens review, vóór commit:** de stale-nonce-test schreef aanvankelijk een eigen,
+losstaande `attemptInitiate`-closure die de volledige payload-/accounts-opbouw van de al
+bestaande `callInitiateAdvancedAction`-helper herhaalde - nodig omdat die helper de nonce altijd
+zelf via `fetchActionNonce` ophaalde en geen manier bood om een specifieke (verouderde) nonce te
+forceren. Bij review naar boven gehaald: dit was, anders dan de bewuste cross-bestand-
+onafhankelijkheidsconventie die de rest van deze testsuite hanteert, **duplicatie BINNEN
+hetzelfde bestand** tussen twee helpers die elkaar al kenden - een toekomstige wijziging aan
+`callInitiateAdvancedAction`'s accountschema of payloadvorm zou stilzwijgend uit de pas kunnen
+gaan lopen met de losse closure, zonder dat iets dat zou opmerken (een payload-mismatch faalt
+met `WebAuthnChallengeMismatch`, niet met een duidelijke "deze twee bouwers zijn uit elkaar
+gelopen"-melding). Vergeleken, byte voor byte: vóór de fix waren beide constructiewijzen wel al
+identiek - geen bestaand gedrag was fout, alleen de vorm droeg een sluimerend driftrisico.
+Opgelost door `callInitiateAdvancedAction` een optionele `nonceOverride?: bigint`-parameter te
+geven (valt terug op `fetchActionNonce` als hij ontbreekt) en `attemptInitiate` volledig te
+verwijderen - de test roept nu tweemaal dezelfde gedeelde helper aan (`9n`, dan de echte huidige
+nonce). Beide suites opnieuw gedraaid ná deze wijziging om te bevestigen dat de zes ANDERE,
+reeds bestaande aanroepers van `callInitiateAdvancedAction` er niets van merkten.
+
+**Client-demopagina:** `runStep7`/`runStep9`/`runStep10` en hun knoppen volledig verwijderd uit
+`client/src/main.ts`/`client/index.html` - vervangen door een informatieve tekstregel op de
+plek waar de knoppen stonden, die expliciet verwijst naar de wachtrij-instructies en deze
+sectie. Bewust GEEN minimale queue-UI gebouwd als alternatief: dat zou overlappen met het
+al-bewust-uitgestelde werk uit sectie 127-130 (een echte client-ingang naar
+`initiate_threshold_change`/de wachtrij in het algemeen) - een grotere scope-uitbreiding dan
+deze sessie vroeg. Ook bewust NIET stilzwijgend laten staan-en-falen: een demo-knop die altijd
+een cryptische on-chain-fout teruggeeft zou zelf een overclaim zijn. `step8-btn`
+(`add_allowed_program`) blijft ongewijzigd functioneel - die instructie is niet geraakt.
+Verwijderde imports (`buildTransferTokenTransaction`, `buildExecuteAdvancedTransaction`,
+`showExecuteAdvancedPreview`, `showTransferTokenPreview`, `buildRemoveAllowedProgramTransaction`,
+`showRemoveAllowedProgramPreview`, `RemainingAccountSpec`, `SPANKWALLET_PROGRAM_ID`) - allemaal
+bevestigd ongebruikt elders in `client/src/`, niet aangenomen (`client/`'s eigen
+`tsc --noEmit`/`noUnusedLocals` had anders alsnog gefaald). De onderliggende modules
+(`client/src/transferToken.ts`, `executeAdvanced.ts`, `executeAdvancedPreview.ts`,
+`transferTokenPreview.ts`, `removeAllowedProgramPreview.ts`) zijn bewust NIET verwijderd - buiten
+de gevraagde scope (main.ts/index.html), en correct/bruikbaar als ooit een echte queue-UI
+gebouwd wordt.
+
+**Bewezen, niet beredeneerd, twee keer gedraaid (vóór en ná de nonceOverride-correctie):**
+`client/`'s `tsc --noEmit && vite build` - 0 typefouten. `yarn test`: **92 passing / 38 pending
+(verwachte skips) / 0 failing** (was 96 vóór deze sessie se testherschikking - netto -4, exact
+verklaard: -1 transferToken.ts, -2 policy.ts, -1 actionNonce.ts). `yarn test:pending-action`:
+**36 passing / 0 failing** (was 34 - netto +2, de twee nieuwe kind=2-tests). Geen
+`StaleActionNonce` buiten de test die 'm doelbewust triggert.
+
+**Status: transfer_token/execute_advanced zijn permanent naar de wachtrij verplaatst, bewezen
+voor zowel de weigering als de volledige queue-happy-path (inclusief de nieuwe Token::transfer-
+CPI- en stale-nonce-dekking).** Nog steeds bewust niet gebouwd (ongewijzigd t.o.v. sectie
+127-130): een daadwerkelijke client-ingang (knop/route) naar een van de vier
+`initiate_*`/`finalize_*`-paren, en de cumulatieve glijdende-vensterlimiet over meerdere
+transacties (stap B).

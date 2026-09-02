@@ -650,6 +650,25 @@ pub struct Execute<'info> {
     )]
     pub vault: Account<'info, VaultAccount>,
 
+    /// CHECK: STATUS.md sectie 132/133 (stap B) - de glijdende-
+    /// vensterlimiet-teller. UncheckedAccount, GEEN `Account<SpendWindow>`:
+    /// bestaat niet voor een wallet die nog nooit een drempel heeft gezet
+    /// (alle zeventien bestaande wallets vandaag) - een strak-getypeerd
+    /// account zou Anchors automatische deserialisatie daar laten falen,
+    /// ongeacht wat de instructielogica zelf zou doen (exact de regressie
+    /// die sectie 128 vermeed voor stap A). seeds/bump garanderen dat dit
+    /// altijd EXACT de SpendWindow-PDA van DEZE wallet is, nooit een ander
+    /// account. UITSLUITEND de accountlijst-uitbreiding hier - er wordt
+    /// nog niets gelezen of geschreven (stap c bouwt de daadwerkelijke
+    /// rollover-/optel-/cap-logica); voor drempel=0-wallets blijft het
+    /// gedrag van `execute` hierna exact ongewijzigd, bewezen in
+    /// tests/spendWindow.ts.
+    #[account(
+        seeds = [b"spend_window", wallet.key().as_ref()],
+        bump,
+    )]
+    pub spend_window: UncheckedAccount<'info>,
+
     /// CHECK: willekeurige ontvanger - geen eigendomsbeperking nodig, crediteren
     /// van lamports naar een willekeurig account is altijd toegestaan (zelfde
     /// Solana-runtime-regel als gebruikt in hunt, zie STATUS.md sectie 17).
@@ -1271,6 +1290,15 @@ pub struct Hunt<'info> {
         bump = wallet.vault_bump,
     )]
     pub vault: Account<'info, VaultAccount>,
+    /// CHECK: STATUS.md sectie 132/133 (stap B) - zelfde uitleg als
+    /// Execute::spend_window hierboven (UncheckedAccount, geen
+    /// gedragswijziging voor drempel=0-wallets, uitsluitend de
+    /// accountlijst-uitbreiding, nog geen rollover-/optel-/cap-logica).
+    #[account(
+        seeds = [b"spend_window", wallet.key().as_ref()],
+        bump,
+    )]
+    pub spend_window: UncheckedAccount<'info>,
     #[account(
         mut,
         constraint = target_token_account.owner == vault.key() @ SpankWalletError::InvalidTargetTokenAccount,
@@ -1494,6 +1522,39 @@ const PENDING_ACTION_KIND_THRESHOLD_CHANGE: u8 = 3;
 const PENDING_ACTION_TIMELOCK_SECONDS: i64 = 24 * 60 * 60;
 #[cfg(feature = "test-fast-pending-timelock")]
 const PENDING_ACTION_TIMELOCK_SECONDS: i64 = 3;
+
+/// STATUS.md sectie 132/133 (stap B): vaste duur van het glijdende-
+/// vensterlimiet-venster (`SpendWindow`) - zelfde bewuste
+/// vaste-constante-keuze als `PENDING_ACTION_TIMELOCK_SECONDS` hierboven,
+/// niet per-wallet instelbaar (dat zou een ontwerpwijziging zijn, geen
+/// testfaciliteit). `#[cfg(...)]`-tegenhanger onder
+/// `test-fast-spend-window` verkort UITSLUITEND deze waarde voor lokale
+/// testbinaries - de vergelijking die 'm gebruikt (stap c, nog te bouwen)
+/// blijft in beide varianten letterlijk hetzelfde codepad.
+#[cfg(not(feature = "test-fast-spend-window"))]
+const WINDOW_DURATION_SECONDS: i64 = 24 * 60 * 60;
+#[cfg(feature = "test-fast-spend-window")]
+const WINDOW_DURATION_SECONDS: i64 = 3;
+
+/// STATUS.md sectie 132/133 (stap B): pure vergelijking, nog NERGENS
+/// aangeroepen (stap c bouwt de echte aanroepplek in execute/hunt) -
+/// `#[allow(dead_code)]` totdat dat gebeurt. Bewust GEEN marker-aanroep
+/// hier (zie finalize_threshold_change hieronder voor waarom): een
+/// empirische test tijdens het bouwen van deze sectie bewees dat een
+/// private functie die NERGENS aangeroepen wordt haar
+/// `#[cfg(...)] msg!()`-marker NIET behoudt in het gecompileerde .so - de
+/// linker snoeit 'm weg, ondanks dat de marker geen `#[used]`-static is
+/// (twee losse builds, met/zonder `test-fast-spend-window`,
+/// `verify-no-test-features-in-binary.ts` gaf in BEIDE gevallen "OK, geen
+/// marker" - fout voor de mét-feature-build). Dit is een ANDER
+/// stripgedrag dan sectie 124's `#[used]`-probleem (dat ging over
+/// EI_OSABI/SHF_GNU_RETAIN bij een geforceerd-behouden static) - hier gaat
+/// het om gewone, onvermijdelijke dead-code-eliminatie van een écht
+/// ongebruikte functie, geen linker-vlag-bijwerking.
+#[allow(dead_code)]
+fn spend_window_needs_reset(window_started_at: i64, now: i64) -> bool {
+    now >= window_started_at.saturating_add(WINDOW_DURATION_SECONDS)
+}
 
 /// Sectie 115 punt 2b: de commitment bevat BEWUST geen nonce (die
 /// beschermt uitsluitend de initiate-handtekening zelf, al voltooid zodra
@@ -2793,6 +2854,21 @@ pub fn finalize_threshold_change(
     client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
+    // STATUS.md sectie 132/133 (stap B): marker voor de
+    // `test-fast-spend-window`-Cargo-feature, zelfde patroon als
+    // check_pending_action_finalizable's marker verderop in deze aanroep
+    // (sectie 124: msg!(), geen #[used]-static, om de EI_OSABI/
+    // SHF_GNU_RETAIN-deploybreuk te vermijden). Hier geplaatst i.p.v. bij
+    // spend_window_needs_reset hierboven, omdat DIE functie tot stap c
+    // (execute/hunt) nog nergens aangeroepen wordt - de linker snoeit een
+    // marker in een écht ongebruikte functie weg (empirisch bevestigd,
+    // zie het commentaar daar). finalize_threshold_change is wél altijd
+    // bereikbaar (elke echte drempel-/venstercap-wijziging loopt hierdoor)
+    // en is de functie die SpendWindow's levenscyclus beheert, ook al
+    // gebruikt ze WINDOW_DURATION_SECONDS zelf nog niet.
+    #[cfg(feature = "test-fast-spend-window")]
+    msg!("SPANKWALLET_TEST_FAST_SPEND_WINDOW_V1");
+
     let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
 
     let clock = Clock::get()?;

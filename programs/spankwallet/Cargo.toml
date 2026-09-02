@@ -26,6 +26,17 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 # constante zelf voor waarom dit de gekozen aanpak is t.o.v. de twee
 # afgewezen alternatieven.
 test-fast-pending-timelock = []
+# STATUS.md sectie 132/133 (stap B, glijdende-vensterlimiet): verkort
+# UITSLUITEND WINDOW_DURATION_SECONDS (instructions.rs) voor lokale
+# testbinaries - zelfde reden/aanpak als test-fast-pending-timelock
+# hierboven (een echt 24u-venster is niet in redelijke tijd te warpen op
+# een echte solana-test-validator, advanceOnChainClockPast wacht echte
+# tijd af). Default-off, NOOIT in default features, actief gecontroleerd
+# door scripts/verify-no-test-features-in-binary.ts - zie de
+# instructions.rs-commentaar bij de constante zelf, EN sectie 124's
+# root-cause-analyse (#[used]/SHF_GNU_RETAIN) voor waarom de marker een
+# msg!()-aanroep is, geen static.
+test-fast-spend-window = []
 default = []
 
 [lints.rust]

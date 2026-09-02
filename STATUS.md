@@ -12196,3 +12196,133 @@ CPI- en stale-nonce-dekking).** Nog steeds bewust niet gebouwd (ongewijzigd t.o.
 127-130): een daadwerkelijke client-ingang (knop/route) naar een van de vier
 `initiate_*`/`finalize_*`-paren, en de cumulatieve glijdende-vensterlimiet over meerdere
 transacties (stap B).
+
+## 132. Ontwerpnotitie stap B: glijdende-vensterlimiet - vijf vragen beantwoord, niets gebouwd
+
+Vervolg op sectie 99/115/116's spend-cap-traject. Alle antwoorden hieronder zijn tegen de
+huidige broncode geverifieerd (`programs/spankwallet/src/state.rs`/`instructions.rs`), niet
+aangenomen. **Niets is gebouwd in deze sectie** - dit is uitsluitend het ontwerp, ter
+goedkeuring vóórdat stap B (deel 2) gebouwd wordt.
+
+**Uitgangssituatie, bevestigd met code:**
+- `SpendWindow` (state.rs) bestaat als accounttype (65 bytes: `wallet`+`bump`+
+  `window_total_cap_lamports`+`window_started_at`+`spent_lamports_this_window`), maar wordt
+  vandaag UITSLUITEND aangeraakt door `initiate_threshold_change`/`finalize_threshold_change`
+  (regels 2617-2855) - `execute`/`hunt` lezen/schrijven het nergens (volledige grep op
+  `SpendWindow`/`spend_window` in `instructions.rs` bevestigt dit).
+- `window_total_cap_lamports` wordt NIET onafhankelijk van `spend_threshold_lamports` gezet:
+  `compute_threshold_change_commitment` neemt beide waarden in één commitment, één kind=3
+  `PendingAction`, één gecombineerde config-wijziging (sectie 115's aanvulling: "geen apart
+  vijfde kind nodig"). Er bestaat geen pad om alleen de één of alleen de ander te wijzigen.
+  `finalize_threshold_change` maakt `SpendWindow` aan via `init_if_needed` en zet
+  `window_started_at`/`spent_lamports_this_window` ALLEEN bij eerste aanmaak (`wallet ==
+  Pubkey::default()`) - een latere drempelwijziging reset een lopend venster bewust niet
+  stilzwijgend (voorkomt dat een niet-gerelateerde config-wijziging de teller "witwast").
+- Geen enkele window-duurconstante bestaat al (grep op `86400`/`WINDOW_SECONDS`/vergelijkbaar
+  levert niets op) - alleen `PENDING_ACTION_TIMELOCK_SECONDS` (24u productie / 3s onder
+  `test-fast-pending-timelock`) bestaat, voor een ANDER doel (de wachtrij-timelock). De
+  venster-duur is dus een volledig open ontwerpkeuze, geen bestaande waarde om mee te breken.
+  `advanceOnChainClockPast` (tests/webauthnTestHelper.ts) warpt de on-chain klok NIET
+  kunstmatig - hij wacht ECHTE tijd af tot de klok het doel voorbijkomt (begrensd door
+  `maxRealMs`, standaard 60s). Een 24-uursvenster zou dus, net als de wachtrij-timelock,
+  een eigen fast-test-variant nodig hebben om het rollover-gedrag daadwerkelijk te kunnen
+  bewijzen binnen een redelijke testduur - anders is dat stuk van stap B onbewijsbaar in CI.
+- Geen enkel script/admin-pagina/desktop-code roept `finalize_threshold_change` ooit aan, en
+  STATUS.md noemt het nergens samen met devnet - bevestigd (grep, leeg resultaat). Er bestaat
+  dus **vandaag geen enkele echte, op devnet gedeployde `SpendWindow`-instantie** - elke
+  bestaande test liep tegen een ephemere lokale validator. Dat betekent: een wijziging aan
+  `SpendWindow`'s 65-byte layout draagt vandaag NUL migratierisico (zelfde argument als
+  state.rs's eigen commentaar bij de oorspronkelijke aanmaak: "gloednieuw accounttype, geen
+  bestaande instances").
+
+**Vraag 1 - moet de vensterlimiet overgeslagen worden zolang `spend_threshold_lamports == 0`?**
+**Eens met de voorkeur, met een sterker argument dan alleen consistentie.** Omdat beide
+velden altijd ATOMISCH samen gezet worden (zie hierboven), is `window_total_cap_lamports`
+per constructie betekenisloos zodra `spend_threshold_lamports == 0` is - er is geen scenario
+waarin een venster-cap ooit een zinnige waarde kreeg zonder dat er ook een drempel gezet werd.
+Sterker nog: een venstercap ZONDER een actieve per-transactie-drempel zou zelf incoherent zijn
+- een enkele, ongelimiteerde transactie kan een venstercap dan in één keer overschrijden, wat
+de cumulatieve limiet betekenisloos maakt als bescherming (het hele punt van een venster is het
+begrenzen van de SOM van meerdere SUB-drempel-transacties over tijd). **Aanbeveling:** gate op
+`spend_threshold_lamports > 0` (niet apart op `window_total_cap_lamports > 0`) - één
+wallet-brede "instant-pad-bescherming actief"-schakelaar, geen twee onafhankelijk drijvende
+vlaggen die uit elkaar kunnen lopen.
+
+**Vraag 2 - vast periodiek venster of echt glijdend venster?** Binnen de bestaande 65 bytes
+(twee scalaire velden, geen geschiedenis/lijst) is een echt continu herberekend glijdend
+venster niet haalbaar zonder de accountgrootte te vergroten. Een goedkope tussenvorm bestaat
+wel: een TWEEDE `u64` (vorige-venster-totaal) zou een gewogen twee-emmer-interpolatie mogelijk
+maken (`geschat_verbruik = huidig_venster + vorig_venster * (1 - verstreken_fractie)`),
+73 bytes i.p.v. 65 - **vandaag zonder migratierisico** (zie hierboven). Eerlijk over wat dat
+wel en niet oplost: het dempt het GEMIDDELDE geval (bestedingen gespreid over de overgang
+tellen minder hard mee), maar het ABSOLUTE worst-case-randgeval (alles vlak vóór de grens, dan
+alles vlak ná de grens) blijft ongeveer even slecht als bij een vast venster - een aanvaller
+die precies op de grens timet, kan bij beide varianten in het ergste geval ongeveer
+`2 * window_total_cap_lamports` besteden binnen een kort tijdsbestek. Gegeven dat stap B een
+AANVULLENDE laag is bovenop stap A's per-transactie-drempel (niet de enige verdediging), en dit
+project se herhaalde discipline om essentiële structuur nu te bouwen en verfijningen expliciet
+uit te stellen (zelfde patroon als de "gelaagde privileges"-roadmap en de major-versiesprong in
+sectie 130) - **aanbeveling: vast, periodiek resettend venster voor v1.** De twee-emmer-
+interpolatie blijft genoteerd als een mogelijke latere verfijning (stap B'), niet nu bouwen.
+
+**Vraag 3 - automatisch binnen execute/hunt, of een aparte instructie?** Eens met de voorkeur.
+Het venster rolt vanzelf door zodra `now >= window_started_at + WINDOW_DURATION_SECONDS`
+binnen dezelfde aanroep die ook de cap controleert - geen aparte "reset"-instructie, geen
+extra ceremonie, en geen nieuw aanvalsoppervlak (een losse reset-instructie zou front-running-
+achtige timingvragen openen die nu simpelweg niet bestaan). Belangrijk, impliciet in het
+huidige ontwerp en hier expliciet gemaakt: `SpendWindow` is ÉÉN PDA per wallet
+(`seeds = [b"spend_window", wallet]`), niet apart per instructie - `execute` en `hunt` delen
+dus DEZELFDE cumulatieve teller. Dat is bewust: het dreigingsmodel (herhaalde kleinere diefstal
+via een van beide instant-paden) is niet padspecifiek, dus de begrenzing hoort dat ook niet
+te zijn.
+
+**Vraag 4 - alleen execute/hunt, niet de vier `finalize_*`-instructies?** Bevestigd met dezelfde
+grep als hierboven: geen van de vier `finalize_*`-instructies (`finalize_withdrawal`,
+`finalize_token_transfer`, `finalize_advanced_action`, `finalize_threshold_change`) raakt
+`SpendWindow` vandaag, en dat moet zo blijven - de wachtrij heeft al zijn eigen bescherming
+(timelock, two-of-two bij een tweede passkey). `finalize_threshold_change`'s eigen schrijfactie
+naar `window_total_cap_lamports` is een CONFIGURATIEwijziging (de cap zelf instellen), geen
+BESTEDING die tegen de cap zou moeten meetellen - dat onderscheid is expliciet, niet toevallig.
+
+**Vraag 5 - rollovervolgorde bij een grensoverschrijdende aanroep.** Dit is geen echte
+ontwerpkeuze met twee geldige opties - **reset-dan-optellen is de enige correcte volgorde**,
+optellen-dan-later-resetten zou een bug zijn: een controle tegen een reeds-verlopen venster se
+opgebouwde totaal is per definitie fout, ongeacht welke kant die fout op zou uitpakken (een
+transactie die onder een vers venster hoort te passen ten onrechte weigeren, of een die tegen
+een niet-meer-relevant totaal getoetst wordt). De transactie die de overschrijding veroorzaakt
+wordt dus: eerst `window_started_at`/`spent_lamports_this_window` resetten (naar nu/0), dan pas
+het huidige bedrag optellen en tegen de (verse) cap toetsen - standaard fixed-window-counter-
+gedrag, geen bijzonder geval.
+
+**Extra bevinding, niet expliciet gevraagd maar kritiek voor deel 2 - de Accounts-struct-valkuil.**
+Als `spend_window` in `Execute`/`Hunt`'s Accounts-struct als een strak-getypeerde
+`Account<'info, SpendWindow>` gedeclareerd wordt, faalt Anchor's automatische deserialisatie
+voor ELKE bestaande wallet met `spend_threshold_lamports == 0` (waaronder alle zeventien
+bestaande wallets) - hun `SpendWindow`-account bestaat immers nog niet, ongeacht wat de
+instructielogica zelf zou doen. Dat zou exact de regressie zijn die sectie 128 zo zorgvuldig
+vermeed. Oplossing, al aanwezig als gevestigd patroon in deze codebase:
+`spend_window: UncheckedAccount<'info>` (mut + seeds/bump-constraint, zoals `session` in
+`TransferTokenViaSession`), gecombineerd met een NIET-tolerante handmatige load (naar het
+patroon van `load_session_account`, niet `read_policy_account`'s tolerante `Option`-variant) -
+niet-tolerant omdat `SpendWindow` GEGARANDEERD al bestaat zodra `spend_threshold_lamports > 0`
+(zie vraag 1's bewijs), dus "bestaat nog niet" is op dat punt geen geldig scenario meer, wél een
+signaal dat er iets mis is. Schrijven terug via hetzelfde `try_borrow_mut_data`+`try_serialize`-
+patroon als `write_session_account`. **Client-implicatie voor deel 2's eigen stap-1-
+inventarisatie:** elke bestaande aanroeper van `execute`/`hunt` (client-code én tests) moet het
+nieuwe `spend_window`-account aan de accountlijst toevoegen, ook voor drempel=0-wallets (een
+UncheckedAccount vereist geen bestaand account, dus dit is geen gedragswijziging, wel een
+verplichte accountlijst-uitbreiding) - dezelfde discipline als sectie 131's stap 1, opnieuw
+toepassen vóór er iets gebouwd wordt.
+
+**Samenvatting van de aanbevelingen, ter goedkeuring:**
+1. Gate op `spend_threshold_lamports > 0`, geen apart venstersentinel.
+2. Vast, periodiek resettend venster (geen twee-emmer-interpolatie in v1).
+3. Automatische rollover binnen `execute`/`hunt` zelf, geen aparte instructie; één gedeelde
+   teller voor beide instructies.
+4. Alleen `execute`/`hunt` geraakt, de vier `finalize_*`-instructies ongewijzigd.
+5. Reset-dan-optellen, niet optellen-dan-later-resetten.
+6. (Nieuw, niet gevraagd maar noodzakelijk) `spend_window` als `UncheckedAccount` +
+   niet-tolerante handmatige load/write, plus een nieuwe, fast-test-gate-baar
+   `WINDOW_DURATION_SECONDS`-constante naar het `PENDING_ACTION_TIMELOCK_SECONDS`-patroon.
+
+**Status: ontwerp compleet, ter goedkeuring. Niets gebouwd.**

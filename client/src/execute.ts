@@ -79,10 +79,11 @@ export async function buildExecuteTransaction(
       // action_nonce nu atomisch bij - was hier ten onrechte false.
       { pubkey: walletPda, isSigner: false, isWritable: true },
       { pubkey: vaultPda, isSigner: false, isWritable: true },
-      // STATUS.md sectie 132/133 (stap B): SpendWindow, nog niet
-      // gelezen/geschreven (stap c) - moet wel al meegestuurd worden,
-      // zelfde volgorde als Execute in instructions.rs.
-      { pubkey: deriveSpendWindowPda(walletPda), isSigner: false, isWritable: false },
+      // STATUS.md sectie 132/133/134 (stap B/c): SpendWindow, de
+      // glijdende-vensterlimiet-teller - gelezen/geschreven zodra de
+      // wallet een drempel heeft ingesteld, zelfde volgorde als Execute
+      // in instructions.rs.
+      { pubkey: deriveSpendWindowPda(walletPda), isSigner: false, isWritable: true },
       { pubkey: recipient, isSigner: false, isWritable: true },
       { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
       { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },

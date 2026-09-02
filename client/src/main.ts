@@ -13,7 +13,6 @@ import { buildInitWalletTransaction, InitWalletPdas } from "./initWallet";
 import { buildExecuteTransaction } from "./execute";
 import { showExecutePreview } from "./executePreview";
 import { showAddPasskeyPreview } from "./addPasskeyPreview";
-import { buildTransferTokenTransaction } from "./transferToken";
 import {
   readWalletAccount,
   buildInitiateRecoveryTransaction,
@@ -24,15 +23,10 @@ import {
   derivePolicyPda,
   readPolicyAccount,
   buildAddAllowedProgramTransaction,
-  buildRemoveAllowedProgramTransaction,
 } from "./policy";
-import { buildExecuteAdvancedTransaction, RemainingAccountSpec } from "./executeAdvanced";
-import { showExecuteAdvancedPreview } from "./executeAdvancedPreview";
 import { showRemovePasskeyPreview } from "./removePasskeyPreview";
 import { showAddAllowedProgramPreview } from "./addAllowedProgramPreview";
-import { showTransferTokenPreview } from "./transferTokenPreview";
 import { showAddSessionKeyPreview } from "./addSessionKeyPreview";
-import { showRemoveAllowedProgramPreview } from "./removeAllowedProgramPreview";
 import { showRemoveSessionKeyPreview } from "./removeSessionKeyPreview";
 import { showCancelRecoveryPreview } from "./cancelRecoveryPreview";
 import { showHuntPreview } from "./huntPreview";
@@ -53,7 +47,6 @@ import {
   buildExecuteAdvancedViaSessionTransaction,
   buildCloseExpiredSessionTransaction,
 } from "./sessionKeys";
-import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
@@ -231,7 +224,6 @@ async function runStep2(): Promise<void> {
     (document.getElementById("step3-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step4-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step6-btn") as HTMLButtonElement).disabled = false;
-    (document.getElementById("step7-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step5-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step8-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step11-btn") as HTMLButtonElement).disabled = false;
@@ -655,115 +647,6 @@ async function runStep6(): Promise<void> {
   }
 }
 
-async function runStep7(): Promise<void> {
-  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
-    log("Voer eerst stap 1 en stap 2 uit.");
-    return;
-  }
-  log("Stap 7: transfer_token - SPL-token versturen vanuit de vault met een");
-  log("ECHTE passkey-handtekening (echte devnet-USDC, zelfde patroon als");
-  log("transfer_sol maar dan voor tokens).");
-  log("");
-  try {
-    const usdcMint = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
-    const payerAta = getAssociatedTokenAddressSync(usdcMint, lastWallet.publicKey);
-    const vaultAta = getAssociatedTokenAddressSync(usdcMint, lastPdas.vaultPda, true);
-
-    log("7a. Vault-USDC-ATA aanmaken + 1 USDC ernaartoe sturen (voorbereiding -");
-    log("zonder saldo in de vault is er niets om transfer_token mee te testen)...");
-    log("Dit vraagt om 2 goedkeuringen in je wallet-extensie (ATA-aanmaak, dan transfer).");
-
-    const createAtaTx = new Transaction().add(
-      createAssociatedTokenAccountInstruction(
-        lastWallet.publicKey,
-        vaultAta,
-        lastPdas.vaultPda,
-        usdcMint
-      )
-    );
-    createAtaTx.feePayer = lastWallet.publicKey;
-    const { blockhash: ataBh } = await connection.getLatestBlockhash();
-    createAtaTx.recentBlockhash = ataBh;
-    const { signature: ataSig } = await lastWallet.signAndSendTransaction(createAtaTx);
-    await connection.confirmTransaction(ataSig, "confirmed");
-    log("Vault-USDC-ATA aangemaakt: " + vaultAta.toBase58());
-
-    const fundTx = new Transaction().add(
-      createTransferInstruction(payerAta, vaultAta, lastWallet.publicKey, 1_000_000)
-    );
-    fundTx.feePayer = lastWallet.publicKey;
-    const { blockhash: fundBh } = await connection.getLatestBlockhash();
-    fundTx.recentBlockhash = fundBh;
-    const { signature: fundSig } = await lastWallet.signAndSendTransaction(fundTx);
-    await connection.confirmTransaction(fundSig, "confirmed");
-    log("1 USDC naar de vault gestuurd. Signature: " + fundSig);
-    log("");
-
-    log("7b. transfer_token aanroepen: 0.5 USDC (500000 units) van de vault");
-    log("terug naar de payer zelf...");
-    log("");
-    log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59/63) -");
-    log("MIDDEN-risicoklasse, gewone klik (geen hold-to-confirm). Bedrag in");
-    log("leesbare eenheden op basis van de echte mint-decimals.");
-    const transferChoice = await showTransferTokenPreview(connection, usdcMint, payerAta, 500_000n);
-    if (transferChoice === null) {
-      log("Geweigerd in de bevestigingskaart - transfer_token NIET aangeroepen, geen");
-      log("passkey-prompt.");
-      return;
-    }
-    log(
-      "Bevestigd: " + transferChoice.amount.toString() + " ruwe eenheden naar " +
-        transferChoice.recipientTokenAccount.toBase58() + "."
-    );
-    log("");
-    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
-    const { transaction } = await buildTransferTokenTransaction(
-      connection,
-      lastWallet.publicKey,
-      lastPdas.walletPda,
-      vaultAta,
-      transferChoice.recipientTokenAccount,
-      usdcMint,
-      transferChoice.amount,
-      lastPasskeyPublicKey,
-      lastCredentialId,
-      window.location.hostname
-    );
-    log("");
-    log("Eigen simulatie (dit is de daadwerkelijke test van verify_passkey_signature");
-    log("+ de nieuwe SPL-token-CPI-logica)...");
-    const simResult = await connection.simulateTransaction(transaction);
-    log("Simulatie err: " + JSON.stringify(simResult.value.err));
-    log("Simulatie logs:");
-    for (const line of simResult.value.logs ?? []) {
-      log("  " + line);
-    }
-    log("");
-    if (simResult.value.err) {
-      log("Simulatie faalde - stop hier.");
-      return;
-    }
-    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
-    const { blockhash } = await connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    const { signature } = await lastWallet.signAndSendTransaction(transaction);
-    log("Verstuurd. Signature: " + signature);
-    log("Wachten op bevestiging...");
-    await connection.confirmTransaction(signature, "confirmed");
-    log("Bevestigd.");
-    log("");
-    log("SUCCES - transfer_token heeft " + transferChoice.amount.toString() + " ruwe eenheden");
-    log("daadwerkelijk verplaatst van de vault naar " + transferChoice.recipientTokenAccount.toBase58() + ",");
-    log("met een ECHTE passkey-handtekening. Bewijst dat de tweede getypeerde actie");
-    log("(na transfer_sol) end-to-end werkt op devnet, inclusief de");
-    log("vault-PDA-ondertekende SPL-Token-CPI.");
-  } catch (err) {
-    log("");
-    log("FOUT:");
-    log(String(err));
-    console.error(err);
-  }
-}
 async function runStep8(): Promise<void> {
   if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
     log("Voer eerst stap 1 en stap 2 uit.");
@@ -771,8 +654,11 @@ async function runStep8(): Promise<void> {
   }
   log("Stap 8: add_allowed_program - System Program toevoegen aan de");
   log("programma-allowlist van deze wallet, met een ECHTE passkey-handtekening.");
-  log("System Program is hier bewust gekozen als veilig, ongevaarlijk testprogramma");
-  log("(geen echte waarde in het spel) - zie stap 9 voor de daadwerkelijke CPI ernaartoe.");
+  log("System Program is hier bewust gekozen als veilig, ongevaarlijk testprogramma.");
+  log("execute_advanced zelf is sinds STATUS.md sectie 131 permanent geblokkeerd voor");
+  log("directe aanroep (altijd via initiate_advanced_action/finalize_advanced_action) -");
+  log("deze testpagina heeft daar nog geen wachtrij-UI voor, dus geen stapknop hier die");
+  log("een daadwerkelijke CPI ernaartoe demonstreert.");
   log("");
 
   log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59/61) -");
@@ -849,337 +735,6 @@ async function runStep8(): Promise<void> {
     log("");
     log("SUCCES - add_allowed_program heeft het policy-account daadwerkelijk aangemaakt");
     log("(init_if_needed) en System Program toegevoegd, met een ECHTE passkey-handtekening.");
-    log("");
-    log("Klaar voor stap 9.");
-
-    (document.getElementById("step9-btn") as HTMLButtonElement).disabled = false;
-  } catch (err) {
-    log("");
-    log("FOUT:");
-    log(String(err));
-    console.error(err);
-  }
-}
-
-async function runStep9(): Promise<void> {
-  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
-    log("Voer eerst stap 1 en stap 2 uit.");
-    return;
-  }
-  log("Stap 9: execute_advanced - eerst het NEGATIEVE pad (geweigerd programma),");
-  log("daarna het POSITIEVE pad (echte CPI naar een toegestaan programma). Het");
-  log("negatieve pad is net zo belangrijk om te bewijzen als het positieve: het");
-  log("bewijst dat de allowlist-check daadwerkelijk iets tegenhoudt, niet alleen dat");
-  log("er iets doorheen kan.");
-  log("");
-
-  try {
-    const policyPda = derivePolicyPda(lastPdas.walletPda);
-
-    log("9a. NEGATIEF: execute_advanced tegen TOKEN_PROGRAM_ID - NOOIT toegevoegd");
-    log("aan de allowlist. Verwacht: geweigerd met ProgramNotAllowed. Alleen");
-    log("simuleren (niet versturen) - we willen de weigering aantonen, geen fee");
-    log("betalen voor een transactie die toch niets gaat doen.");
-    log("navigator.credentials.get() wordt aangeroepen - keur de prompt goed.");
-
-    const { transaction: negativeTx } = await buildExecuteAdvancedTransaction(
-      connection,
-      lastWallet.publicKey,
-      lastPdas.walletPda,
-      lastPdas.vaultPda,
-      policyPda,
-      TOKEN_PROGRAM_ID,
-      [],
-      new Uint8Array(0),
-      lastPasskeyPublicKey,
-      lastCredentialId,
-      window.location.hostname
-    );
-
-    const negativeSim = await connection.simulateTransaction(negativeTx);
-    log("Simulatie err: " + JSON.stringify(negativeSim.value.err));
-    log("Simulatie logs:");
-    for (const line of negativeSim.value.logs ?? []) {
-      log("  " + line);
-    }
-    log("");
-
-    if (!negativeSim.value.err) {
-      log("FOUT: execute_advanced tegen een niet-toegestaan programma had moeten");
-      log("falen, maar de simulatie slaagde (onverwacht - de allowlist-check werkt niet).");
-      return;
-    }
-    log("SUCCES - execute_advanced weigert correct een niet-toegestaan programma");
-    log("(TOKEN_PROGRAM_ID stond nooit op de allowlist) - dit is het on-chain-bewijs,");
-    log("los van elke UI-laag.");
-    log("");
-
-    log("9a-2. Dezelfde weigering, maar nu via de nieuwe bevestigingskaart (STATUS.md");
-    log("sectie 58/59) - de allowlist-check gebeurt hier VOORDAT er enige kaart of");
-    log("hold-to-confirm-frictie getoond wordt. Verwacht: kind='not-allowed', GEEN");
-    log("kaart zichtbaar, GEEN navigator.credentials.get()-aanroep.");
-    const preflightResult = await showExecuteAdvancedPreview(
-      connection,
-      lastPdas.walletPda,
-      TOKEN_PROGRAM_ID,
-      [],
-      new Uint8Array(0)
-    );
-    if (preflightResult.kind !== "not-allowed") {
-      log("FOUT: verwachtte kind='not-allowed' voor TOKEN_PROGRAM_ID, kreeg '" + preflightResult.kind + "'.");
-      return;
-    }
-    log("SUCCES - de kaart kortsluit correct vóór elke frictie: geen kaart getoond,");
-    log("geen passkey-prompt, voor een programma dat toch geweigerd zou worden.");
-    log("");
-
-    log("9b. POSITIEF: execute_advanced tegen System Program (toegevoegd in stap 8) -");
-    log("een echte, ongevaarlijke CPI (System::Assign) op een vers, leeg testaccount,");
-    log("verandert alleen de eigenaar van dat testaccount naar ons eigen programma-ID.");
-    log("Geen SOL/tokens van waarde in het spel.");
-    log("");
-
-    const target = Keypair.generate();
-    log("Test-account: " + target.publicKey.toBase58());
-    log("Eerst funden met de rent-exempte minimum (anders ruimt de runtime het account");
-    log("na de transactie meteen weer op, en is de eigenaarswijziging niet meer");
-    log("waarneembaar)...");
-
-    const rentExemptMinimum = await connection.getMinimumBalanceForRentExemption(0);
-    const fundTx = new Transaction().add(
-      SystemProgram.transfer({
-        fromPubkey: lastWallet.publicKey,
-        toPubkey: target.publicKey,
-        lamports: rentExemptMinimum,
-      })
-    );
-    fundTx.feePayer = lastWallet.publicKey;
-    const { blockhash: fundBh } = await connection.getLatestBlockhash();
-    fundTx.recentBlockhash = fundBh;
-    const { signature: fundSig } = await lastWallet.signAndSendTransaction(fundTx);
-    await connection.confirmTransaction(fundSig, "confirmed");
-    log("Gefund (" + rentExemptMinimum + " lamports). Signature: " + fundSig);
-    log("");
-
-    const assignIx = SystemProgram.assign({
-      accountPubkey: target.publicKey,
-      programId: SPANKWALLET_PROGRAM_ID,
-    });
-    const remainingAccounts: RemainingAccountSpec[] = [
-      { pubkey: target.publicKey, isWritable: true, isSigner: true },
-    ];
-
-    log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59) - deze");
-    log("toont de RUWE accounts/instructiedata met een expliciete waarschuwing dat");
-    log("dit niet naar mensentaal te vertalen is, plus of het doelprogramma op de");
-    log("allowlist staat. Hold-to-confirm, geen passkey-prompt totdat de knop");
-    log("volledig ingedrukt gehouden is.");
-    const cardResult = await showExecuteAdvancedPreview(
-      connection,
-      lastPdas.walletPda,
-      SystemProgram.programId,
-      remainingAccounts,
-      assignIx.data
-    );
-    if (cardResult.kind === "denied") {
-      log("Geweigerd in de bevestigingskaart - execute_advanced NIET aangeroepen, geen");
-      log("passkey-prompt.");
-      return;
-    }
-    if (cardResult.kind === "not-allowed") {
-      log("FOUT: System Program bleek onverwacht niet op de allowlist te staan (stap 8");
-      log("niet uitgevoerd?).");
-      return;
-    }
-    const confirmedCpiProgramId = cardResult.cpiProgramId;
-    log("Bevestigd: aanroep naar " + confirmedCpiProgramId.toBase58() + ".");
-    log("");
-
-    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
-    const { transaction: positiveTx } = await buildExecuteAdvancedTransaction(
-      connection,
-      lastWallet.publicKey,
-      lastPdas.walletPda,
-      lastPdas.vaultPda,
-      policyPda,
-      confirmedCpiProgramId,
-      remainingAccounts,
-      assignIx.data,
-      lastPasskeyPublicKey,
-      lastCredentialId,
-      window.location.hostname
-    );
-    positiveTx.partialSign(target);
-
-    log("Eigen simulatie...");
-    const positiveSim = await connection.simulateTransaction(positiveTx);
-    log("Simulatie err: " + JSON.stringify(positiveSim.value.err));
-    log("Simulatie logs:");
-    for (const line of positiveSim.value.logs ?? []) {
-      log("  " + line);
-    }
-    log("");
-
-    if (positiveSim.value.err) {
-      log("Simulatie faalde - stop hier.");
-      return;
-    }
-
-    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
-    const { blockhash } = await connection.getLatestBlockhash();
-    positiveTx.recentBlockhash = blockhash;
-    const { signature } = await lastWallet.signAndSendTransaction(positiveTx);
-    log("Verstuurd. Signature: " + signature);
-
-    log("Wachten op bevestiging...");
-    await connection.confirmTransaction(signature, "confirmed");
-    log("Bevestigd.");
-    log("");
-
-    log("Test-account teruglezen om te bevestigen dat de eigenaar daadwerkelijk");
-    log("gewijzigd is via de CPI...");
-    const info = await connection.getAccountInfo(target.publicKey);
-    if (!info) {
-      log("FOUT: test-account bestaat niet meer na bevestigde execute_advanced (onverwacht).");
-      return;
-    }
-    log("Nieuwe eigenaar: " + info.owner.toBase58());
-    if (!info.owner.equals(SPANKWALLET_PROGRAM_ID)) {
-      log("FOUT: eigenaar is niet ons eigen programma-ID (onverwacht).");
-      return;
-    }
-    log("");
-    log("SUCCES - execute_advanced heeft een ECHTE CPI naar een toegestaan extern");
-    log("programma (System Program) uitgevoerd, met een ECHTE passkey-handtekening,");
-    log("en tegelijk correct een niet-toegestaan programma geweigerd. Beide kanten van");
-    log("de allowlist-gate zijn nu end-to-end bewezen op devnet.");
-    log("");
-    log("Klaar voor stap 10.");
-
-    (document.getElementById("step10-btn") as HTMLButtonElement).disabled = false;
-  } catch (err) {
-    log("");
-    log("FOUT:");
-    log(String(err));
-    console.error(err);
-  }
-}
-
-async function runStep10(): Promise<void> {
-  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
-    log("Voer eerst stap 1 en stap 2 uit.");
-    return;
-  }
-  log("Stap 10: remove_allowed_program - System Program weer verwijderen van de");
-  log("allowlist, met een ECHTE passkey-handtekening, en daarna herbevestigen dat");
-  log("execute_advanced ernaartoe nu weer geweigerd wordt (sluit de cirkel: add");
-  log("laat iets toe, remove trekt het weer in, allebei aantoonbaar effectief).");
-  log("");
-
-  try {
-    const policyPda = derivePolicyPda(lastPdas.walletPda);
-
-    log("Menselijk-leesbare bevestigingskaart tonen (STATUS.md sectie 58/59/66) -");
-    log("LAAG-risicoklasse, gewone klik. Deze actie beperkt alleen (veilige richting).");
-    const removeChoice = await showRemoveAllowedProgramPreview(connection, lastPdas.walletPda, SystemProgram.programId);
-    if (removeChoice.kind === "denied") {
-      log("Geweigerd in de bevestigingskaart - remove_allowed_program NIET aangeroepen,");
-      log("geen passkey-prompt.");
-      return;
-    }
-    if (removeChoice.kind === "would-fail") {
-      log("FOUT: onverwacht 'would-fail' (" + removeChoice.reason + ") voor System Program -");
-      log("dit is net in stap 8 toegevoegd, zou nog op de allowlist moeten staan.");
-      return;
-    }
-    const programToRemove = removeChoice.programId;
-    log("Bevestigd: " + programToRemove.toBase58() + " wordt verwijderd.");
-    log("");
-
-    log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
-    const { transaction } = await buildRemoveAllowedProgramTransaction(
-      connection,
-      lastWallet.publicKey,
-      lastPdas.walletPda,
-      programToRemove,
-      lastPasskeyPublicKey,
-      lastCredentialId,
-      window.location.hostname
-    );
-
-    log("Eigen simulatie...");
-    const simResult = await connection.simulateTransaction(transaction);
-    log("Simulatie err: " + JSON.stringify(simResult.value.err));
-    log("Simulatie logs:");
-    for (const line of simResult.value.logs ?? []) {
-      log("  " + line);
-    }
-    log("");
-
-    if (simResult.value.err) {
-      log("Simulatie faalde - stop hier.");
-      return;
-    }
-
-    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
-    const { blockhash } = await connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    const { signature } = await lastWallet.signAndSendTransaction(transaction);
-    log("Verstuurd. Signature: " + signature);
-
-    log("Wachten op bevestiging...");
-    await connection.confirmTransaction(signature, "confirmed");
-    log("Bevestigd.");
-    log("");
-
-    log("Policy-account teruglezen om te bevestigen dat het bevestigde programma");
-    log("daadwerkelijk verwijderd is...");
-    const policy = await readPolicyAccount(connection, policyPda);
-    if (!policy) {
-      log("FOUT: policy-account bestaat niet meer (onverwacht).");
-      return;
-    }
-    log("count: " + policy.count);
-    log("allowed_programs: " + policy.allowedPrograms.map((p) => p.toBase58()).join(", "));
-    if (policy.allowedPrograms.some((p) => p.equals(programToRemove))) {
-      log("FOUT: " + programToRemove.toBase58() + " staat nog steeds in de allowlist (onverwacht).");
-      return;
-    }
-    log("");
-
-    log("Herbevestigen: execute_advanced tegen dit programma moet nu weer geweigerd");
-    log("worden (alleen simuleren, we weten al dat dit hoort te falen)...");
-    log("navigator.credentials.get() wordt aangeroepen - keur de prompt goed.");
-    const { transaction: retryTx } = await buildExecuteAdvancedTransaction(
-      connection,
-      lastWallet.publicKey,
-      lastPdas.walletPda,
-      lastPdas.vaultPda,
-      policyPda,
-      programToRemove,
-      [],
-      new Uint8Array(0),
-      lastPasskeyPublicKey,
-      lastCredentialId,
-      window.location.hostname
-    );
-    const retrySim = await connection.simulateTransaction(retryTx);
-    log("Simulatie err: " + JSON.stringify(retrySim.value.err));
-    for (const line of retrySim.value.logs ?? []) {
-      log("  " + line);
-    }
-    log("");
-
-    if (!retrySim.value.err) {
-      log("FOUT: execute_advanced tegen het zojuist verwijderde System Program had");
-      log("moeten falen, maar de simulatie slaagde (onverwacht).");
-      return;
-    }
-
-    log("SUCCES - remove_allowed_program heeft " + programToRemove.toBase58() + " daadwerkelijk van de");
-    log("allowlist gehaald, met een ECHTE passkey-handtekening, en execute_advanced");
-    log("weigert er nu weer een CPI naartoe. De volledige programma-allowlist-cyclus");
-    log("(add, gebruiken, remove, geweigerd worden) is nu end-to-end bewezen op devnet.");
   } catch (err) {
     log("");
     log("FOUT:");
@@ -2494,17 +2049,8 @@ document.getElementById("step5-btn")!.addEventListener("click", () => {
 document.getElementById("step6-btn")!.addEventListener("click", () => {
   runStep6();
 });
-document.getElementById("step7-btn")!.addEventListener("click", () => {
-  runStep7();
-});
 document.getElementById("step8-btn")!.addEventListener("click", () => {
   runStep8();
-});
-document.getElementById("step9-btn")!.addEventListener("click", () => {
-  runStep9();
-});
-document.getElementById("step10-btn")!.addEventListener("click", () => {
-  runStep10();
 });
 document.getElementById("step11-btn")!.addEventListener("click", () => {
   runStep11();

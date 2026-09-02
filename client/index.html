@@ -30,12 +30,17 @@
       hunter en Solana's incinerator-adres (permanent uit omloop).
     </p>
     <p>
-      Stap 8-10: de programma-allowlist. Stap 8 voegt System Program toe aan
-      de wallet-eigen allowlist (add_allowed_program). Stap 9 bewijst beide
-      kanten van execute_advanced - een niet-toegestaan programma wordt
-      geweigerd, een toegestaan programma krijgt een echte CPI. Stap 10
-      verwijdert System Program weer (remove_allowed_program) en bevestigt
-      dat de CPI daarna weer geweigerd wordt.
+      Stap 8: de programma-allowlist. Voegt System Program toe aan de
+      wallet-eigen allowlist (add_allowed_program).
+      transfer_token en execute_advanced zijn sinds STATUS.md sectie 131
+      permanent geblokkeerd voor directe aanroep - altijd via
+      initiate_token_transfer/finalize_token_transfer respectievelijk
+      initiate_advanced_action/finalize_advanced_action. Deze testpagina
+      heeft daar nog geen wachtrij-UI voor (geen knop, geen
+      wachttijd-/finalize-afhandeling) - vandaar geen stapknoppen hier die
+      een directe aanroep van die twee instructies demonstreren. Bewezen
+      tegen een echte validator staat in tests/transferToken.ts en
+      tests/pendingAction.ts (yarn test:pending-action).
     </p>
     <p>
       Stap 11-15: het multi-passkey-model. Een wallet kan meerdere,
@@ -81,10 +86,13 @@
     <button id="step4-btn" disabled>4. Recovery: initiate + cancel met echte handtekening</button>
     <button id="step5-btn" disabled>5. Hunt: spam-token opruimen (burn + 50/50-rentsplitsing)</button>
     <button id="step6-btn" disabled>6. Hunt: echt extern devnet-USDC-token (Circle)</button>
-    <button id="step7-btn" disabled>7. transfer_token: SPL-token versturen (echte devnet-USDC)</button>
+    <p>
+      7, 9, 10 ontbreken bewust: transfer_token en execute_advanced vereisen
+      nu altijd de wachtrij (initiate_token_transfer/finalize_token_transfer,
+      initiate_advanced_action/finalize_advanced_action) - deze demopagina
+      heeft daar nog geen UI voor, zie STATUS.md sectie 131.
+    </p>
     <button id="step8-btn" disabled>8. add_allowed_program: System Program toevoegen</button>
-    <button id="step9-btn" disabled>9. execute_advanced: geweigerd + echte CPI</button>
-    <button id="step10-btn" disabled>10. remove_allowed_program: verwijderen + herbevestig weigering</button>
     <button id="step11-btn" disabled>11. PASSKEY 2 aanmaken (tweede, onafhankelijke passkey)</button>
     <button id="step12-btn" disabled>12. add_passkey: PASSKEY 2 registreren (ondertekend door PASSKEY 1)</button>
     <button id="step13-btn" disabled>13. Bewijs: PASSKEY 2 ondertekent zelfstandig add_allowed_program</button>

@@ -213,101 +213,16 @@ describe("C-1-fix: action_nonce mechanica", () => {
     assert.equal(passkeys.count, 1);
   });
 
-  it("execute_advanced: verouderde action_nonce geweigerd, actuele nonce voert de CPI echt uit", async () => {
-    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
-
-    // add_allowed_program (System Program) zodat execute_advanced iets
-    // toegestaans heeft om naar te CPI'en.
-    const addProgNonce = await fetchActionNonce(provider.connection, walletPda);
-    const addProgPayload = Buffer.concat([nonceLeBytes(addProgNonce), SystemProgram.programId.toBuffer()]);
-    const addProgChallenge = buildExpectedChallenge(program.programId, walletPda, "add_allowed_program", addProgPayload);
-    const addProgSigned = signTestChallenge(passkey, addProgChallenge);
-    const addProgSecpIx = buildSecp256r1Instruction(passkey.compressedPublicKey, addProgSigned.signedMessage, addProgSigned.rawSignature);
-    await program.methods
-      .addAllowedProgram(SystemProgram.programId, new BN(addProgNonce.toString()), addProgSigned.clientDataJSON)
-      .accounts({
-        wallet: walletPda,
-        policy: policyPda,
-        payer: provider.wallet.publicKey,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-        systemProgram: SystemProgram.programId,
-      })
-      .preInstructions([addProgSecpIx])
-      .rpc();
-
-    // execute_advanced-payload: cpi_program_id + u16 accountcount + per
-    // account [pubkey,is_writable,is_signer] + u32 datalen + data - zelfde
-    // encodering als tests/policy.ts::buildExecuteAdvancedPayload. CPI-doel
-    // is een apart, vers keypair (System::Assign naar ons eigen programma-ID)
-    // - zelfde, simpelste werkende patroon als tests/policy.ts's eigen
-    // "execute_advanced voert een echte CPI uit"-test; de vault zelf
-    // herwijzen zou een "instruction illegally modified the program id of an
-    // account"-runtimefout geven (de vault is in dezelfde instructie ook het
-    // eigen, mut-gedeclareerde `vault`-account) - niet relevant voor wat deze
-    // test wil bewijzen (nonce-gating op execute_advanced).
-    const target = Keypair.generate();
-    await provider.sendAndConfirm(
-      new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: provider.wallet.publicKey,
-          toPubkey: target.publicKey,
-          lamports: await provider.connection.getMinimumBalanceForRentExemption(0),
-        })
-      )
-    );
-    const assignData = Buffer.concat([Buffer.from([1, 0, 0, 0]), program.programId.toBuffer()]);
-    function buildPayload(nonce: bigint): Buffer {
-      const countBuf = Buffer.alloc(2);
-      countBuf.writeUInt16LE(1, 0);
-      const lenBuf = Buffer.alloc(4);
-      lenBuf.writeUInt32LE(assignData.length, 0);
-      return Buffer.concat([
-        nonceLeBytes(nonce),
-        SystemProgram.programId.toBuffer(),
-        countBuf,
-        target.publicKey.toBuffer(),
-        Buffer.from([1]), // is_writable
-        Buffer.from([1]), // is_signer (target ondertekent zelf, echte keypair)
-        lenBuf,
-        assignData,
-      ]);
-    }
-
-    async function attempt(nonce: bigint) {
-      const challenge = buildExpectedChallenge(program.programId, walletPda, "execute_advanced", buildPayload(nonce));
-      const signed = signTestChallenge(passkey, challenge);
-      const secpIx = buildSecp256r1Instruction(passkey.compressedPublicKey, signed.signedMessage, signed.rawSignature);
-      return program.methods
-        .executeAdvanced(assignData, new BN(nonce.toString()), signed.clientDataJSON)
-        .accounts({
-          wallet: walletPda,
-          vault: vaultPda,
-          policy: policyPda,
-          cpiProgram: SystemProgram.programId,
-          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-        })
-        .remainingAccounts([{ pubkey: target.publicKey, isWritable: true, isSigner: true }])
-        .preInstructions([secpIx])
-        .signers([target])
-        .rpc();
-    }
-
-    let threw = false;
-    let errMsg = "";
-    try {
-      await attempt(9n);
-    } catch (err: any) {
-      threw = true;
-      errMsg = err?.message ?? String(err);
-    }
-    assert.isTrue(threw, "execute_advanced met verouderde action_nonce had moeten falen");
-    assert.include(errMsg, "StaleActionNonce");
-
-    const currentNonce = await fetchActionNonce(provider.connection, walletPda);
-    await attempt(currentNonce);
-    const targetInfo = await provider.connection.getAccountInfo(target.publicKey);
-    assert.ok(targetInfo && targetInfo.owner.equals(program.programId), "de Assign-CPI had target's owner naar ons eigen programma-ID moeten zetten");
-  });
+  // STATUS.md sectie 131 (vervolg op sectie 115/127-130): execute_advanced
+  // is permanent geblokkeerd voor directe aanroep sinds die sectie - de
+  // stale-nonce-test die hier stond (execute_advanced) is verplaatst naar
+  // tests/pendingAction.ts's kind=2-blok, tegen initiate_advanced_action
+  // (dezelfde gedeelde check_current_action_nonce, nu bewezen op de
+  // aanroeper die nog wél bestaat) plus een volledige finalize om de
+  // "CPI echt uitgevoerd"-claim van de oorspronkelijke test te behouden -
+  // dat laatste vereist de fast-timelock-feature, vandaar de verhuizing
+  // naar yarn test:pending-action i.p.v. een herschrijving hier in yarn
+  // test's timelockvrije bestand.
 
   it("concurrency: twee geldige handtekeningen op dezelfde startnonce - eerste wint, tweede wordt netjes geweigerd", async () => {
     const { passkey, walletPda, vaultPda, passkeysPda } = await createWallet();

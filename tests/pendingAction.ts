@@ -116,6 +116,16 @@ function readTokenAccountAmount(data: Buffer): bigint {
   return data.readBigUInt64LE(64);
 }
 
+// Zelfde encodering als tests/policy.ts se encodeTransferData (bewust
+// gedupliceerd) - nodig voor de Token::transfer-CPI-via-execute_advanced-
+// test in het kind=2-blok hieronder (STATUS.md sectie 131).
+function encodeTransferData(amount: number): Buffer {
+  const data = Buffer.alloc(9);
+  data.writeUInt8(3, 0); // Transfer tag
+  data.writeBigUInt64LE(BigInt(amount), 1);
+  return data;
+}
+
 interface RemainingAccountSpec {
   pubkey: PublicKey;
   isWritable: boolean;
@@ -1518,9 +1528,14 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     cpiProgramId: PublicKey,
     remainingAccounts: RemainingAccountSpec[],
     data: Buffer,
-    extraSigners: Keypair[] = []
+    extraSigners: Keypair[] = [],
+    // Optioneel: forceer een specifieke (bijv. verouderde) nonce i.p.v. de
+    // echte huidige - alleen nodig voor de stale-nonce-test hieronder. Valt
+    // terug op de normale fetchActionNonce-weg zodra dit ontbreekt, dus
+    // geen enkele andere aanroeper van deze helper hoeft hiervan te weten.
+    nonceOverride?: bigint
   ) {
-    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const nonce = nonceOverride ?? (await fetchActionNonce(provider.connection, walletPda));
     const rawPayload = buildAdvancedActionMetadataPayload(cpiProgramId, vaultPda, remainingAccounts, data);
     const payload = Buffer.concat([nonceLeBytes(nonce), rawPayload]);
     const expectedChallenge = buildExpectedChallenge(
@@ -1689,6 +1704,150 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       assert.equal(info!.owner.toBase58(), program.programId.toBase58());
       const closedInfo = await provider.connection.getAccountInfo(pendingActionPda);
       assert.isNull(closedInfo, "PendingAction-PDA had gesloten moeten zijn na finalize");
+    });
+
+    // STATUS.md sectie 131 (vervolg op sectie 115/127-130): execute_advanced
+    // is permanent geblokkeerd voor directe aanroep sinds die sectie - deze
+    // twee tests vervangen tests/policy.ts se (verwijderde)
+    // "execute_advanced voert een echte SPL Token::transfer-CPI uit"- en
+    // tests/actionNonce.ts se (verwijderde) stale-nonce-test, nu via de
+    // wachtrij. tests/policy.ts se andere directe-CPI-test (System::Assign)
+    // bleek al 1:1 overlappen met "1. happy path" hierboven - GEEN losse
+    // vervanging nodig daarvoor, zie STATUS.md sectie 131 voor de
+    // bevestiging dat dat bewust geen duplicaat is, geen omissie.
+
+    it("Token::transfer-CPI met de vault als PDA-signer-autoriteit, via de wachtrij (vervangt de nu geblokkeerde directe execute_advanced-test in tests/policy.ts)", async () => {
+      const { passkey, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } = await createWallet();
+      await callAddAllowedProgram(passkey, walletPda, policyPda, TOKEN_PROGRAM_ID);
+      const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(
+        vaultPda,
+        provider.wallet.publicKey,
+        1_000
+      );
+
+      // Zelfde is_writable/is_signer-opzet als tests/policy.ts se
+      // verwijderde equivalent: vault staat ook als het mut-gedeclareerde
+      // `vault`-account in dezelfde instructie, dus isWritable:true hier
+      // moet overeenkomen met wat het programma daadwerkelijk waarneemt.
+      const remainingAccounts: RemainingAccountSpec[] = [
+        { pubkey: vaultTokenAccount.publicKey, isWritable: true, isSigner: false },
+        { pubkey: recipientTokenAccount.publicKey, isWritable: true, isSigner: false },
+        { pubkey: vaultPda, isWritable: true, isSigner: false },
+      ];
+      const transferData = encodeTransferData(500);
+
+      await callInitiateAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        TOKEN_PROGRAM_ID,
+        remainingAccounts,
+        transferData
+      );
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+
+      await callFinalizeAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        TOKEN_PROGRAM_ID,
+        remainingAccounts,
+        transferData
+      );
+
+      const vaultAcctInfo = await provider.connection.getAccountInfo(vaultTokenAccount.publicKey);
+      const recipientAcctInfo = await provider.connection.getAccountInfo(recipientTokenAccount.publicKey);
+      assert.equal(readTokenAccountAmount(vaultAcctInfo!.data), BigInt(500));
+      assert.equal(readTokenAccountAmount(recipientAcctInfo!.data), BigInt(500));
+    });
+
+    it("stale action_nonce op initiate_advanced_action wordt geweigerd (StaleActionNonce), actuele nonce queued en (na finalize) voert de CPI echt uit (vervangt de nu geblokkeerde directe execute_advanced-test in tests/actionNonce.ts)", async () => {
+      const { passkey, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } = await createWallet();
+      await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      const remainingAccounts: RemainingAccountSpec[] = [
+        { pubkey: target.publicKey, isWritable: true, isSigner: true },
+      ];
+
+      // Hergebruikt callInitiateAdvancedAction zelf (via nonceOverride)
+      // i.p.v. een eigen, losstaande challenge-opbouw te herhalen zoals
+      // tests/actionNonce.ts se verwijderde equivalent nog deed - eerdere
+      // versie van deze test dupliceerde de hele payload/accounts-opbouw
+      // lokaal, wat op termijn uit elkaar had kunnen lopen met de gedeelde
+      // helper zonder dat iets dat zou opmerken. check_current_action_nonce
+      // wordt hier bewezen op initiate_advanced_action specifiek (een
+      // ANDERE aanroeper dan execute), niet aangenomen vanuit sectie 216's
+      // oude test.
+      await expectAnchorError(
+        callInitiateAdvancedAction(
+          passkey,
+          walletPda,
+          vaultPda,
+          pendingActionPda,
+          policyPda,
+          passkeysPda,
+          SystemProgram.programId,
+          remainingAccounts,
+          assignIx.data,
+          [target],
+          9n
+        ),
+        "StaleActionNonce"
+      );
+
+      const currentNonce = await fetchActionNonce(provider.connection, walletPda);
+      await callInitiateAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        SystemProgram.programId,
+        remainingAccounts,
+        assignIx.data,
+        [target],
+        currentNonce
+      );
+
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(pendingActionPda);
+      assert.equal(pendingAfterInitiate.kind, 2);
+
+      await advanceOnChainClockPast(
+        provider.connection,
+        (provider.wallet as anchor.Wallet).payer,
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+
+      await callFinalizeAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        SystemProgram.programId,
+        remainingAccounts,
+        assignIx.data,
+        [target]
+      );
+
+      const targetInfo = await provider.connection.getAccountInfo(target.publicKey);
+      assert.ok(
+        targetInfo && targetInfo.owner.equals(program.programId),
+        "de Assign-CPI had target's owner naar ons eigen programma-ID moeten zetten na finalize"
+      );
     });
 
     it("3. two-of-two-afdwinging: finalize met dezelfde passkey als initiate faalt, met een andere passkey slaagt", async () => {

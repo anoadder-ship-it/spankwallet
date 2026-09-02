@@ -26,10 +26,18 @@ import {
 // BLOKKADE (STATUS.md sectie 76/77): B6 wijzigde transfer_token's challenge-
 // payload - een live, fondsen-rakende instructie - zonder dat er ooit een
 // lokale test voor transfer_token zelf bestond (alleen voor de
-// sessievariant, tests/sessionKeys.ts). Dit bestand is nieuw, zelfde
-// diepgang als tests/hunt.ts: gelukkige weg met exacte
-// transactie-meta-gebaseerde saldiverificatie, plus een manipulatietest
-// voor de nieuw-gebonden vault_token_account.
+// sessievariant, tests/sessionKeys.ts).
+//
+// STATUS.md sectie 131 (vervolg op sectie 115/127-130): transfer_token is
+// sindsdien PERMANENT geblokkeerd voor directe aanroep - de vroegere
+// "gelukkige weg"-test hierboven (exacte transactie-meta-gebaseerde
+// saldiverificatie) verplaatste daarom naar tests/pendingAction.ts's
+// kind=1-blok, waar hij al 1:1 overlapte met de bestaande "1. happy path"-
+// test (bevestigd, geen omissie - zie die sectie). De B6-manipulatietest
+// hieronder blijft WEL hier: de challenge-binding aan vault_token_account
+// die hij bewijst bestaat identiek in initiate_token_transfer (zelfde
+// payloadvelden), dus rechtstreeks herschreven naar die instructie i.p.v.
+// verwijderd of verplaatst.
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const MINT_LEN = 82;
 const TOKEN_ACCOUNT_LEN = 165;
@@ -95,7 +103,7 @@ function readTokenAccountAmount(data: Buffer): bigint {
   return data.readBigUInt64LE(64);
 }
 
-describe("spankwallet: transfer_token (SPL-token-transfer, passkey-gated)", () => {
+describe("spankwallet: initiate_token_transfer - challenge-binding aan vault_token_account (B6, via de wachtrij sinds sectie 131)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.Spankwallet as Program<Spankwallet>;
@@ -114,7 +122,11 @@ describe("spankwallet: transfer_token (SPL-token-transfer, passkey-gated)", () =
       [Buffer.from("passkeys"), walletPda.toBuffer()],
       program.programId
     );
-    return { walletPda, vaultPda, passkeysPda, walletSeedHash: Array.from(seedHash) };
+    const [pendingActionPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("pending_action"), walletPda.toBuffer()],
+      program.programId
+    );
+    return { walletPda, vaultPda, passkeysPda, pendingActionPda, walletSeedHash: Array.from(seedHash) };
   }
 
   async function createWallet() {
@@ -235,14 +247,16 @@ describe("spankwallet: transfer_token (SPL-token-transfer, passkey-gated)", () =
   }
 
   // B6 (STATUS.md sectie 76/77): vault_token_account nu gebonden in de
-  // challenge-payload. `signAsVaultTokenAccount` laat toe om een AFWIJKEND
-  // vault_token_account te ondertekenen dan wat daadwerkelijk in de
-  // instructie terechtkomt - alleen gebruikt door de manipulatietest
-  // hieronder.
-  async function callTransferToken(
+  // challenge-payload - identiek payload-formaat als het voorheen directe
+  // transfer_token gebruikte (STATUS.md sectie 131: initiate_token_transfer
+  // herhaalt exact dezelfde challenge-binding). `signAsVaultTokenAccount`
+  // laat toe om een AFWIJKEND vault_token_account te ondertekenen dan wat
+  // daadwerkelijk in de instructie terechtkomt - alleen gebruikt door de
+  // manipulatietest hieronder.
+  async function callInitiateTokenTransfer(
     signingPasskey: TestPasskey,
     walletPda: PublicKey,
-    vaultPda: PublicKey,
+    pendingActionPda: PublicKey,
     passkeysPda: PublicKey,
     vaultTokenAccount: PublicKey,
     recipientTokenAccount: PublicKey,
@@ -263,7 +277,7 @@ describe("spankwallet: transfer_token (SPL-token-transfer, passkey-gated)", () =
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
-      "transfer_token",
+      "initiate_token_transfer",
       payload
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(
@@ -277,92 +291,28 @@ describe("spankwallet: transfer_token (SPL-token-transfer, passkey-gated)", () =
     );
 
     return program.methods
-      .transferToken(new BN(amount), new BN(nonce.toString()), clientDataJSON)
-      .accounts({
-        wallet: walletPda,
-        vault: vaultPda,
-        vaultTokenAccount,
+      .initiateTokenTransfer(
         recipientTokenAccount,
         tokenMint,
+        new BN(amount),
+        vaultTokenAccount,
+        new BN(nonce.toString()),
+        clientDataJSON
+      )
+      .accounts({
+        wallet: walletPda,
+        pendingAction: pendingActionPda,
         passkeys: passkeysPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-        tokenProgram: TOKEN_PROGRAM_ID,
+        payer: provider.wallet.publicKey,
+        systemProgram: SystemProgram.programId,
       })
       .preInstructions([secp256r1Ix])
       .rpc();
   }
 
-  it("transfer_token verplaatst het exacte bedrag van vault_token_account naar recipient_token_account", async () => {
-    const { passkey, walletPda, vaultPda, passkeysPda } = await createWallet();
-    const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(
-      vaultPda,
-      provider.wallet.publicKey,
-      1000
-    );
-
-    const signature = await callTransferToken(
-      passkey,
-      walletPda,
-      vaultPda,
-      passkeysPda,
-      vaultTokenAccount.publicKey,
-      recipientTokenAccount.publicKey,
-      mint.publicKey,
-      400
-    );
-
-    // Harde bron van waarheid: de daadwerkelijke token-accountsaldi NA de
-    // transactie, rechtstreeks uitgelezen - niet uit een losse, mogelijk
-    // te vroege balansquery (zelfde discipline als tests/hunt.ts).
-    let vaultAccountInfo = await provider.connection.getAccountInfo(vaultTokenAccount.publicKey);
-    let recipientAccountInfo = await provider.connection.getAccountInfo(
-      recipientTokenAccount.publicKey
-    );
-    for (
-      let i = 0;
-      i < 20 &&
-      (readTokenAccountAmount(vaultAccountInfo!.data) !== 600n ||
-        readTokenAccountAmount(recipientAccountInfo!.data) !== 400n);
-      i++
-    ) {
-      await new Promise((r) => setTimeout(r, 100));
-      vaultAccountInfo = await provider.connection.getAccountInfo(vaultTokenAccount.publicKey);
-      recipientAccountInfo = await provider.connection.getAccountInfo(
-        recipientTokenAccount.publicKey
-      );
-    }
-
-    assert.equal(
-      readTokenAccountAmount(vaultAccountInfo!.data),
-      600n,
-      "vault_token_account had exact 600 (1000 - 400) moeten overhouden"
-    );
-    assert.equal(
-      readTokenAccountAmount(recipientAccountInfo!.data),
-      400n,
-      "recipient_token_account had exact 400 moeten ontvangen"
-    );
-
-    // Aanvullend, harde bevestiging via de transactie-meta zelf (dezelfde
-    // discipline als STATUS.md sectie 17/hunt: niet vertrouwen op een losse
-    // her-lees-actie zonder de transactie zelf te controleren).
-    let txInfo = await provider.connection.getTransaction(signature, {
-      commitment: "confirmed",
-      maxSupportedTransactionVersion: 1,
-    });
-    for (let i = 0; i < 20 && (!txInfo || !txInfo.meta); i++) {
-      await new Promise((r) => setTimeout(r, 100));
-      txInfo = await provider.connection.getTransaction(signature, {
-        commitment: "confirmed",
-        maxSupportedTransactionVersion: 1,
-      });
-    }
-    assert.isNotNull(txInfo, "kon de transfer_token-transactie niet terugvinden");
-    assert.isNull(txInfo!.meta!.err, "de transactie had zonder fout moeten slagen");
-  });
-
   it("[B6] een afwijkend vault_token_account t.o.v. wat ondertekend werd, maakt de handtekening ongeldig (WebAuthnChallengeMismatch)", async () => {
-    const { passkey, walletPda, vaultPda, passkeysPda } = await createWallet();
+    const { passkey, walletPda, vaultPda, passkeysPda, pendingActionPda } = await createWallet();
     const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(
       vaultPda,
       provider.wallet.publicKey,
@@ -384,10 +334,10 @@ describe("spankwallet: transfer_token (SPL-token-transfer, passkey-gated)", () =
       // daadwerkelijke instructie gebruikt otherVaultTokenAccount (een
       // ANDER, eveneens geldig vault-eigen token-account) - simuleert een
       // client/aanvaller die na ondertekening de bron omwisselt.
-      await callTransferToken(
+      await callInitiateTokenTransfer(
         passkey,
         walletPda,
-        vaultPda,
+        pendingActionPda,
         passkeysPda,
         otherVaultTokenAccount.publicKey,
         recipientTokenAccount.publicKey,

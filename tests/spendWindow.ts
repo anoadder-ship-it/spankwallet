@@ -23,21 +23,21 @@ import {
   TestPasskey,
 } from "./webauthnTestHelper";
 
-// spendThreshold.ts — STATUS.md sectie 127/128 (stap A, Route 2): bewijst
-// tegen een echte validator dat spend_threshold_lamports == 0 (de
-// fail-safe default, alle zeventien bestaande wallets vandaag) het gedrag
-// van execute/hunt ONGEWIJZIGD laat na de nieuwe
-// AmountExceedsInstantThreshold-gating. Draait onder het GEWONE `yarn
-// test` - geen enkele test hier zet een drempel, dus geen afhankelijkheid
-// van de test-fast-pending-timelock-feature.
+// spendWindow.ts — STATUS.md sectie 132/133 (stap B, glijdende-
+// vensterlimiet): stap b bewijs, niet aangenomen. execute/hunt kregen een
+// nieuwe spend_window-account in hun accountlijst (UncheckedAccount, seeds/
+// bump, geen init_if_needed), maar GEEN rollover-/optel-/cap-logica - dat
+// is stap c, nog te bouwen, en heeft hier bewust NOG GEEN dekking.
 //
-// De THRESHOLD > 0-tests (daadwerkelijke gating + de symmetrie met
-// initiate_withdrawal) staan bewust NIET hier, maar als een nieuw
-// describe-blok in tests/pendingAction.ts: een niet-nul drempel zetten
-// vereist finalize_threshold_change, dat de echte 24u-timelock zou
-// afdwingen zonder de test-fast-pending-timelock-feature - dit bestand
-// draait niet met die feature, tests/pendingAction.ts (via
-// yarn test:pending-action) al wel.
+// Dit bestand bewijst uitsluitend dat de accountlijst-uitbreiding zelf GEEN
+// gedragswijziging is voor een drempel=0-wallet (de fail-safe default,
+// alle zeventien bestaande wallets vandaag, en het enige moment waarop
+// spend_window nog niet bestaat - zie sectie 132's vraag 1): execute/hunt
+// slagen precies zoals vóór stap B, EN het spend_window-account blijft
+// aantoonbaar niet-bestaand erna (geen stille/geforceerde initialisatie
+// als bijeffect van simpelweg het adres meesturen). Draait onder het
+// GEWONE `yarn test` - geen enkele test hier zet een drempel, dus geen
+// afhankelijkheid van test-fast-pending-timelock ÓF test-fast-spend-window.
 //
 // Zelfde per-bestand-onafhankelijkheidsconventie als de rest van deze
 // testsuite (bewust gedupliceerde helpers, geen gedeelde testmodule).
@@ -111,7 +111,7 @@ function encodeMintToIx(
   });
 }
 
-describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzigd (STATUS.md sectie 127/128)", () => {
+describe("spankwallet: spend_window-accountlijst-uitbreiding op execute/hunt (STATUS.md sectie 132/133, stap B)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
   const program = anchor.workspace.Spankwallet as Program<Spankwallet>;
@@ -130,9 +130,6 @@ describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzig
       [Buffer.from("passkeys"), walletPda.toBuffer()],
       program.programId
     );
-    // STATUS.md sectie 132/133 (stap B): SpendWindow-PDA, execute/hunt
-    // vereisen dit account nu in hun accountlijst (nog niet gelezen/
-    // geschreven, dat is stap c).
     const [spendWindowPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("spend_window"), walletPda.toBuffer()],
       program.programId
@@ -197,6 +194,7 @@ describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzig
     signingPasskey: TestPasskey,
     walletPda: PublicKey,
     vaultPda: PublicKey,
+    spendWindowPda: PublicKey,
     passkeysPda: PublicKey,
     recipient: PublicKey,
     amount: BN
@@ -216,14 +214,6 @@ describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzig
       signingPasskey.compressedPublicKey,
       signedMessage,
       rawSignature
-    );
-
-    // STATUS.md sectie 132/133 (stap B): SpendWindow, nog niet
-    // gelezen/geschreven (stap c) - explicit meegegeven i.p.v. op Anchors
-    // seeds-auto-resolutie te vertrouwen.
-    const [spendWindowPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("spend_window"), walletPda.toBuffer()],
-      program.programId
     );
 
     return program.methods
@@ -248,6 +238,7 @@ describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzig
     signingPasskey: TestPasskey,
     walletPda: PublicKey,
     vaultPda: PublicKey,
+    spendWindowPda: PublicKey,
     passkeysPda: PublicKey,
     targetTokenAccount: PublicKey,
     tokenMint: PublicKey,
@@ -271,13 +262,6 @@ describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzig
     );
 
     const data = Buffer.concat([HUNT_DISCRIMINATOR, nonceLeBytes(nonce), encodeBorshVecU8(clientDataJSON)]);
-    // STATUS.md sectie 132/133 (stap B): SpendWindow, nog niet
-    // gelezen/geschreven (stap c) - moet wel al meegestuurd worden, zelfde
-    // volgorde als Hunt in instructions.rs.
-    const [spendWindowPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("spend_window"), walletPda.toBuffer()],
-      program.programId
-    );
     const huntIx = new TransactionInstruction({
       programId: program.programId,
       keys: [
@@ -333,34 +317,48 @@ describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzig
   }
 
   describe("execute", () => {
-    it("threshold = 0: gedrag exact ongewijzigd, elk bedrag gaat instant door (bewijst dat bestaande wallets niet breken)", async () => {
-      const { passkey, walletPda, vaultPda, passkeysPda } = await createWallet();
+    it("drempel = 0: gedrag exact ongewijzigd, EN spend_window blijft niet-bestaand (geen geforceerde initialisatie, geen venstercontrole)", async () => {
+      const { passkey, walletPda, vaultPda, spendWindowPda, passkeysPda } = await createWallet();
       const recipient = Keypair.generate().publicKey;
-      // Ruim boven wat ooit een redelijke drempel zou zijn - juist om te
-      // bewijzen dat threshold=0 GEEN bovengrens is, geen enkel bedrag
-      // wordt geweigerd.
       const amount = new BN(1.5 * anchor.web3.LAMPORTS_PER_SOL);
 
+      const beforeInfo = await provider.connection.getAccountInfo(spendWindowPda);
+      assert.isNull(beforeInfo, "spend_window mag vóór de eerste execute niet bestaan");
+
       const vaultBefore = await provider.connection.getBalance(vaultPda);
-      await callExecute(passkey, walletPda, vaultPda, passkeysPda, recipient, amount);
+      await callExecute(passkey, walletPda, vaultPda, spendWindowPda, passkeysPda, recipient, amount);
       const vaultAfter = await provider.connection.getBalance(vaultPda);
       const recipientBalance = await provider.connection.getBalance(recipient);
 
-      assert.equal(vaultBefore - vaultAfter, amount.toNumber());
+      assert.equal(
+        vaultBefore - vaultAfter,
+        amount.toNumber(),
+        "execute moet nog steeds het volledige bedrag verplaatsen, ongeacht de nieuwe accountlijst-uitbreiding"
+      );
       assert.equal(recipientBalance, amount.toNumber());
+
+      const afterInfo = await provider.connection.getAccountInfo(spendWindowPda);
+      assert.isNull(
+        afterInfo,
+        "spend_window mag NA een geslaagde execute nog steeds niet bestaan - stap B voegde alleen het adres toe aan de accountlijst, geen init_if_needed, geen handhaving"
+      );
     });
   });
 
   describe("hunt", () => {
-    it("threshold = 0: gedrag exact ongewijzigd, hunt slaagt normaal (bewijst dat bestaande wallets niet breken)", async () => {
-      const { passkey, walletPda, vaultPda, passkeysPda } = await createWallet();
+    it("drempel = 0: gedrag exact ongewijzigd, EN spend_window blijft niet-bestaand (geen geforceerde initialisatie, geen venstercontrole)", async () => {
+      const { passkey, walletPda, vaultPda, spendWindowPda, passkeysPda } = await createWallet();
       const { mint, tokenAccount } = await setupSpamTokenAccount(vaultPda, 1000);
       const rentDestination = Keypair.generate().publicKey;
+
+      const beforeInfo = await provider.connection.getAccountInfo(spendWindowPda);
+      assert.isNull(beforeInfo, "spend_window mag vóór de eerste hunt niet bestaan");
 
       await callHunt(
         passkey,
         walletPda,
         vaultPda,
+        spendWindowPda,
         passkeysPda,
         tokenAccount.publicKey,
         mint.publicKey,
@@ -368,9 +366,15 @@ describe("spankwallet: spend_threshold_lamports = 0 laat execute/hunt ongewijzig
       );
 
       const closedInfo = await provider.connection.getAccountInfo(tokenAccount.publicKey);
-      assert.isNull(closedInfo, "target_token_account had gesloten moeten zijn na hunt");
+      assert.isNull(closedInfo, "target_token_account had gesloten moeten zijn na hunt - ongewijzigd gedrag");
       const rentDestBalance = await provider.connection.getBalance(rentDestination);
-      assert.isAbove(rentDestBalance, 0, "rent_destination had iets moeten ontvangen");
+      assert.isAbove(rentDestBalance, 0, "rent_destination had iets moeten ontvangen - ongewijzigd gedrag");
+
+      const afterInfo = await provider.connection.getAccountInfo(spendWindowPda);
+      assert.isNull(
+        afterInfo,
+        "spend_window mag NA een geslaagde hunt nog steeds niet bestaan - stap B voegde alleen het adres toe aan de accountlijst, geen init_if_needed, geen handhaving"
+      );
     });
   });
 });

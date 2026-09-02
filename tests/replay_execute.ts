@@ -49,13 +49,20 @@ describe("REPLAY-AUDIT: execute() challenge-replay (C-1, action_nonce-fix)", () 
       [Buffer.from("passkeys"), walletPda.toBuffer()],
       program.programId
     );
-    return { walletPda, vaultPda, passkeysPda, walletSeedHash: Array.from(seedHash) };
+    // STATUS.md sectie 132/133 (stap B): SpendWindow-PDA, execute vereist
+    // dit account nu in de accountlijst (nog niet gelezen/geschreven, dat
+    // is stap c).
+    const [spendWindowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("spend_window"), walletPda.toBuffer()],
+      program.programId
+    );
+    return { walletPda, vaultPda, passkeysPda, spendWindowPda, walletSeedHash: Array.from(seedHash) };
   }
 
   it("een eenmaal geldige execute-handtekening wordt geweigerd bij een tweede poging in een nieuwe transactie", async () => {
     const passkey = generateTestPasskey();
     const backupAuthority = Keypair.generate();
-    const { walletPda, vaultPda, passkeysPda, walletSeedHash } = derivePdas(
+    const { walletPda, vaultPda, passkeysPda, spendWindowPda, walletSeedHash } = derivePdas(
       passkey.compressedPublicKey
     );
 
@@ -145,6 +152,7 @@ describe("REPLAY-AUDIT: execute() challenge-replay (C-1, action_nonce-fix)", () 
           .accounts({
             wallet: walletPda,
             vault: vaultPda,
+            spendWindow: spendWindowPda,
             recipient,
             passkeys: passkeysPda,
             instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,

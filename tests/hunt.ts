@@ -273,11 +273,22 @@ describe("spankwallet: hunt (spam-token burn+close)", () => {
       encodeBorshVecU8(clientDataJSON),
     ]);
 
+    // STATUS.md sectie 132/133 (stap B): SpendWindow, nog niet
+    // gelezen/geschreven (stap c) - moet wel al meegestuurd worden, zelfde
+    // volgorde als Hunt in instructions.rs. Lokaal afgeleid i.p.v. als
+    // parameter doorgegeven, om callHunt's aanroepers niet te hoeven
+    // wijzigen.
+    const [spendWindowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("spend_window"), walletPda.toBuffer()],
+      program.programId
+    );
+
     const huntIx = new TransactionInstruction({
       programId: program.programId,
       keys: [
         { pubkey: walletPda, isSigner: false, isWritable: true },
         { pubkey: vaultPda, isSigner: false, isWritable: true },
+        { pubkey: spendWindowPda, isSigner: false, isWritable: false },
         { pubkey: targetTokenAccount, isSigner: false, isWritable: true },
         { pubkey: tokenMint, isSigner: false, isWritable: true },
         { pubkey: rentDestination, isSigner: false, isWritable: true },

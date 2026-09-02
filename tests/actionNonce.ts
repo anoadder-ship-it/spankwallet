@@ -53,13 +53,27 @@ describe("C-1-fix: action_nonce mechanica", () => {
       [Buffer.from("policy"), walletPda.toBuffer()],
       program.programId
     );
-    return { walletPda, vaultPda, passkeysPda, policyPda, walletSeedHash: Array.from(seedHash) };
+    // STATUS.md sectie 132/133 (stap B): SpendWindow-PDA, execute vereist
+    // dit account nu in de accountlijst (nog niet gelezen/geschreven, dat
+    // is stap c).
+    const [spendWindowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("spend_window"), walletPda.toBuffer()],
+      program.programId
+    );
+    return {
+      walletPda,
+      vaultPda,
+      passkeysPda,
+      policyPda,
+      spendWindowPda,
+      walletSeedHash: Array.from(seedHash),
+    };
   }
 
   async function createWallet() {
     const passkey = generateTestPasskey();
     const backupAuthority = Keypair.generate();
-    const { walletPda, vaultPda, passkeysPda, policyPda, walletSeedHash } = derivePdas(
+    const { walletPda, vaultPda, passkeysPda, policyPda, spendWindowPda, walletSeedHash } = derivePdas(
       passkey.compressedPublicKey
     );
 
@@ -79,7 +93,7 @@ describe("C-1-fix: action_nonce mechanica", () => {
       .preInstructions([initSecpIx])
       .rpc();
 
-    return { passkey, walletPda, vaultPda, passkeysPda, policyPda };
+    return { passkey, walletPda, vaultPda, passkeysPda, policyPda, spendWindowPda };
   }
 
   async function callAddPasskey(passkey: TestPasskey, walletPda: PublicKey, passkeysPda: PublicKey, newPasskeyBytes: Buffer, nonceOverride?: bigint) {
@@ -132,11 +146,18 @@ describe("C-1-fix: action_nonce mechanica", () => {
     const challenge = buildExpectedChallenge(program.programId, walletPda, "execute", payload);
     const signed = signTestChallenge(passkey, challenge);
     const secpIx = buildSecp256r1Instruction(passkey.compressedPublicKey, signed.signedMessage, signed.rawSignature);
+    // STATUS.md sectie 132/133 (stap B): SpendWindow, nog niet
+    // gelezen/geschreven (stap c) - moet wel al meegestuurd worden.
+    const [spendWindowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("spend_window"), walletPda.toBuffer()],
+      program.programId
+    );
     const ix = await program.methods
       .execute(amount, new BN(nonce.toString()), signed.clientDataJSON)
       .accounts({
         wallet: walletPda,
         vault: vaultPda,
+        spendWindow: spendWindowPda,
         recipient,
         passkeys: passkeysPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,

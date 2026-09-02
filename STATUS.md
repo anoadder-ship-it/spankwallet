@@ -12008,3 +12008,88 @@ aangesloten.** Nog steeds bewust niet gebouwd (ongewijzigd t.o.v. sectie 127/128
 daadwerkelijke client-ingang (knop/route) naar `initiate_threshold_change`/
 `finalize_threshold_change`, de beslissing over `transfer_token`/`execute_advanced` (sectie
 127, punt 3), en de cumulatieve glijdende-vensterlimiet over meerdere transacties (stap B).
+
+## 130. Vijf Dependabot-alerts onderzocht en afgewezen - een scopegat in sectie 113 (Dependabot
+werd nooit bevraagd, alleen CodeQL)
+
+**Aanleiding:** `git push` van de vorige sessie (sectie 129) meldde "GitHub found 5
+vulnerabilities (2 moderate, 3 low)". Onderzocht met dezelfde discipline als sectie 113:
+rechtstreeks via `GET /repos/.../dependabot/alerts?state=open`, niet het dashboard.
+
+**Eerste bevinding: geen van de vijf komt uit sectie 129's `jsdom`-toevoeging.** `jsdom`/
+`@types/jsdom` (npm, root `package.json`) hebben 0 advisories. Alle vijf zitten in
+`desktop/src-tauri/Cargo.lock` (Rust/Cargo, de Tauri-desktopapp) - een ander ecosysteem,
+losstaand van sectie 129's wijzigingen.
+
+**Tweede bevinding: dit is een scopegat in sectie 113, geen gemiste check.** Alle vijf alerts
+zijn aangemaakt op 2026-08-19 - elf dagen vóór sectie 113's "GitHub-meldingenronde" (commit
+`fe0b300`, 2026-08-30). Sectie 113 behandelde uitsluitend CodeQL code-scanning-alerts
+(#10/#9/#8/#7) plus één losse dependency-versiecheck (`wallet-standard-mobile`) - de
+Dependabot-alerts-endpoint is daar nooit bevraagd. Sectie 113's eigen afsluitzin ("GitHub-
+meldingenronde hiermee compleet") klopte dus niet voor deze alert-categorie; die claim wordt
+hier gecorrigeerd, niet stilzwijgend rechtgezet.
+
+**De vijf alerts, herkomst opgezocht met `cargo tree -i <pkg>@<versie>`:**
+
+| # | Pakket | Severity | Advisory | Herkomst |
+|---|---|---|---|---|
+| 17 | `rand` 0.7.3 | low | GHSA-cq8v-f236-94qc - unsound bij custom logger + `thread_rng()`-reseed-race | `ed25519-dalek-bip32 v0.2.0` → `solana-keypair v2.2.3` → `solana-sdk v2.3.1` |
+| 14 | `glib` 0.18.5 | medium | GHSA-wrw7-89jp-8q8g - unsound `VariantStrIter::impl_get`, NULL-deref-crash | `gtk`/`webkit2gtk`/`wry` → `tauri v2.11.5` |
+| 13 | `curve25519-dalek` 3.2.0 | low | CVE-2024-58262 - timing-variabiliteit in `Scalar29/52::sub` | `ed25519-dalek-bip32 v0.2.0` → `solana-keypair v2.2.3` → `solana-sdk v2.3.1` |
+| 12 | `ed25519-dalek` 1.0.1 | medium | CVE-2022-50237 - "Double Public Key Signing Function Oracle Attack" | `ed25519-dalek-bip32 v0.2.0` → `solana-keypair v2.2.3` → `solana-sdk v2.3.1` |
+| 11 | `atty` 0.2.14 | low | GHSA-g98v-hv3f-hcfr - Windows unaligned read; **geen patch beschikbaar**, crate onderhoudsloos | `env_logger v0.9.3` → `solana-logger v2.3.1` → `solana-genesis-config` → `solana-sdk v2.3.1` |
+
+Geen van de vijf is een directe dependency van `spankwallet-desktop` - alle vijf zitten
+meerdere lagen diep, gepind door de manifest-eisen van bovenliggende crates
+(`ed25519-dalek-bip32`/`solana-keypair` voor de eerste drie en `atty`, Tauri's eigen
+gtk-rs-stack voor `glib`).
+
+**Fix bevestigd niet mogelijk binnen bestaande semver-grenzen:** `cargo update --dry-run`
+bood alleen een ongerelateerde, al-veilige bump (`rand 0.8.7 → 0.8.8`, onze eigen directe
+`rand`-dependency, niet de kwetsbare 0.7.3-instantie) - geen van de vijf kwetsbare versies kon
+zo opgeschoven worden. Een echte fix vereist een major-versiesprong (`solana-sdk` 2 → 3/4, of
+meelopen met wat Tauri's gtk-rs-stack optrekt) - dat is een apart, groter traject met reëel
+risico op API-breuk elders in de app, **geen actiepunt nu**. Wél iets om te heroverwegen
+mocht die upgrade ooit om een andere reden gebeuren (bijv. een toekomstige `solana-sdk`-3.x/
+4.x-migratie) - op dat moment vervallen deze vijf waarschijnlijk vanzelf als bijeffect.
+
+**Toepasbaarheid op ons daadwerkelijke gebruik, per pakket - eigen code
+(`desktop/src-tauri/src/`) doorzocht op de relevante patronen (geen BIP32/seed-derivatie, geen
+eigen `log::Log`-implementatie, geen directe `curve25519_dalek`-aanroepen; de enige eigen
+`ed25519_dalek`-import staat in `fee_payer.rs:272` binnen `#[cfg(test)] mod tests`, en gebruikt
+de veilige 2.x-crate, niet de kwetsbare 1.0.1):**
+
+- **`rand`/`atty` - precondities aantoonbaar afwezig, niet alleen onwaarschijnlijk.** `rand`
+  vereist een zelfgedefinieerde `log`-logger die tijdens een reseed `ThreadRng`-methodes
+  aanroept - die logger bestaat niet in deze codebase. `atty` vereist een custom global
+  allocator op Windows - niet gebruikt, en de standaard Windows-heapallocator garandeert al
+  voldoende alignment (bovendien: geen patch beschikbaar, upstream onderhoudsloos).
+- **`glib`/`curve25519-dalek`/`ed25519-dalek` - vermoedelijk niet van toepassing, NIET met
+  zekerheid uit te sluiten.** Dit is een bewust ander niveau van zekerheid dan `rand`/`atty`
+  hierboven, niet afgerond tot dezelfde claim:
+  - `glib`: `VariantStrIter` wordt uitsluitend door Tauri's eigen Linux-GTK/D-Bus-plumbing
+    aangeroepen, nooit door onze code. Impact is een crash (NULL-deref, DoS), geen sleutel-/
+    datalek. Maar of Tauri dat pad intern daadwerkelijk uitvoert, is niet geverifieerd zonder
+    Tauri's eigen interne aanroepen te auditen.
+  - `curve25519-dalek`: het timing-zijkanaal is alleen bereikbaar via het BIP32-
+    derivatiepad dat `solana-keypair` aanbiedt; onze code roept dat pad nergens aan. Maar of
+    `solana-sdk` dat pad zelf intern ergens uitvoert (buiten onze eigen aanroepen om), is niet
+    geverifieerd zonder `solana-sdk`'s eigen interne aanroepen te auditen.
+  - `ed25519-dalek`: de oracle-aanval vereist een ondertekenfunctie die een
+    aanvaller-gekozen publieke sleutel accepteert naast de eigen privésleutel;
+    `ed25519-dalek-bip32` gebruikt de kwetsbare 1.0.1 alleen voor deterministische
+    BIP32-kindsleutelafleiding, geen zo'n oracle, en onze code roept dat pad niet aan. Zelfde
+    voorbehoud als hierboven: niet geverifieerd tot op `solana-sdk`'s eigen interne aanroepen.
+
+**Dispositie: alle vijf afgewezen via `PATCH /dependabot/alerts/{n}`,
+`dismissed_reason: "tolerable_risk"`, elk met een pakket-specifieke `dismissed_comment` die het
+bovenstaande onderscheid letterlijk overneemt** (niet `not_used` - dat zou beweren dat de
+kwetsbare code nooit gecompileerd/uitgevoerd wordt, wat voor `glib` en de twee
+`solana-sdk`-interne paden niet bewezen is; niet `inaccurate` - de bevindingen zijn zelf
+technisch correct). Bevestigd na afloop: `GET .../dependabot/alerts?state=open` → 0 resultaten.
+
+**Status: 0 open Dependabot-alerts.** Sectie 113's "meldingenronde compleet"-claim is hiermee
+met terugwerkende kracht gecorrigeerd voor de Dependabot-categorie specifiek. Een echte
+upgrade van `solana-sdk`/Tauri's gtk-rs-stack blijft een open, bewust uitgesteld traject - niet
+omdat het risico nu onaanvaardbaar is, maar omdat een major-versiesprong een eigen
+onderzoeks-/testtraject verdient, geen bijvangst van een Dependabot-opruimronde.

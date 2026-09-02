@@ -12326,3 +12326,64 @@ toepassen vóór er iets gebouwd wordt.
    `WINDOW_DURATION_SECONDS`-constante naar het `PENDING_ACTION_TIMELOCK_SECONDS`-patroon.
 
 **Status: ontwerp compleet, ter goedkeuring. Niets gebouwd.**
+
+## 133. Sectie 132 goedgekeurd en gedeeltelijk gebouwd: stap a (test-infrastructuur) + stap b
+(accountlijst-uitbreiding) - stap c (de daadwerkelijke handhaving) volgt apart
+
+Vervolg op sectie 132 - alle zes aanbevelingen daar zijn bevestigd en vormen de basis
+hieronder. Twee sub-stappen, allebei empirisch bewezen, nog GEEN rollover-/optel-/cap-logica
+(dat is stap c).
+
+**Stap a: `WINDOW_DURATION_SECONDS` + test-feature-infrastructuur, met een verrassing zoals
+sectie 124 anticipeerde.** Nieuwe Cargo-feature `test-fast-spend-window` (default-off, zelfde
+aanpak als `test-fast-pending-timelock`), nieuwe cfg-gated constante (24u productie / 3s
+onder de feature). De eerste implementatie plaatste de `msg!()`-marker in
+`spend_window_needs_reset()`, een pure, nog nergens aangeroepen functie - logisch, want stap c
+(execute/hunt) bestond nog niet. **Empirisch getest (twee losse `cargo-build-sbf --arch v3`-
+builds, eigen `--sbf-out-dir`, geen cache-hergebruik) en de marker bleek in GEEN van beide te
+vinden, ook niet in de mét-feature-build.** Dit is een ANDER stripgedrag dan sectie 124's
+`#[used]`/`SHF_GNU_RETAIN`-probleem (dat ging over een linker-vlag-bijwerking bij een
+geforceerd-behouden static) - hier gaat het om gewone, onvermijdelijke dead-code-eliminatie
+van een écht ongebruikte functie. **Fix:** de marker verhuisd naar `finalize_threshold_change`
+zelf - de functie die `SpendWindow`'s levenscyclus al beheert en altijd bereikbaar is, ook al
+gebruikt ze `WINDOW_DURATION_SECONDS` zelf nog niet. Ná de fix, alle vier combinaties bewezen:
+geen feature → geen marker (exit 0); `test-fast-spend-window` → marker gevonden op offset 2896
+(exit 1); `test-fast-pending-timelock` (regressiecontrole op de herschreven, tot een lijst
+uitgebreide `verify-no-test-features-in-binary.ts`) → nog steeds correct gevonden (exit 1);
+`EI_OSABI` (byte-offset 7) `00` in alle drie de builds - geen OSABI-flip, geen herhaling van
+sectie 124's deployprobleem. `cargo check`, met én zonder de feature: schoon.
+
+**Stap b: `spend_window` toegevoegd aan `Execute`/`Hunt`'s accountlijst, met de
+Accounts-struct-valkuil uit sectie 132 zelf vermeden.** `UncheckedAccount<'info>` (niet
+`Account<SpendWindow>`), `seeds`/`bump`-constraint, geen `init_if_needed` - exact zoals sectie
+132 vaststelde, want een strak-getypeerd account zou Anchors deserialisatie laten falen voor
+alle zeventien bestaande drempel=0-wallets. Elke levende aanroeper bijgewerkt (dezelfde
+stap-1-discipline als sectie 131, hier toegepast vóórdat er iets kon breken): `client/src/
+execute.ts`/`hunt.ts` (via een nieuwe, minimale `client/src/spendWindow.ts` met alleen de
+PDA-derivatie) en vijf testbestanden (`tests/hunt.ts`, `tests/spendThreshold.ts`, `tests/
+actionNonce.ts`, `tests/replay_execute.ts`, `tests/pendingAction.ts`) - sommige via Anchors
+`.methods().accounts()` (expliciet meegegeven, niet op seeds-auto-resolutie vertrouwd), hunt
+altijd handmatig (`TransactionInstruction`, dezelfde reden als altijd: de vault-writable-CPI-
+eis die Anchors `.methods().hunt()` niet kan uitdrukken).
+
+**Geen gedragswijziging voor drempel=0-wallets - expliciet bewezen, nieuw `tests/
+spendWindow.ts`:** twee tests (execute, hunt) bevestigen niet alleen dat het bedrag nog
+steeds exact zoals vóór stap B verplaatst wordt, maar ook dat `spend_window` zowel VÓÓR als
+NÁ een geslaagde aanroep aantoonbaar niet bestaat (`getAccountInfo` → `null`) - geen stille
+of geforceerde initialisatie als bijeffect van simpelweg het adres meesturen. Elke nieuwe
+doc-comment (Rust én TS) zegt expliciet "nog niet gelezen/geschreven, dat is stap c", zodat
+een latere lezer dit niet voor volledige handhaving aanziet.
+
+**Bewezen, niet beredeneerd:** `cargo check` (met/zonder `test-fast-spend-window`) schoon,
+`client/`'s `tsc --noEmit && vite build` schoon, **geen nieuwe BPF-stackframe-waarschuwing**
+(`check-stack-safety.sh`, onderdeel van `yarn test`). `yarn test`: **94 passing / 38 pending
+(verwachte skips) / 0 failing** (netto +2 t.o.v. sectie 131's 92 - exact de twee nieuwe
+`spendWindow.ts`-tests). `yarn test:pending-action`: **36 passing / 0 failing** (ongewijzigd -
+geen nieuwe tests in dat bestand voor stap a/b). Geen `StaleActionNonce`-anomalie in beide
+runs (de enige twee treffers zijn de tests die 'm doelbewust triggeren).
+
+**Status: infrastructuur en accountlijst-uitbreiding staan, bewezen geen gedragswijziging
+voor bestaande wallets.** De daadwerkelijke rollover-/optel-/cap-logica (stap c) - inclusief
+`SpendWindowExceeded`-weigering, de reset-dan-optellen-volgorde empirisch bewezen, en de
+handmatige `UncheckedAccount`-load/write naar het `load_session_account`/
+`write_session_account`-patroon - volgt als eigen, apart te documenteren stap.

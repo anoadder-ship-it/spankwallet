@@ -11915,3 +11915,96 @@ bewust apart gehouden (zie sectie 127): de client-banner die de eigenaar naar
 `initiate_threshold_change` leidt, en de beslissing over `transfer_token`/`execute_advanced`
 (sectie 127, punt 3 - wacht totdat de SOL-kant in de praktijk bevestigd is, niet alleen
 lokaal getest).
+
+## 129. Sectie 128 vervolg: de client-banner gebouwd - drempel-indicator + een jsdom-DOM-test
+i.p.v. een eenmalige handmatige controle
+
+Vervolg op sectie 128's "nog niet gedaan"-punt: de client-banner die de eigenaar op
+`spend_threshold_lamports` wijst. Twee bestanden, bewust gescheiden zoals het plan in sectie
+127 al aankondigde.
+
+**`client/src/thresholdBanner.ts`** (nieuw): `thresholdBannerState()` is een PURE functie
+(geen DOM, geen `document`-import) die op basis van de huidige drempel bepaalt WAT getoond
+moet worden - `showNudge`/`statusLine`/`nudgeHeadline`/`nudgeBody`. `renderThresholdBanner()`
+is de DOM-effectkant erbovenop: schrijft de altijd-zichtbare statusregel naar
+`#threshold-status` en, alleen bij `threshold == 0` (de fail-safe default, alle zeventien
+bestaande wallets), een dismissible nudge-banner naar `#threshold-nudge`. Idempotent: een
+volgende aanroep maakt `#threshold-nudge` eerst leeg vóór (eventueel) een nieuwe banner erin
+te zetten - stapelt niet bij herhaald aanroepen (bijv. na een nieuwe step-1/step-2-cyclus).
+
+**Bewust GEEN link/knop naar `initiate_threshold_change`:** die instructie heeft vandaag geen
+enkele client-flow (geen knop, geen CLI-route, geen admin-paginaroute - alleen bewezen tegen
+een validator, sectie 125/128). Een knop die naar niets leidt zou precies het soort overclaim
+zijn dat deze banner had moeten voorkomen. **Bewust GEEN voorgestelde richtwaarde** voor het
+bedrag: een concreet getal suggereert een autoriteit die er niet is ("waarom juist dit
+bedrag?") - dit systeem kent het daadwerkelijke gebruikspatroon van de eigenaar niet, en een
+verkeerd gekozen suggestie zou zelf als een impliciete aanbeveling gelezen kunnen worden.
+
+**`client/src/challenge.ts`:** `readSpendThresholdLamports()` toegevoegd. De offset-tag-walk
+die `readActionNonce()` al deed voor `recovery_state`/`deposit_authority` (twee
+`Option<T>`-velden, Borsh codeert `None` als 1 tagbyte, dus geen vast offset mogelijk) is
+verplaatst naar een gedeelde `offsetAfterDepositAuthority()` - `readSpendThresholdLamports()`
+hergebruikt die en telt er zelf `action_nonce`(8) + `session_epoch`(8) bovenop op, in plaats
+van de tag-walk een tweede keer te herhalen.
+
+**`client/src/main.ts`:** `readSpendThresholdLamports()` + `renderThresholdBanner()` worden
+één keer aangeroepen, direct na een succesvolle `runStep2()` (wallet-load) - hetzelfde moment
+waarop de step 3-6-knoppen worden vrijgegeven.
+
+**Tests (`tests/thresholdBanner.ts`, nieuw), twee delen:**
+- Pure logica (`formatSolExact`, `thresholdBannerState`), geen DOM, geen validator: 6 tests -
+  hele/fractionele SOL-bedragen zonder precisie-overclaim (geen afronding, alleen echt
+  niet-nul decimalen), `threshold == 0` geeft `showNudge = true` met niet-lege
+  headline/body/statusregel, `threshold > 0` geeft `showNudge = false` met een lege
+  headline/body maar een NIET-lege statusregel (punt 4 uit sectie 127: een eigenaar die niet
+  weet wat zijn drempel is, kan een weigering niet beoordelen - de statusregel is dus ALTIJD
+  relevant, onafhankelijk van `showNudge`), en beide varianten bevatten de scope-disclaimer
+  (alleen SOL via `execute`/`hunt`).
+- DOM-effectkant (`renderThresholdBanner`), tegen een **jsdom**-gesimuleerde `document` - zie
+  hieronder waarom jsdom i.p.v. een handmatige controle: 4 tests, elk empirisch bewezen, niet
+  aangenomen -
+  1. `threshold = 0`: `#threshold-nudge` bevat de banner met exact de headline/body-tekst uit
+     `thresholdBannerState(0n)`, `#threshold-status` toont de statusregel.
+  2. `threshold > 0`: `#threshold-nudge.innerHTML === ""` (geen banner-markup achtergebleven),
+     `#threshold-status` bevat het `formatSolExact`-bedrag.
+  3. Idempotentie, drie aanroepen op rij (`0n` → `1_000_000_000n` → `0n`): elke aanroep geeft
+     precies één banner-element (bij `threshold = 0`) of nul (bij `threshold > 0`) - nooit
+     stapelend, ook niet ná een root die al eerder gevuld is geweest. Dit was een aanname in
+     de doc-comment ("Idempotent... overschrijft de vorige staat i.p.v. te stapelen") die hier
+     voor het eerst daadwerkelijk getest wordt in plaats van alleen beweerd.
+  4. Een klik op de dismiss-knop (`dispatchEvent` van een echte jsdom `MouseEvent`) verwijdert
+     de banner volledig uit `#threshold-nudge`, zonder de statusregel te raken.
+
+**Waarom jsdom i.p.v. de oorspronkelijk geplande handmatige/visuele controle - een bewuste
+verbetering op het plan, geen noodgreep:** deze sessie begon met het voornemen om
+`renderThresholdBanner()` handmatig te verifiëren via de Claude-in-Chrome-browserextensie
+(threshold=0 → banner zichtbaar, threshold≠0 → alleen de statusregel). Die extensie bleek niet
+verbonden in deze omgeving. De keuze was toen niet "sla de stap over" of "neem een zwakkere
+DOM-stub-test met een handgeschreven schijn-`document`", maar: `jsdom` toevoegen als
+devDependency en een ECHTE, herbruikbare test schrijven die de daadwerkelijke browser-DOM-
+mechanica gebruikt (innerHTML-parsing, `querySelector`, `dispatchEvent` - geen handgeschreven
+stub die toevallig lijkt te werken). Dat is sterker dan de oorspronkelijke handmatige controle
+zou zijn geweest: een handmatige klik-door bewijst het gedrag precies één keer, voor één
+persoon, op één moment, en verdwijnt daarna weer uit de testdekking; deze jsdom-tests draaien
+voortaan bij elke `yarn test` mee en vangen een regressie in `renderThresholdBanner()` net zo
+hard af als elke andere test in de suite. Dit dicht bovendien exact het gat dat
+`thresholdBanner.ts`'s eigen doc-comment aanvankelijk vlagde ("`renderThresholdBanner()` - de
+DOM-effectkant, NIET automatisch getest") - die doc-comments zijn in dezelfde sessie
+bijgewerkt om de nieuwe testdekking te weerspiegelen, geen loze belofte meer.
+
+`jsdom`/`@types/jsdom` staan als devDependency in het root-`package.json` (niet in
+`client/package.json`) omdat ze uitsluitend bestaan om deze `tests/`-suite te kunnen draaien -
+zelfde indeling als `chai`/`mocha`/`ts-mocha` daarboven, niets dat de client zelf ooit bundelt
+of naar de browser stuurt.
+
+**Bewezen, niet beredeneerd:** `client/`'s `tsc --noEmit && vite build` - 0 typefouten, build
+succesvol. `yarn test` (volledige suite, incl. de 6 pure-logica- en 4 jsdom-DOM-tests
+hierboven): **96 passing / 36 pending (verwachte skips) / 0 failing**. `yarn test:pending-action`
+(ongewijzigd door deze sessie, als regressiecontrole opnieuw gedraaid): **34 passing / 0
+failing**. Geen `StaleActionNonce` in geen van beide runs.
+
+**Status: de client-banner uit sectie 128's "nog niet gedaan"-lijst is nu gebouwd, bewezen en
+aangesloten.** Nog steeds bewust niet gebouwd (ongewijzigd t.o.v. sectie 127/128): een
+daadwerkelijke client-ingang (knop/route) naar `initiate_threshold_change`/
+`finalize_threshold_change`, de beslissing over `transfer_token`/`execute_advanced` (sectie
+127, punt 3), en de cumulatieve glijdende-vensterlimiet over meerdere transacties (stap B).

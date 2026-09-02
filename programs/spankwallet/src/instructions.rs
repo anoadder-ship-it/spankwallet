@@ -814,12 +814,22 @@ pub struct TransferToken<'info> {
 /// zelfde ontwerpprincipe - gesloten, expliciet, geen generieke CPI. Dekt
 /// automatisch elke SPL-token (zBTC, BTCSOL, USDC, etc.) zonder per-munt-
 /// configuratie, zie STATUS.md sectie 27.
+///
+/// PERMANENT GEBLOKKEERD voor directe aanroep sinds STATUS.md sectie 131
+/// (vervolg op sectie 115/127-130): geen betrouwbare vergelijking tussen
+/// een lamport-drempel en een willekeurig SPL-tokenbedrag, dus geen
+/// sentinel-uitweg zoals execute/hunt die hebben - altijd via
+/// initiate_token_transfer/finalize_token_transfer. Onvoorwaardelijk, als
+/// EERSTE statement, vóór elke andere check - geen enkel bedrag of
+/// argument maakt hier ooit uitzondering op.
 pub fn transfer_token(
     ctx: Context<TransferToken>,
     amount: u64,
     client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
+    require!(false, SpankWalletError::TransferMustUseQueue);
+
     let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
 
     // B6 (STATUS.md sectie 76, statische-audit-bevinding): vault_token_account
@@ -1139,12 +1149,21 @@ pub struct ExecuteAdvanced<'info> {
 /// een onderschepte handtekening is uitsluitend geldig voor precies deze
 /// ene, volledig gespecificeerde CPI-aanroep, niet voor iets anders tegen
 /// hetzelfde toegestane programma.
+///
+/// PERMANENT GEBLOKKEERD voor directe aanroep sinds STATUS.md sectie 131
+/// (vervolg op sectie 115/127-130): een willekeurige CPI naar een extern
+/// programma is nog minder vergelijkbaar met een lamport-drempel dan een
+/// tokenbedrag - geen sentinel-uitweg, altijd via
+/// initiate_advanced_action/finalize_advanced_action. Onvoorwaardelijk,
+/// als EERSTE statement.
 pub fn execute_advanced<'info>(
     ctx: Context<'info, ExecuteAdvanced<'info>>,
     cpi_instruction_data: Vec<u8>,
     client_action_nonce: u64,
     client_data_json: Vec<u8>,
 ) -> Result<()> {
+    require!(false, SpankWalletError::AdvancedActionMustUseQueue);
+
     let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
     let cpi_program_id = ctx.accounts.cpi_program.key();
 

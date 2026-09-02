@@ -191,4 +191,25 @@ pub enum SpankWalletError {
     // geconfigureerd", geen letterlijke bovengrens, zie sectie 127.
     #[msg("Dit bedrag ligt boven spend_threshold_lamports - gebruik initiate_withdrawal om het via de wachtrij te laten verlopen")]
     AmountExceedsInstantThreshold,
+
+    // Toegevoegd tijdens STATUS.md sectie 127-131 (vervolg op stap A): waar
+    // execute/hunt drempel=0 als sentinel-uitweg hadden (bestaand gedrag
+    // volledig ongewijzigd), bestaat zo'n uitweg hier NIET - er is geen
+    // betrouwbare vergelijking tussen een lamport-drempel en een
+    // willekeurig SPL-tokenbedrag of ondoorzichtige CPI-instructiedata
+    // (sectie 115). transfer_token weigert daarom ONVOORWAARDELIJK, altijd,
+    // ongeacht bedrag - een harde knip, geen geleidelijke overgang. Raakt
+    // NIET transfer_token_via_session (bewust gedupliceerde, losstaande
+    // implementatie met een eigen autorisatiepad via sessiesleutels, zie
+    // sectie 131).
+    #[msg("transfer_token is permanent geblokkeerd voor directe aanroep - gebruik initiate_token_transfer/finalize_token_transfer")]
+    TransferMustUseQueue,
+
+    // Zelfde onvoorwaardelijke redenering als TransferMustUseQueue
+    // hierboven, voor execute_advanced - een willekeurige CPI naar een
+    // extern programma is nog minder vergelijkbaar met een lamport-drempel
+    // dan een tokenbedrag. Raakt NIET execute_advanced_via_session (zelfde
+    // reden als hierboven).
+    #[msg("execute_advanced is permanent geblokkeerd voor directe aanroep - gebruik initiate_advanced_action/finalize_advanced_action")]
+    AdvancedActionMustUseQueue,
 }

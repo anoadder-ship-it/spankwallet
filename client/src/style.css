@@ -203,3 +203,66 @@ button:disabled { background: #333; cursor: not-allowed; color: #777; }
   position: relative;
   z-index: 1;
 }
+
+/* ---------------------------------------------------------------------
+   Spend-threshold-indicator (STATUS.md sectie 127/128/129, stap A) - los
+   van de preview-* familie hierboven (die is voor een bevestigingskaart
+   die op een klik/hold wacht vóór er getekend wordt; dit hier tekent
+   nooit iets, is puur informatief). Zelfde lichte-eiland-op-donkere-
+   achtergrond-aesthetiek als .preview-card, voor visuele consistentie
+   binnen fase 1, maar een eigen klasse - geen gedeeld gedrag met de
+   bevestigingskaart, dus geen gedeelde klasse.
+   --------------------------------------------------------------------- */
+
+#threshold-status:empty { display: none; }
+#threshold-status {
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 12px;
+  color: #999;
+  border-left: 3px solid #333;
+  padding: 6px 10px;
+  margin: 12px 0;
+}
+
+#threshold-nudge:empty { display: none; }
+
+.threshold-nudge-banner {
+  position: relative;
+  background: #fbfaf7;
+  color: #1c2321;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -12px rgba(0, 0, 0, 0.5);
+  padding: 18px 40px 18px 20px;
+  margin: 20px 0;
+  max-width: 560px;
+  border-left: 4px solid #93602a;
+}
+
+.threshold-nudge-headline {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.threshold-nudge-body {
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #3a423e;
+}
+
+.threshold-nudge-dismiss {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  background: transparent;
+  border: none;
+  color: #6b7570;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+  margin: 0;
+}
+.threshold-nudge-dismiss:hover { color: #1c2321; background: transparent; }

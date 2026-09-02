@@ -36,6 +36,8 @@ import { showRemoveAllowedProgramPreview } from "./removeAllowedProgramPreview";
 import { showRemoveSessionKeyPreview } from "./removeSessionKeyPreview";
 import { showCancelRecoveryPreview } from "./cancelRecoveryPreview";
 import { showHuntPreview } from "./huntPreview";
+import { readSpendThresholdLamports } from "./challenge";
+import { renderThresholdBanner } from "./thresholdBanner";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -222,6 +224,9 @@ async function runStep2(): Promise<void> {
     log("Account-grootte: " + accountInfo.data.length + " bytes");
     log("");
     log("Klaar voor stap 3, 4 en/of 5.");
+
+    const spendThreshold = await readSpendThresholdLamports(connection, pdas.walletPda);
+    renderThresholdBanner(spendThreshold);
 
     (document.getElementById("step3-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step4-btn") as HTMLButtonElement).disabled = false;

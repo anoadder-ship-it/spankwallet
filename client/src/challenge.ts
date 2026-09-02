@@ -82,12 +82,12 @@ export function actionNonceLeBytes(nonce: bigint): Uint8Array {
 
 // discriminator(8)+seed_key(33)+wallet_seed_hash(32)+owner_passkey(33)+bump(1)
 // +vault_bump(1)+created_at(8)+backup_authority(32) - vaste prefix vóór het
-// eerste variabele-lengte veld (recovery_state), zie readActionNonce.
+// eerste variabele-lengte veld (recovery_state), zie offsetAfterDepositAuthority.
 const OFFSET_RECOVERY_STATE_TAG = 148;
 const RECOVERY_STATE_LEN = 41; // initiated_at(8) + new_owner_passkey(33), zonder de 1-byte Option-tag
 
 /**
- * Leest WalletAccount.action_nonce - het LAATSTE veld, NA twee Option<T>-
+ * Berekent het offset van WalletAccount.action_nonce - NA twee Option<T>-
  * velden (recovery_state, deposit_authority). Borsh codeert Option::None als
  * exact 1 tagbyte, NIET als de "maximale" ruimte - een vast offset vanaf het
  * begin van het account werkt dus NIET zodra recovery_state/
@@ -96,17 +96,13 @@ const RECOVERY_STATE_LEN = 41; // initiated_at(8) + new_owner_passkey(33), zonde
  * als recovery.ts al voor recovery_state deed - empirisch bevestigd nodig
  * tijdens het bouwen van de C-1-fix-tests (STATUS.md sectie 69): een naief
  * vast offset gaf stil een verkeerde (altijd-0) nonce terug.
+ *
+ * GECORRIGEERD (STATUS.md sectie 129): action_nonce is NIET meer het
+ * laatste veld sinds sectie 115/116 - session_epoch, spend_threshold_lamports
+ * en disarmed volgen erna. Gedeeld met readSpendThresholdLamports hieronder
+ * i.p.v. de tag-walk daar te herhalen.
  */
-export async function readActionNonce(
-  connection: Connection,
-  walletPda: PublicKey
-): Promise<bigint> {
-  const accountInfo = await connection.getAccountInfo(walletPda, "confirmed");
-  if (!accountInfo) {
-    throw new Error("WalletAccount " + walletPda.toBase58() + " bestaat niet");
-  }
-  const data = accountInfo.data;
-
+function offsetAfterDepositAuthority(data: Buffer): number {
   let offset = OFFSET_RECOVERY_STATE_TAG;
   const recoveryStateTag = data[offset];
   offset += 1;
@@ -115,6 +111,36 @@ export async function readActionNonce(
   const depositAuthorityTag = data[offset];
   offset += 1;
   if (depositAuthorityTag === 1) offset += 32; // Pubkey
+  return offset; // = offset van action_nonce
+}
 
+export async function readActionNonce(
+  connection: Connection,
+  walletPda: PublicKey
+): Promise<bigint> {
+  const accountInfo = await connection.getAccountInfo(walletPda, "confirmed");
+  if (!accountInfo) {
+    throw new Error("WalletAccount " + walletPda.toBase58() + " bestaat niet");
+  }
+  return accountInfo.data.readBigUInt64LE(offsetAfterDepositAuthority(accountInfo.data));
+}
+
+/**
+ * Leest WalletAccount.spend_threshold_lamports (STATUS.md sectie 127/128/
+ * 129, stap A) - action_nonce(8) + session_epoch(8) ná
+ * offsetAfterDepositAuthority(), geen Option, dus geen verdere tag-checks
+ * nodig. `0n` (de fail-safe default sinds sectie 115) betekent hier
+ * expliciet "geen drempel geconfigureerd", zie thresholdBanner.ts.
+ */
+export async function readSpendThresholdLamports(
+  connection: Connection,
+  walletPda: PublicKey
+): Promise<bigint> {
+  const accountInfo = await connection.getAccountInfo(walletPda, "confirmed");
+  if (!accountInfo) {
+    throw new Error("WalletAccount " + walletPda.toBase58() + " bestaat niet");
+  }
+  const data = accountInfo.data;
+  const offset = offsetAfterDepositAuthority(data) + 8 /* action_nonce */ + 8 /* session_epoch */;
   return data.readBigUInt64LE(offset);
 }

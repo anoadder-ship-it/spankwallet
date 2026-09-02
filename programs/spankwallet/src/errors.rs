@@ -168,6 +168,14 @@ pub enum SpankWalletError {
     #[msg("Dit bedrag zou de cumulatieve bestedingslimiet van het huidige glijdende venster overschrijden - gebruik initiate_withdrawal in plaats daarvan")]
     SpendWindowExceeded,
 
+    // Toegevoegd tijdens STATUS.md sectie 132/133/134 (stap B, stap c):
+    // zelfde patroon als SessionSpendOverflow - checked_add faalt in de
+    // praktijk alleen bij een astronomisch grote spent_lamports_this_window
+    // (nabij u64::MAX), maar de optelling mag nooit stilzwijgend
+    // overlopen/paniekeren.
+    #[msg("Onverwachte overflow bij het optellen van het bedrag binnen het huidige glijdende venster")]
+    SpendWindowOverflow,
+
     // Toegevoegd tijdens sectie 118 (stap 4, initiate_withdrawal) - ontbrak
     // in de oorspronkelijke lijst van zeven uit sectie 117: nodig om sectie
     // 115 punt 1's eigen eis af te dwingen ("controleer of dit bedrag

@@ -650,20 +650,23 @@ pub struct Execute<'info> {
     )]
     pub vault: Account<'info, VaultAccount>,
 
-    /// CHECK: STATUS.md sectie 132/133 (stap B) - de glijdende-
-    /// vensterlimiet-teller. UncheckedAccount, GEEN `Account<SpendWindow>`:
-    /// bestaat niet voor een wallet die nog nooit een drempel heeft gezet
-    /// (alle zeventien bestaande wallets vandaag) - een strak-getypeerd
-    /// account zou Anchors automatische deserialisatie daar laten falen,
-    /// ongeacht wat de instructielogica zelf zou doen (exact de regressie
-    /// die sectie 128 vermeed voor stap A). seeds/bump garanderen dat dit
-    /// altijd EXACT de SpendWindow-PDA van DEZE wallet is, nooit een ander
-    /// account. UITSLUITEND de accountlijst-uitbreiding hier - er wordt
-    /// nog niets gelezen of geschreven (stap c bouwt de daadwerkelijke
-    /// rollover-/optel-/cap-logica); voor drempel=0-wallets blijft het
-    /// gedrag van `execute` hierna exact ongewijzigd, bewezen in
-    /// tests/spendWindow.ts.
+    /// CHECK: STATUS.md sectie 132/133/134 (stap B, stap c) - de
+    /// glijdende-vensterlimiet-teller. UncheckedAccount, GEEN
+    /// `Account<SpendWindow>`: bestaat niet voor een wallet die nog nooit
+    /// een drempel heeft gezet (alle zeventien bestaande wallets bij
+    /// stap B) - een strak-getypeerd account zou Anchors automatische
+    /// deserialisatie daar laten falen, ongeacht wat de instructielogica
+    /// zelf zou doen (exact de regressie die sectie 128 vermeed voor stap
+    /// A). seeds/bump garanderen dat dit altijd EXACT de SpendWindow-PDA
+    /// van DEZE wallet is, nooit een ander account. Uitsluitend
+    /// gelezen/geschreven binnen de `spend_threshold_lamports > 0`-poort
+    /// hieronder (`load_spend_window`/`apply_spend_window`/
+    /// `write_spend_window`) - voor drempel=0-wallets blijft het gedrag
+    /// van `execute` exact ongewijzigd, bewezen in tests/spendWindow.ts.
+    /// `mut`: `write_spend_window` schrijft de bijgewerkte staat terug
+    /// zodra de poort open is.
     #[account(
+        mut,
         seeds = [b"spend_window", wallet.key().as_ref()],
         bump,
     )]
@@ -737,11 +740,26 @@ pub fn execute(
     // aantoonbaar niets aanraken. Samen met initiate_withdrawal's
     // AmountEligibleForInstantExecute-check partitioneert dit het
     // volledige bedragbereik zodra een drempel actief is.
+    // STATUS.md sectie 132/133/134 (stap B, stap c): dezelfde
+    // spend_threshold_lamports > 0-poort als de per-transactie-check
+    // hierboven (sectie 132 vraag 1 - geen apart venstersentinel, één
+    // wallet-brede "instant-pad-bescherming actief"-schakelaar). Zodra
+    // deze poort open is, bestaat spend_window GEGARANDEERD al
+    // (finalize_threshold_change maakt 'm atomisch aan zodra de drempel
+    // voor het eerst > 0 wordt) - vandaar de niet-tolerante load. Reset-
+    // dan-optellen (vraag 5), tegen dezelfde SpendWindow-teller als hunt
+    // hieronder (vraag 3 - één gedeeld venster voor beide instant-paden).
     if ctx.accounts.wallet.spend_threshold_lamports > 0 {
         require!(
             amount <= ctx.accounts.wallet.spend_threshold_lamports,
             SpankWalletError::AmountExceedsInstantThreshold
         );
+
+        let spend_window_ai = ctx.accounts.spend_window.to_account_info();
+        let mut spend_window = load_spend_window(&spend_window_ai)?;
+        let clock = Clock::get()?;
+        apply_spend_window(&mut spend_window, amount, clock.unix_timestamp)?;
+        write_spend_window(&spend_window_ai, &spend_window)?;
     }
 
     // Directe lamport-manipulatie i.p.v. een System-Program-CPI: de vault is
@@ -1290,11 +1308,14 @@ pub struct Hunt<'info> {
         bump = wallet.vault_bump,
     )]
     pub vault: Account<'info, VaultAccount>,
-    /// CHECK: STATUS.md sectie 132/133 (stap B) - zelfde uitleg als
-    /// Execute::spend_window hierboven (UncheckedAccount, geen
-    /// gedragswijziging voor drempel=0-wallets, uitsluitend de
-    /// accountlijst-uitbreiding, nog geen rollover-/optel-/cap-logica).
+    /// CHECK: STATUS.md sectie 132/133/134 (stap B, stap c) - zelfde
+    /// uitleg als Execute::spend_window hierboven (UncheckedAccount, geen
+    /// gedragswijziging voor drempel=0-wallets, gelezen/geschreven tegen
+    /// `to_user` i.p.v. `reclaimed`, zelfde reden als
+    /// AmountExceedsInstantThreshold hieronder). `mut`: zelfde reden als
+    /// Execute::spend_window.
     #[account(
+        mut,
         seeds = [b"spend_window", wallet.key().as_ref()],
         bump,
     )]
@@ -1423,11 +1444,23 @@ pub fn hunt(
     // aantoonbaar niets aanraken - de burn/close-CPI's hierboven draaiden
     // dan wel al, maar Solana se transactie-atomiciteit rolt die net zo
     // goed terug als de rest van deze instructie faalt.
+    // STATUS.md sectie 132/133/134 (stap B, stap c): zelfde
+    // spend_threshold_lamports > 0-poort en dezelfde SpendWindow-teller
+    // als execute hierboven (sectie 132 vraag 3 - één gedeeld venster voor
+    // beide instant-paden), getoetst tegen `to_user` om dezelfde reden als
+    // de AmountExceedsInstantThreshold-check hierboven (niet `reclaimed`,
+    // niet `to_incinerator`).
     if ctx.accounts.wallet.spend_threshold_lamports > 0 {
         require!(
             to_user <= ctx.accounts.wallet.spend_threshold_lamports,
             SpankWalletError::AmountExceedsInstantThreshold
         );
+
+        let spend_window_ai = ctx.accounts.spend_window.to_account_info();
+        let mut spend_window = load_spend_window(&spend_window_ai)?;
+        let clock = Clock::get()?;
+        apply_spend_window(&mut spend_window, to_user, clock.unix_timestamp)?;
+        write_spend_window(&spend_window_ai, &spend_window)?;
     }
 
     // Directe lamport-herverdeling, geen System-Program-CPI: de vault is
@@ -1536,24 +1569,63 @@ const WINDOW_DURATION_SECONDS: i64 = 24 * 60 * 60;
 #[cfg(feature = "test-fast-spend-window")]
 const WINDOW_DURATION_SECONDS: i64 = 3;
 
-/// STATUS.md sectie 132/133 (stap B): pure vergelijking, nog NERGENS
-/// aangeroepen (stap c bouwt de echte aanroepplek in execute/hunt) -
-/// `#[allow(dead_code)]` totdat dat gebeurt. Bewust GEEN marker-aanroep
-/// hier (zie finalize_threshold_change hieronder voor waarom): een
-/// empirische test tijdens het bouwen van deze sectie bewees dat een
-/// private functie die NERGENS aangeroepen wordt haar
-/// `#[cfg(...)] msg!()`-marker NIET behoudt in het gecompileerde .so - de
-/// linker snoeit 'm weg, ondanks dat de marker geen `#[used]`-static is
-/// (twee losse builds, met/zonder `test-fast-spend-window`,
-/// `verify-no-test-features-in-binary.ts` gaf in BEIDE gevallen "OK, geen
-/// marker" - fout voor de mét-feature-build). Dit is een ANDER
-/// stripgedrag dan sectie 124's `#[used]`-probleem (dat ging over
-/// EI_OSABI/SHF_GNU_RETAIN bij een geforceerd-behouden static) - hier gaat
-/// het om gewone, onvermijdelijke dead-code-eliminatie van een écht
-/// ongebruikte functie, geen linker-vlag-bijwerking.
-#[allow(dead_code)]
+/// STATUS.md sectie 132/133/134 (stap B/c): pure vergelijking, sinds stap
+/// c aangeroepen vanuit `apply_spend_window` hieronder (op zijn beurt
+/// aangeroepen vanuit `execute`/`hunt`). Zie sectie 133 voor de
+/// empirische reden waarom de test-feature-marker NIET hier staat maar in
+/// `finalize_threshold_change`: tijdens het bouwen van stap a (vóór deze
+/// functie een echte aanroeper had) bleek een marker in een op dat moment
+/// nog ongebruikte functie door de linker weggesnoeid te worden - een
+/// ANDER stripgedrag dan sectie 124's `#[used]`/`SHF_GNU_RETAIN`-probleem,
+/// gewone dead-code-eliminatie.
 fn spend_window_needs_reset(window_started_at: i64, now: i64) -> bool {
     now >= window_started_at.saturating_add(WINDOW_DURATION_SECONDS)
+}
+
+/// STATUS.md sectie 132/133/134 (stap B, stap c): niet-tolerante load -
+/// zelfde patroon als `load_session_account`, NIET `read_policy_account`'s
+/// tolerante `Option`-variant. SpendWindow is op elke aanroepplek
+/// (`execute`/`hunt`, binnen de `spend_threshold_lamports > 0`-poort)
+/// GEGARANDEERD al aangemaakt - `finalize_threshold_change` maakt het
+/// account atomisch aan zodra de drempel voor het eerst > 0 wordt (sectie
+/// 132 vraag 1) - "bestaat nog niet" is hier dus geen geldig scenario
+/// meer, wél een signaal dat er iets mis is.
+fn load_spend_window(account_info: &AccountInfo) -> Result<SpendWindow> {
+    let data = account_info.try_borrow_data()?;
+    SpendWindow::try_deserialize(&mut &data[..])
+}
+
+/// Tegenhanger van `load_spend_window` - zelfde schrijf-patroon als
+/// `write_session_account`.
+fn write_spend_window(account_info: &AccountInfo, spend_window: &SpendWindow) -> Result<()> {
+    let mut data = account_info.try_borrow_mut_data()?;
+    let mut writer: &mut [u8] = &mut data;
+    spend_window.try_serialize(&mut writer)
+}
+
+/// STATUS.md sectie 132/133/134 (stap B, stap c): de daadwerkelijke
+/// handhaving - reset-dan-optellen (sectie 132 vraag 5, de enige correcte
+/// volgorde, geen ontwerpkeuze: toetsen tegen een reeds-verlopen venster
+/// se opgebouwde totaal zou per definitie fout zijn). Muteert
+/// `spend_window` in-place; de aanroeper is zelf verantwoordelijk voor het
+/// terugschrijven (`write_spend_window`) - zelfde scheiding tussen
+/// berekenen en persisteren als elders in dit bestand (bijv.
+/// `consume_action_nonce`).
+fn apply_spend_window(spend_window: &mut SpendWindow, amount: u64, now: i64) -> Result<()> {
+    if spend_window_needs_reset(spend_window.window_started_at, now) {
+        spend_window.window_started_at = now;
+        spend_window.spent_lamports_this_window = 0;
+    }
+    let new_spent = spend_window
+        .spent_lamports_this_window
+        .checked_add(amount)
+        .ok_or(SpankWalletError::SpendWindowOverflow)?;
+    require!(
+        new_spent <= spend_window.window_total_cap_lamports,
+        SpankWalletError::SpendWindowExceeded
+    );
+    spend_window.spent_lamports_this_window = new_spent;
+    Ok(())
 }
 
 /// Sectie 115 punt 2b: de commitment bevat BEWUST geen nonce (die

@@ -4,7 +4,7 @@
 een nieuwe chatsessie. Legt vast waar we staan en waarom, zodat niets herhaald hoeft te
 worden.
 
-Laatst bijgewerkt: 2026-08-16 - **de echte canary-upgrade is uitgevoerd en definitief
+Laatst bijgewerkt: 2026-09-03 - **de echte canary-upgrade is uitgevoerd en definitief
 bevestigd** (sectie 57): SpankWallet's productieprogramma is voor het eerst succesvol
 geupgraded via de nieuwe 2-of-3 Squads-multisig, met on-chain bewijs tot op de byte
 geverifieerd (reproduceerbare build, geen aannames). De hele migratie-en-canary-saga
@@ -12,7 +12,7 @@ geverifieerd (reproduceerbare build, geen aannames). De hele migratie-en-canary-
 
 ---
 
-## Huidige staat (bijgewerkt: 2026-08-16)
+## Huidige staat (bijgewerkt: 2026-09-03)
 
 Deze sectie is de actuele samenvatting. De genummerde secties hieronder (inmiddels 50+)
 blijven het volledige, chronologische logboek - toegevoegd, nooit ingekort of

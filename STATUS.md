@@ -12463,3 +12463,127 @@ een daadwerkelijke client-ingang (knop/route) naar een van de vier `initiate_*`/
 paren (waaronder `initiate_threshold_change`/`finalize_threshold_change`, dat nu zowel de
 drempel als de venstercap zet) - het enige van de vier paren zonder client-UI, en het
 onderwerp van het vervolgstuk van dit traject.
+
+## 135. Sectie 99/115/134-vervolg: client-ingang voor initiate_threshold_change/
+finalize_threshold_change - stap 24/25, plus een bevinding over de devnet-versheid
+
+**Vooraf gecontroleerd, niet aangenomen: welk adres/programma spreekt de demopagina aan.**
+`client/src/programId.ts` wijst naar `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`, identiek
+aan `declare_id!()` in `lib.rs` - het echte, multisig-bestuurde devnet-adres (Squads V4, 2-of-3,
+72u-timelock, authority-PDA `89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`, sectie 42).
+`build-and-deploy.sh` swapt dit adres uitsluitend tijdelijk voor lokale-validator-builds en
+herstelt het altijd via zijn `trap`-mechanisme - geen driftrisico. De demopagina draait dus
+zonder speciale actie tegen de ECHTE 24-uurs-timelock, geen `test-fast-pending-timelock`-feature
+(`verify-no-test-features-in-binary.ts` controleert dat byte-niveau vóór elke devnet-buffer-build).
+
+**Nieuwe bevinding, relevant voor elke `initiate_*`/`finalize_*`-aanroep tegen devnet vandaag:**
+`solana program show 9ma6...` geeft `Last Deployed In Slot: 488465385` = **2026-08-26**. Git-
+geschiedenis laat zien dat het HELE spend-cap-mechanisme (`spend_threshold_lamports`,
+`PendingAction`, `SpendWindow`, en alle vier `initiate_*`/`finalize_*`/`cancel_action`-paren,
+inclusief `ThresholdChange`) voor het eerst gecommit is op **2026-08-30** (commits `a71e803`,
+`afe86bc`, `99187c0`) - vier dagen NA die deploy. Het live devnet-programma kent dit mechanisme
+dus nog helemaal niet: geen `spend_threshold_lamports`-veld, geen `PendingAction`-accounttype,
+`initiate_threshold_change` bestaat niet als instructie op de keten. Dit is ook het antwoord op
+de eerdere, in een afgebroken sessie geopperde vraag of sectie 127-134's execute/hunt-
+accountwijzigingen al live staan: zelfde oorzaak, zelfde antwoord - niets sinds 26 augustus is
+live. Verandert het bouwplan niet (de gecommitte bron is leidend), maar betekent wel: geen van
+de knoppen hieronder kon deze sessie ECHT tegen devnet getest worden, niet vanwege de 24u maar
+omdat de instructie zelf nog niet bestaat op het live programma - een devnet-upgrade via de
+multisig is sowieso nodig vóór er iets hiervan live te proberen valt.
+
+**De twee ontwerpvragen, beantwoord vóór er gebouwd werd:**
+1. *Invoervelden:* twee lege tekstvelden (drempel in SOL, venstercap in SOL) via de bestaande
+   `showConfirmationCard`, `defaultValue: ""` op beide - zelfde onderbouwing als sectie 132/127
+   punt 3: een richtwaarde suggereert een autoriteit die er niet is. Bewust HOOG-risicoklasse
+   (`tone:"danger"`, hold-to-confirm, zelfde tier als sectie 58/61's sleutelbeheer/allowlist/
+   execute_advanced) - niet expliciet gevraagd, maar `instructions.rs`'s eigen commentaar bij
+   deze instructie noemt precies deze dreiging (een gekaapte ceremonie kan de drempel in één
+   klap verhogen om daarna instant grote bedragen te laten passeren).
+2. *Herkenning van een terugkerend bezoek:* geen enkele clientside "ik heb net
+   geïnitieerd"-vlag. Eén gedeelde functie (`refreshThresholdChangeStatus()` in `main.ts`) leest
+   de `pending_action`-PDA (kind + `initiated_at` + `confirmed`) rechtstreeks van de keten en
+   voedt daarmee `thresholdChangePanelState()` (pure functie in `thresholdChangePanel.ts`) -
+   aangeroepen op precies drie momenten: ná wallet-load, ná een geslaagde initiate, ná een
+   geslaagde finalize/cancel. Een pagina-herlaad een dag later doorloopt zo letterlijk hetzelfde
+   codepad als "net geklikt".
+
+**Gebouwd, in de gevraagde volgorde:**
+- `client/src/thresholdChange.ts` (nieuw): PDA-derivatie (`derivePendingActionPda`), account-
+  reader (`readPendingAction`, alle zeven `PendingAction`-velden, offsets veld-voor-veld
+  uitgerekend tegen `state.rs`), en de drie transactiebouwers - `buildInitiateThresholdChange-
+  Transaction`, `buildFinalizeThresholdChangeTransaction`, `buildCancelActionTransaction` (kind-
+  agnostisch, punt 5). Discriminators (`initiate_threshold_change`, `finalize_threshold_change`,
+  `cancel_action`) zelf met `sha256("global:" + naam)[:8]` berekend EN geverifieerd tegen
+  `target/idl/spankwallet.json` - niet alleen "waarschijnlijk goed" aangenomen. Ook
+  `computeThresholdChangeCommitment()`, de exacte TS-tegenhanger van
+  `compute_threshold_change_commitment()` (Keccak-256, niet SHA-256 - geverifieerd via
+  `solana_keccak_hasher::hashv` in de Rust-import).
+- `client/src/spendWindow.ts` (uitgebreid): `readSpendWindow()` - nodig voor punt 4 (na succes de
+  daadwerkelijk op de keten geschreven waarden tonen, niet aannemen op basis van wat verstuurd
+  is).
+- `client/src/thresholdChangePanel.ts` (nieuw): `thresholdChangePanelState()` (pure) +
+  `renderThresholdChangePanel()` (DOM), zelfde tweedeling als `thresholdBanner.ts`. Vier staten:
+  `none` (initiate mag), `blocked-other` (een ANDER PendingAction-kind bezet de singleton-PDA al
+  - cancel_action kan die ook ontgrendelen, kind-agnostisch), `waiting` (timelock nog niet
+  verstreken - finalize-knop blijft zichtbaar maar disabled, punt 3: niet verborgen), `ready`
+  (finalize mag).
+- `client/src/thresholdChangeInitiatePreview.ts` / `thresholdChangeFinalizePreview.ts` (nieuw):
+  bevestigingskaarten voor stap 24/25, zelfde `confirmationCard.ts`-primitief als de rest van de
+  pagina.
+  - **Belangrijke correctie tijdens het bouwen:** `PendingAction` bewaart de drempel/venstercap-
+    waarden zelf NIET in platte tekst, alleen hun hash (`action_commitment`) - bij finalize (ook
+    bij een page-load zonder sessiegeheugen) moet de eigenaar de twee waarden dus OPNIEUW
+    invoeren. `thresholdChangeFinalizePreview.ts` verifieert dat lokaal (`computeThresholdChange-
+    Commitment()` vs. de vers gelezen on-chain commitment) IN de kaart z'n `validate()`, VOORDAT
+    er een passkey-ceremonie start - een mismatch geeft zo een directe kaartfout in plaats van
+    een pas na een doorlopen prompt ontdekte on-chain `PendingActionCommitmentMismatch`.
+  - Eerste ontwerp van `runStep25` verwees naar een niet-bestaand `pending.pendingSpendThreshold-
+    Lamports`-veld (aangenomen dat de waarden ergens uit het account terug te lezen zouden zijn)
+    - gevonden door `tsc --noEmit`, niet door het compileren over te slaan.
+- `client/src/main.ts`: `refreshThresholdChangeStatus()`, `runStep24`/`runStep25`/
+  `runCancelThresholdChange`, aangeroepen ná `runStep2`'s succesvolle `init_wallet` (naast de
+  bestaande `renderThresholdBanner`-aanroep).
+- `client/index.html`: knoppen 24 (initiate), 25 (finalize) en een losse cancel-knop, plus
+  `#threshold-change-status`. De verouderde claim in `thresholdBanner.ts`/`index.html` dat er
+  "nog geen knop" voor deze instructies bestaat, bijgewerkt.
+
+**Passkey-ceremonie bij finalize (punt 4, single-passkey- vs. 2-of-2-degradatie, sectie
+115/118):** `runStep25` leest `pending.confirmed`. `true` -> PASSKEY 1 (dezelfde als initiate)
+tekent ook finalize. `false` -> vereist PASSKEY 2 (stap 11/12); ontbreekt die, dan stopt de UI
+met een duidelijke melding in plaats van een gegarandeerd falende ceremonie te starten.
+
+**Gecompileerd en getest:**
+- `client/`: `tsc --noEmit` schoon, `vite build` schoon (301 modules, geen nieuwe waarschuwingen
+  t.o.v. de al-bestaande `bigint-buffer`-externalisatie).
+- `tests/thresholdChangePanel.ts` (nieuw, 12 tests): pure-logica-tests voor
+  `thresholdChangePanelState()` met een KUNSTMATIG TERUGGEDATEERDE `initiated_at` (`waiting` vs.
+  `ready`, plus de exacte `>=`-grens die `check_pending_action_finalizable` ook gebruikt) - GEEN
+  validator, GEEN devnet-wallet nodig. DOM-tests tegen jsdom (zelfde patroon als
+  `thresholdBanner.ts`) bewijzen dat de finalize-knop zichtbaar-maar-disabled blijft tijdens
+  `waiting` en pas bij `ready` enabled wordt, en dat een "terugkerend bezoek" (backdated
+  PendingAction, GEEN voorafgaande sessiestaat in de test) meteen in de juiste staat rendert.
+- `yarn test` (volledige suite, vanaf nul): **106 passing / 42 pending / 0 failing** (was 94
+  vóór dit werk - exact de 12 nieuwe `thresholdChangePanel`-tests erbij, niets anders veranderd,
+  geen regressie in de bestaande `thresholdBanner`-tests ondanks de tekstwijziging daar).
+
+**Wat WEL en NIET automatisch getest is - expliciet, niet verzwegen (punt 6):**
+- WEL bewezen: de paneel-staatslogica (none/blocked-other/waiting/ready), de exacte
+  24u-grens (`>=`), de discriminators (tegen de IDL), de commitment-berekening (impliciet - een
+  fout daar zou de eigen `bytesEqual`-check in de finalize-kaart laten falen bij een verder
+  correcte hertypte waarde, maar dat is nog niet apart met een test bewezen dat de client-kant
+  matcht met een ECHTE Rust-berekende commitment).
+- NIET bewezen deze sessie: elke daadwerkelijke on-chain aanroep (geen devnet-upgrade, zie
+  bevinding hierboven), en dus ook niet de 24-uurs-wachttijd zelf, noch de client-side
+  `computeThresholdChangeCommitment()` tegen een ECHTE, door het programma berekende
+  `action_commitment` (alleen tegen zichzelf getest, in de "terugkerend bezoek"-test hierboven
+  gebruikt de test dezelfde functie voor het lezen als sample-data - geen onafhankelijke
+  Rust-referentiewaarde zoals `tests/pendingAction.ts` dat wel voor de challenge-hash heeft).
+- **Open vraag voor de eigenaar (punt 6): hoe wil je het laatste stukje verifiëren - de
+  finalize-knop na een ECHTE dag wachten, tegen een ECHTE devnet-wallet?** Twee dingen moeten
+  daarvoor eerst gebeuren die buiten deze sessie liggen: (a) de devnet-multisig-upgrade die het
+  hele spend-cap-mechanisme live zet (bevinding hierboven), en (b) een keuze hoe de 24u zelf
+  overbrugd wordt - een losse, korte test-only-run met `test-fast-pending-timelock` bewijst de
+  instructie-logica (zoals `tests/pendingAction.ts` al doet) maar niet de UI-knop-na-een-dag-
+  ervaring zelf; die laatste vereist ofwel een sessie die daadwerkelijk 24 uur later terugkeert,
+  ofwel het lokaal (niet in de browser) manipuleren van de systeemklok tegen een lokale
+  validator - allebei met eigen nadelen die ik liever met je bespreek dan zelf stilzwijgend kies.

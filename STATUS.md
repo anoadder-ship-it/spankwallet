@@ -12666,21 +12666,15 @@ active-defense's eigen STATUS.md al expliciet genoteerd als "wegwerp, geen actie
 het echte programma-adres geworden). Onschadelijk, geen secret van betekenis, maar overbodig -
 kan weg zodra iemand dat bevestigt.
 
-**`active-defense` (`/home/michel/projects/active-defense`) is NIET synchroon - apart
-bespreken bij terugkomst, hier bewust niet zelf opgelost:**
-- 7 lokale commits nog niet gepusht (`git rev-list --left-right --count HEAD...origin/main` =
-  `7 0` - puur voor, geen divergentie/geen dubbel werk, dus een gewone `git push` zou
-  volstaan, maar niet zelf uitgevoerd zonder expliciet akkoord voor DIE repo in deze sessie).
-- Daarbovenop ongecommit: `STATUS.md` (een nieuwe sectie 31, OBP-analyse), `notes/obp-analysis.md`
-  (untracked), en `.obp-staging/programs/obp-core/` (untracked, een volledig geschreven Anchor-
-  programma - mint/checkin/vault/init/allowance/crypto/state, laatste wijziging
-  2026-09-03 13:13). **Tegenstrijdigheid gevonden:** die STATUS.md-sectie-31-tekst zegt zelf
-  "Geen code gebouwd; puur analyse" - maar `.obp-staging/` bevat wel degelijk een uitgewerkt
-  programma. Er bestaat ook al een eigen, toegewijde repo hiervoor
-  (`/home/michel/projects/offline-bearer-protocol`, met bijna identieke
-  `programs/obp-core/`-inhoud) - die repo is ZELF ook dirty (ongecommitte wijzigingen aan
-  `errors.rs`/`lib.rs`/`state.rs`, `instructions.rs` verwijderd t.o.v. een nieuwe
-  `instructions/`-map). Sterk vermoeden: `.obp-staging/` in active-defense is een achtergebleven
-  kopieerplek van dit werk, niet de bedoelde eindbestemming - maar dat is een aanname, geen
-  bevestigd feit. **Niet zelf beslist welke van de twee repo's leidend is of wat er met de
-  ongecommitte inhoud moet gebeuren - dat wacht op Michel.**
+**`active-defense` (`/home/michel/projects/active-defense`) - de 7 commits zijn inmiddels
+GEPUSHT, de rest blijft bewust onaangeroerd:**
+- De 7 lokale commits die bij het schrijven van deze sectie nog openstonden zijn op expliciet
+  verzoek gepusht en bevestigd: `git fetch origin main` + `git rev-parse HEAD`/`origin/main` →
+  beide `3a1380d68694b7eaa2814c6bad4c01e67c8cb5ca`, `git status` toont "up to date with
+  origin/main". Synchroon in beide richtingen.
+- **`.obp-staging/programs/obp-core/`, `notes/obp-analysis.md`, en de ongecommitte
+  STATUS.md-sectie-31-wijziging blijven volledig onaangeroerd, op expliciet verzoek.** Het
+  vermoeden hierboven (dat `.obp-staging` een achtergebleven kopieerplek zou zijn) is NIET
+  verder onderzocht en dus geen bevestigd feit - alleen wat hierboven al stond. OBP en de
+  aparte `offline-bearer-protocol`-repo zijn een apart, later project; geen onderdeel van deze
+  overdracht. Bij terugkomst: eerst met Michel bespreken vóór hier iets mee gebeurt.

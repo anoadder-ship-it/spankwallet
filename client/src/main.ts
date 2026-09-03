@@ -32,6 +32,18 @@ import { showCancelRecoveryPreview } from "./cancelRecoveryPreview";
 import { showHuntPreview } from "./huntPreview";
 import { readSpendThresholdLamports } from "./challenge";
 import { renderThresholdBanner } from "./thresholdBanner";
+import { showThresholdChangeInitiatePreview } from "./thresholdChangeInitiatePreview";
+import { showThresholdChangeFinalizePreview } from "./thresholdChangeFinalizePreview";
+import {
+  derivePendingActionPda,
+  readPendingAction,
+  buildInitiateThresholdChangeTransaction,
+  buildFinalizeThresholdChangeTransaction,
+  buildCancelActionTransaction,
+  PENDING_ACTION_TIMELOCK_SECONDS,
+} from "./thresholdChange";
+import { thresholdChangePanelState, renderThresholdChangePanel } from "./thresholdChangePanel";
+import { readSpendWindow } from "./spendWindow";
 import {
   derivePasskeysPda,
   readPasskeysAccount,
@@ -95,6 +107,22 @@ let lastSessionExpirySlot: bigint | null = null;
 // VITE_HELIUS_API_KEY=<sleutel>.
 const HELIUS_API_KEY = import.meta.env.VITE_HELIUS_API_KEY ?? "f39fc413-6730-4848-a60f-a6685a6f04d3";
 const connection = new Connection(`https://devnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, "confirmed");
+
+/**
+ * STATUS.md sectie 135: DE ENE plek die bepaalt wat stap 24/25's paneel
+ * toont. Leest de pending_action-PDA VERS van de keten en rendert
+ * daaruit - geen aparte "ik heb net initiate_threshold_change aangeroepen"
+ * -vlag in de client. Aangeroepen ná wallet-load EN ná elke geslaagde
+ * initiate/finalize/cancel - een pagina-herlaad een dag later doorloopt
+ * daarmee exact hetzelfde codepad als "net geklikt" (ontwerpvraag 2).
+ */
+async function refreshThresholdChangeStatus(): Promise<void> {
+  if (!lastPdas) return;
+  const pendingActionPda = derivePendingActionPda(lastPdas.walletPda);
+  const pending = await readPendingAction(connection, pendingActionPda);
+  const state = thresholdChangePanelState(pending, Math.floor(Date.now() / 1000));
+  renderThresholdChangePanel(state);
+}
 
 async function runStep1(): Promise<void> {
   log("Stap 1: passkey aanmaken via navigator.credentials.create()...");
@@ -228,6 +256,13 @@ async function runStep2(): Promise<void> {
     (document.getElementById("step8-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step11-btn") as HTMLButtonElement).disabled = false;
     (document.getElementById("step16-btn") as HTMLButtonElement).disabled = false;
+    (document.getElementById("step24-btn") as HTMLButtonElement).disabled = false;
+    // Ontwerpvraag 2 (STATUS.md sectie 135): dit is ook het "terugkerend
+    // bezoek"-codepad, niet alleen "wallet net aangemaakt" - deze wallet is
+    // hier weliswaar altijd vers (init_wallet), maar refreshThresholdChangeStatus()
+    // zelf maakt geen onderscheid en zou een al bestaande PendingAction net zo
+    // goed oppikken.
+    await refreshThresholdChangeStatus();
   } catch (err) {
     log("");
     log("FOUT:");
@@ -2026,6 +2061,257 @@ async function runStep23(): Promise<void> {
   }
 }
 
+async function runStep24(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("Stap 24: initiate_threshold_change - nieuwe instant-drempel + venstercap voorstellen.");
+  log("STATUS.md sectie 99/115/134-vervolg (sectie 135): het laatste van de vier initiate_*/");
+  log("finalize_*-paren dat een client-ingang krijgt, en het paar dat de eigenaar daadwerkelijk");
+  log("moet gebruiken om het spend-cap-mechanisme te activeren (spend_threshold_lamports staat");
+  log("vandaag op 0). Start de ECHTE 24-uurs-timelock - stap 25 (finalize) is normaliter pas een");
+  log("dag later daadwerkelijk bruikbaar, geen versnelde testfeature.");
+  log("");
+  log("Menselijk-leesbare bevestigingskaart tonen - HOOG-risicoklasse (hold-to-confirm): dit");
+  log("bepaalt hoeveel een gekaapte ceremonie straks ONGEMERKT (instant, zonder wachtrij) zou");
+  log("kunnen verplaatsen. Geen voorgestelde bedragen (STATUS.md sectie 127 punt 3/132) - de");
+  log("eigenaar kiest zelf, zonder gesuggereerd anker.");
+  const choice = await showThresholdChangeInitiatePreview();
+  if (choice === null) {
+    log("Geweigerd in de bevestigingskaart - initiate_threshold_change NIET aangeroepen, geen passkey-prompt.");
+    return;
+  }
+  log(
+    "Bevestigd: nieuwe drempel=" + choice.newSpendThresholdLamports.toString() +
+      " lamports, nieuwe venstercap=" + choice.newWindowTotalCapLamports.toString() + " lamports."
+  );
+  log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+  try {
+    const { transaction, pendingActionPda } = await buildInitiateThresholdChangeTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      choice.newSpendThresholdLamports,
+      choice.newWindowTotalCapLamports,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+    log("pending_action PDA: " + pendingActionPda.toBase58());
+    log("");
+
+    log("Eigen simulatie...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    for (const line of simResult.value.logs ?? []) log("  " + line);
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    log("PendingAction opnieuw uitlezen (ruwe account-bytes) om de daadwerkelijke on-chain");
+    log("staat te tonen, niet aannemen op basis van wat verstuurd is...");
+    const pending = await readPendingAction(connection, pendingActionPda);
+    if (!pending) {
+      log("FOUT: pending_action bestaat niet na bevestigde initiate_threshold_change (onverwacht).");
+      return;
+    }
+    const initiatedAtDate = new Date(Number(pending.initiatedAt) * 1000);
+    const availableAtDate = new Date((Number(pending.initiatedAt) + PENDING_ACTION_TIMELOCK_SECONDS) * 1000);
+    log("kind=" + pending.kind + " (3 = ThresholdChange), initiated_at=" + pending.initiatedAt +
+      " (" + initiatedAtDate.toLocaleString() + ")");
+    log("finalize_threshold_change (stap 25) wordt beschikbaar vanaf: " + availableAtDate.toLocaleString());
+    log(
+      pending.confirmed
+        ? "confirmed=true: single-passkey-degradatie - dezelfde passkey mag straks ook finalize tekenen."
+        : "confirmed=false: 2-of-2 vereist - finalize moet met een ANDERE, tweede passkey getekend " +
+            "worden (stap 11/12 om die aan te maken/registreren, als dat nog niet gebeurd is)."
+    );
+    log("");
+    log("SUCCES - PendingAction aangemaakt. Stap 25's paneel hieronder toont nu de wachtstatus.");
+
+    await refreshThresholdChangeStatus();
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runStep25(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("Stap 25: finalize_threshold_change - de openstaande drempelwijziging bevestigen.");
+  log("Alleen mogelijk als de 24-uurs-wachttijd daadwerkelijk verstreken is (het paneel boven");
+  log("stap 24/25 toont de precieze staat) - een te vroege poging faalt on-chain met");
+  log("PendingActionTimelockNotElapsed, deze knop is bewust pas UI-enabled zodra dat niet meer kan.");
+  log("");
+
+  const pendingActionPda = derivePendingActionPda(lastPdas.walletPda);
+  const pending = await readPendingAction(connection, pendingActionPda);
+  if (!pending) {
+    log("Geen openstaande PendingAction - voer eerst stap 24 uit.");
+    return;
+  }
+
+  let signingPasskey: Uint8Array;
+  let signingCredentialId: Uint8Array;
+  if (pending.confirmed) {
+    log("confirmed=true: single-passkey-degradatie - PASSKEY 1 tekent ook finalize.");
+    signingPasskey = lastPasskeyPublicKey;
+    signingCredentialId = lastCredentialId;
+  } else {
+    log("confirmed=false: 2-of-2 vereist - finalize moet met een ANDERE, tweede passkey getekend");
+    log("worden dan initiate. Deze demopagina gebruikt daarvoor PASSKEY 2 (stap 11/12).");
+    if (!lastPasskeyPublicKey2 || !lastCredentialId2) {
+      log("FOUT: PASSKEY 2 is nog niet aangemaakt/geregistreerd (stap 11/12) - zonder een tweede,");
+      log("andere passkey wordt finalize on-chain geweigerd (SecondPasskeyMustDifferFromInitiator).");
+      log("Voer stap 11 en 12 uit en probeer het daarna opnieuw.");
+      return;
+    }
+    signingPasskey = lastPasskeyPublicKey2;
+    signingCredentialId = lastCredentialId2;
+  }
+
+  log("");
+  log("PendingAction slaat de drempel/venstercap-waarden zelf niet in platte tekst op, alleen hun");
+  log("hash (action_commitment) - opnieuw invoeren gevraagd, lokaal tegen de echte on-chain");
+  log("commitment geverifieerd VOORDAT er een passkey-ceremonie start.");
+  const choice = await showThresholdChangeFinalizePreview(lastPdas.walletPda, pending.actionCommitment);
+  if (choice === null) {
+    log("Geweigerd of ongeldig in de bevestigingskaart - finalize_threshold_change NIET aangeroepen,");
+    log("geen passkey-prompt.");
+    return;
+  }
+  log(
+    "Geverifieerd: drempel=" + choice.newSpendThresholdLamports.toString() +
+      " lamports, venstercap=" + choice.newWindowTotalCapLamports.toString() +
+      " lamports komt overeen met de openstaande wijziging."
+  );
+  log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+  try {
+    const { transaction, spendWindowPda } = await buildFinalizeThresholdChangeTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      pendingActionPda,
+      choice.newSpendThresholdLamports,
+      choice.newWindowTotalCapLamports,
+      signingPasskey,
+      signingCredentialId,
+      window.location.hostname
+    );
+    log("spend_window PDA: " + spendWindowPda.toBase58());
+    log("");
+
+    log("Eigen simulatie...");
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    for (const line of simResult.value.logs ?? []) log("  " + line);
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("");
+
+    log("WalletAccount/SpendWindow opnieuw uitlezen (ruwe account-bytes) om de daadwerkelijke");
+    log("on-chain waarden te tonen, niet aannemen op basis van wat verstuurd is...");
+    const newThreshold = await readSpendThresholdLamports(connection, lastPdas.walletPda);
+    const spendWindow = await readSpendWindow(connection, spendWindowPda);
+    log("spend_threshold_lamports (opnieuw gelezen): " + newThreshold.toString());
+    log(
+      "window_total_cap_lamports (opnieuw gelezen): " +
+        (spendWindow ? spendWindow.windowTotalCapLamports.toString() : "FOUT: spend_window bestaat niet")
+    );
+    log("");
+    log("SUCCES - finalize_threshold_change end-to-end bewezen.");
+    renderThresholdBanner(newThreshold);
+    await refreshThresholdChangeStatus();
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
+async function runCancelThresholdChange(): Promise<void> {
+  if (!lastPasskeyPublicKey || !lastCredentialId || !lastPdas || !lastWallet) {
+    log("Voer eerst stap 1 en stap 2 uit.");
+    return;
+  }
+  log("cancel_action - openstaande actie annuleren zodat een verkeerd ingevoerde waarde niet");
+  log("24 uur hoeft te blijven hangen (STATUS.md sectie 135, punt 5). Kind-agnostisch: sluit");
+  log("ELKE openstaande PendingAction, niet alleen ThresholdChange. Elke huidige geldige passkey");
+  log("mag annuleren, geen 2-of-2-eis.");
+  log("navigator.credentials.get() wordt aangeroepen - keur de biometrie-/PIN-prompt goed.");
+
+  const pendingActionPda = derivePendingActionPda(lastPdas.walletPda);
+  try {
+    const { transaction } = await buildCancelActionTransaction(
+      connection,
+      lastWallet.publicKey,
+      lastPdas.walletPda,
+      pendingActionPda,
+      lastPasskeyPublicKey,
+      lastCredentialId,
+      window.location.hostname
+    );
+
+    const simResult = await connection.simulateTransaction(transaction);
+    log("Simulatie err: " + JSON.stringify(simResult.value.err));
+    for (const line of simResult.value.logs ?? []) log("  " + line);
+    log("");
+    if (simResult.value.err) {
+      log("Simulatie faalde - stop hier.");
+      return;
+    }
+
+    log("Simulatie geslaagd. Transactie versturen (keur goed in je wallet-extensie)...");
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    const { signature } = await lastWallet.signAndSendTransaction(transaction);
+    log("Verstuurd. Signature: " + signature);
+    log("Wachten op bevestiging...");
+    await connection.confirmTransaction(signature, "confirmed");
+    log("Bevestigd.");
+    log("SUCCES - cancel_action end-to-end bewezen. Stap 24 kan opnieuw aangeroepen worden.");
+    await refreshThresholdChangeStatus();
+  } catch (err) {
+    log("");
+    log("FOUT:");
+    log(String(err));
+    console.error(err);
+  }
+}
+
 document.getElementById("start-btn")!.addEventListener("click", () => {
   document.getElementById("output")!.textContent = "";
   runStep1();
@@ -2090,4 +2376,13 @@ document.getElementById("step22-btn")!.addEventListener("click", () => {
 });
 document.getElementById("step23-btn")!.addEventListener("click", () => {
   runStep23();
+});
+document.getElementById("step24-btn")!.addEventListener("click", () => {
+  runStep24();
+});
+document.getElementById("step25-btn")!.addEventListener("click", () => {
+  runStep25();
+});
+document.getElementById("step25-cancel-btn")!.addEventListener("click", () => {
+  runCancelThresholdChange();
 });

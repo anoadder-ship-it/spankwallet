@@ -90,7 +90,11 @@
       7, 9, 10 ontbreken bewust: transfer_token en execute_advanced vereisen
       nu altijd de wachtrij (initiate_token_transfer/finalize_token_transfer,
       initiate_advanced_action/finalize_advanced_action) - deze demopagina
-      heeft daar nog geen UI voor, zie STATUS.md sectie 131.
+      heeft daar nog geen UI voor, zie STATUS.md sectie 131. Die twee paren
+      hebben nog steeds geen client-ingang - initiate_threshold_change/
+      finalize_threshold_change (stap 24/25 hieronder) is de EERSTE van de
+      vier initiate_*/finalize_*-paren die er wel een krijgt, zie STATUS.md
+      sectie 135.
     </p>
     <button id="step8-btn" disabled>8. add_allowed_program: System Program toevoegen</button>
     <button id="step11-btn" disabled>11. PASSKEY 2 aanmaken (tweede, onafhankelijke passkey)</button>
@@ -106,6 +110,18 @@
     <button id="step21-btn" disabled>21. remove_session_key: vroegtijdige intrekking (+ recovery-in-progress-weigering)</button>
     <button id="step22-btn" disabled>22. cancel_recovery: noodrem tegen een lopende recovery (+ geen-recovery-weigering)</button>
     <button id="step23-btn" disabled>23. hunt: spam-token opruimen (+ not-found-weigering) - laatste UI-fase-1-kaart</button>
+    <p>
+      24-25: initiate_threshold_change/finalize_threshold_change (STATUS.md sectie 99/115/134-
+      vervolg, sectie 135). Het vierde en laatste initiate_*/finalize_*-paar, en het paar dat de
+      eigenaar daadwerkelijk moet gebruiken om het spend-cap-mechanisme te activeren
+      (spend_threshold_lamports staat vandaag op 0). Gebruikt de ECHTE 24-uurs-timelock, geen
+      versnelde testfeature - stap 25 is normaliter pas een dag na stap 24 daadwerkelijk bruikbaar.
+      Geen voorgestelde bedragen in stap 24's velden - zie stap-24-log voor waarom.
+    </p>
+    <button id="step24-btn" disabled>24. initiate_threshold_change: nieuwe drempel + venstercap voorstellen</button>
+    <button id="step25-btn" disabled>25. finalize_threshold_change: bevestigen (pas na de 24u-wachttijd)</button>
+    <button id="step25-cancel-btn" disabled>Annuleer openstaande drempelwijziging (cancel_action)</button>
+    <div id="threshold-change-status"></div>
     <div id="preview-root"></div>
     <div id="threshold-nudge"></div>
     <div id="threshold-status"></div>

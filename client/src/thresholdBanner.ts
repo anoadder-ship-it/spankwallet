@@ -11,11 +11,10 @@
  *    validator nodig, wel een echte browser-DOM-implementatie) - wire dit
  *    één keer aan nadat de wallet geladen is.
  *
- * BEWUST GEEN link/knop naar initiate_threshold_change: die instructie
- * heeft vandaag geen client-flow (geen knop, geen CLI-route, geen
- * admin-paginaroute - alleen bewezen tegen een validator in
- * tests/pendingAction.ts). Een knop die naar niets leidt zou precies het
- * soort overclaim zijn dat deze banner juist moet vermijden.
+ * STATUS.md sectie 135: stap 24/25 (thresholdChange.ts/thresholdChangePanel.ts)
+ * geven initiate_threshold_change/finalize_threshold_change inmiddels wel
+ * een client-ingang - deze banner verwijst er sindsdien naar in plaats van
+ * te melden dat hij ontbreekt.
  */
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
@@ -72,9 +71,9 @@ export function thresholdBannerState(spendThresholdLamports: bigint): ThresholdB
         "(initiate_withdrawal/finalize_withdrawal) - bedragen erop of eronder blijven direct " +
         "gaan. " +
         SCOPE_DISCLAIMER +
-        " Dit testpagina biedt nog geen knop om een drempel te zetten - " +
-        "initiate_threshold_change/finalize_threshold_change zijn bewezen tegen een echte " +
-        "validator (STATUS.md sectie 125/128) maar hebben nog geen client-ingang.",
+        " Stap 24/25 hieronder zetten een nieuwe drempel/venstercap via " +
+        "initiate_threshold_change/finalize_threshold_change (STATUS.md sectie 135) - dat loopt " +
+        "via de echte 24-uurs-wachttijd, dus stap 25 is pas een dag na stap 24 bruikbaar.",
     };
   }
   return {

@@ -12587,3 +12587,100 @@ met een duidelijke melding in plaats van een gegarandeerd falende ceremonie te s
   ervaring zelf; die laatste vereist ofwel een sessie die daadwerkelijk 24 uur later terugkeert,
   ofwel het lokaal (niet in de browser) manipuleren van de systeemklok tegen een lokale
   validator - allebei met eigen nadelen die ik liever met je bespreek dan zelf stilzwijgend kies.
+
+## 136. Overdrachtsnotitie vóór een week afwezigheid (2026-09-03) - lees dit eerst bij terugkomst
+
+**Doel van deze sectie:** een sessie die over een week (rond 2026-09-10) hier voor het eerst
+weer binnenkomt, moet zonder herhaalde uitleg weten waar de vorige sessie gebleven is en wat
+open staat. Alles hieronder is met bewijs gecontroleerd (`git status`/`git fetch`/`solana
+balance`/`ps aux`), niet aangenomen.
+
+**Repo-status bij vertrek: schoon en synchroon.** `git status`: werkboom schoon, geen
+ongecommitte wijzigingen. `git fetch origin main` + `git rev-list --left-right --count
+HEAD...origin/main`: `0 0` - lokaal `HEAD` (`1e2395a51d44ebce4abb0feaf805b9dd513f0477`) is
+exact gelijk aan `origin/main`, in beide richtingen (niet alleen "voor", ook geen "achter" -
+er is dus niets vanaf een ander apparaat gepusht dat hier nog ontbreekt).
+
+**Inhoudelijke stand: sectie 99/115/134/135's spend-cap-traject is compleet in de broncode,
+maar NIET live op devnet.** Alle vier `initiate_*`/`finalize_*`-paren (incl. de sectie-135
+client-UI voor `initiate_threshold_change`/`finalize_threshold_change`, stap 24/25) zijn
+gebouwd en getest (`yarn test`: 106 passing / 42 pending / 0 failing). Maar: `solana program
+show 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9 --url devnet` geeft `Last Deployed In Slot:
+488465385` = 2026-08-26, terwijl het HELE spend-cap-mechanisme pas vanaf 2026-08-30 gecommit
+is (commits `a71e803`/`afe86bc`/`99187c0`). Het live devnet-programma kent
+`spend_threshold_lamports`/`PendingAction`/`SpendWindow` dus nog niet - stap 24/25 (en de
+andere drie paren) kunnen tegen de huidige devnet-wallets nog NIET echt uitgeprobeerd worden.
+
+**Twee dingen moeten gebeuren vóórdat dat wel kan, in deze volgorde:**
+1. Een devnet-programma-upgrade via de Squads-multisig (`A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp`,
+   2-of-3, 72u-timelock) - `scripts/build-devnet-buffer.sh` schrijft de buffer, daarna het
+   handmatige propose/approve/execute-pad via `admin/wallet-signer.html`.
+2. **Open vraag voor Michel (sectie 135, punt 6, nog onbeantwoord):** hoe de 24-uurs-
+   finalize-knop-ervaring zelf te verifiëren ná die upgrade - een losse
+   `test-fast-pending-timelock`-run bewijst de instructielogica (al gedaan,
+   `tests/pendingAction.ts`) maar niet de UI-knop-na-een-echte-dag-ervaring. Twee opties op
+   tafel, geen van beide al gekozen: (a) een sessie die er daadwerkelijk een dag later op
+   teruggekeerd, (b) lokaal de systeemklok manipuleren tegen een lokale validator.
+
+**Devnet-wallets: allemaal ruim voldoende gefund, geen actie nodig geweest.** Op verzoek
+("controleer en vul zo nodig aan") rechtstreeks gecontroleerd via `solana balance --url
+devnet` (2026-09-03) - alle zes relevante adressen lagen al ruim boven de gevraagde 5-10 SOL-
+marge, dus geen faucet-aanroepen gedaan:
+
+| Wallet | Adres | Saldo (devnet) |
+|---|---|---|
+| Buffer-fee-payer (`~/.config/solana/id.json`, gebruikt door `build-devnet-buffer.sh`) | `G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp` | 95.28 SOL |
+| Multisig-lid: telefoon (Solflare) | `CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3` | 9.03 SOL |
+| Multisig-lid: hoofd-pc (Phantom) | `3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3` | 35.25 SOL |
+| Multisig-lid: Windows-pc (Phantom/Edge) | `2jDzaP3FbW5583hb4FeGZVU9MYseqBeFHwxycjzcvT7Q` | 20.29 SOL |
+| Multisig-vault (upgrade authority, index 0) | `89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw` | 10.21 SOL |
+| Multisig-account zelf (config-PDA, geen signer/fee-payer - hoeft geen SOL) | `A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp` | 0.0025 SOL (rent-exempt, verwacht) |
+
+Bevestigd (`admin/wallet-signer.html`, `feePayer: connectedWallet.publicKey` op elke
+propose/approve/execute-aanroep): elk multisig-lid betaalt ZIJN EIGEN transactiekosten vanuit
+zijn eigen wallet - geen gedeelde fee-payer voor propose/approve/execute. Ter controle ook de
+drie LOKALE-validator-only programma-keypairs (`~/.config/spankwallet/program-keypairs/*`,
+`~/.config/active-defense/program-keypairs/*`) gecontroleerd: 0 SOL op devnet, maar dat is
+verwacht en irrelevant - die adressen worden nooit tegen devnet gebruikt (uitsluitend
+`anchor keys sync`/lokale `solana program deploy` tegen 127.0.0.1, zie
+`build-and-deploy.sh`'s eigen documentatie).
+
+**Opgeruimd (regenereerbaar, gitignored, niets van waarde verloren):** `test-ledger/` (399M) +
+`.anchor/test-ledger/` (230M) in deze werkboom, en `target/` (1.1G) in de losstaande
+`spankwallet-testfixture`-worktree - samen ~1.7G vrijgemaakt. Geen lopende
+`solana-test-validator`/`anchor`/`vite`-processen aangetroffen (`ps aux`), geen
+Claude-Code-cronjobs gepland (`CronList`: leeg).
+
+**`spankwallet-testfixture`-worktree (`/home/michel/projects/spankwallet-testfixture`,
+detached HEAD op `1fb3134`) blijft WEL bewust dirty:** `programs/active-defense/Cargo.toml` +
+`programs/spankwallet/src/lib.rs` staan op een lokaal `declare_id!`-adres (2 regels diff) -
+consistent met deze worktree's rol als losstaande build-fixture, geen actie nodig, niet
+hersteld.
+
+**Klein, niet-dringend opruimpuntje, bewust NIET zelf verwijderd (zelfde conventie als sectie
+81/82 - niet weggooien zonder expliciet akkoord):** `active-defense-keypair.json` in de
+repo-root van spankwallet (231 bytes, `Aug 21 13:58`, gitignored, nooit getrackt) is een
+byte-identieke kopie van het al naar `~/.config/solana/spankwallet-dev-keys/` verplaatste
+bestand uit sectie 81. Pubkey `9W3CGKhd7hgywf3xfP8snNmB2AgmzwQ3rdDFDV3hUurK` staat in
+active-defense's eigen STATUS.md al expliciet genoteerd als "wegwerp, geen actie nodig" (nooit
+het echte programma-adres geworden). Onschadelijk, geen secret van betekenis, maar overbodig -
+kan weg zodra iemand dat bevestigt.
+
+**`active-defense` (`/home/michel/projects/active-defense`) is NIET synchroon - apart
+bespreken bij terugkomst, hier bewust niet zelf opgelost:**
+- 7 lokale commits nog niet gepusht (`git rev-list --left-right --count HEAD...origin/main` =
+  `7 0` - puur voor, geen divergentie/geen dubbel werk, dus een gewone `git push` zou
+  volstaan, maar niet zelf uitgevoerd zonder expliciet akkoord voor DIE repo in deze sessie).
+- Daarbovenop ongecommit: `STATUS.md` (een nieuwe sectie 31, OBP-analyse), `notes/obp-analysis.md`
+  (untracked), en `.obp-staging/programs/obp-core/` (untracked, een volledig geschreven Anchor-
+  programma - mint/checkin/vault/init/allowance/crypto/state, laatste wijziging
+  2026-09-03 13:13). **Tegenstrijdigheid gevonden:** die STATUS.md-sectie-31-tekst zegt zelf
+  "Geen code gebouwd; puur analyse" - maar `.obp-staging/` bevat wel degelijk een uitgewerkt
+  programma. Er bestaat ook al een eigen, toegewijde repo hiervoor
+  (`/home/michel/projects/offline-bearer-protocol`, met bijna identieke
+  `programs/obp-core/`-inhoud) - die repo is ZELF ook dirty (ongecommitte wijzigingen aan
+  `errors.rs`/`lib.rs`/`state.rs`, `instructions.rs` verwijderd t.o.v. een nieuwe
+  `instructions/`-map). Sterk vermoeden: `.obp-staging/` in active-defense is een achtergebleven
+  kopieerplek van dit werk, niet de bedoelde eindbestemming - maar dat is een aanname, geen
+  bevestigd feit. **Niet zelf beslist welke van de twee repo's leidend is of wat er met de
+  ongecommitte inhoud moet gebeuren - dat wacht op Michel.**

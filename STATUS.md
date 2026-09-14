@@ -12853,3 +12853,157 @@ exact synchroon met `origin/main` (0/0).
 
 **Actieve-defense-specifieke bevindingen** (README-fix + een nieuw ontdekt operationeel
 probleem met de devnet-upgrade-authority-wallet) staan in active-defense's eigen STATUS.md.
+
+## 140. RC-verificatie deel 2: verse wegwerp-devnet-deploy, incident tegen het canonieke programma (root cause + volledig forensisch bewijs), gecorrigeerd en rooktest alsnog geslaagd (2026-09-14)
+
+Vervolg op sectie 139 (deel 1). Doel van deel 2: bewijzen dat het in deel 1 geverifieerde
+binary (commit `5238a56`) deploybaar is en zich vanaf nul correct gedraagt, via een verse
+wegwerp-devnet-deploy - NIET het canonieke adres.
+
+### Ontwerpkeuze vooraf: crate::ID-afhankelijkheid ontdekt
+
+Vóór er iets gedeployed werd, bleek dat `programs/spankwallet/src/instructions.rs` op
+meerdere plekken de COMPILE-TIME constante `crate::ID` gebruikt (niet het runtime-
+programma-adres) om te bepalen of een account al bestaat en door dit programma is
+aangemaakt: `account_info.owner != &crate::ID` in `read_passkeys_account`/
+`read_policy_account` (regel 464/479), en de challenge-hash zelf
+(`build_expected_challenge`, regel 596) hasht ook met `crate::ID`. Een letterlijke deploy
+van het canonieke-ID-binary naar een nieuw adres zou deze eigenaarschapscontroles stil
+laten falen (ze vergelijken dan altijd tegen het canonieke adres, nooit tegen het
+daadwerkelijke wegwerpadres). Voor de gevraagde smoke-test-scope (verse wallet) zou dat
+toevallig geen zichtbare fout geven - maar dat bewijst dan niets over die controle zelf.
+
+**Besluit (na overleg):** herbouwen met `declare_id!`/`Anchor.toml` TIJDELIJK op het
+wegwerpadres, exact het bestaande `build-and-deploy.sh`-patroon (trap-gebaseerd herstel,
+mtime-behoud, `scripts/lib/devnet-program-id.sh`'s constante als bron van waarheid voor het
+herstel) - maar met een VERS, eenmalig gegenereerd wegwerp-keypair i.p.v. de persistente
+lokale testidentiteit, en gericht op devnet i.p.v. 127.0.0.1. Wegwerpadres:
+`EwBHjzFCt9inNb9WBWeZjV4fcQ925GHWNpjNaaZgXkj3`.
+
+Build (eigen `CARGO_TARGET_DIR`, geen cache-hergebruik van het deel-1-binary):
+637552 bytes, sha256=`b4b4134084081a336420d52fecbdd3daf7c5c6bf082fdb2cdd8a156bb652a952` -
+zelfde grootte als het deel-1-binary (alleen de ID-byte verschilt, zelfde offset 10048).
+`verify-no-test-features-in-binary.ts`: exit 0. Byte-controle: wegwerpadres exact 1x,
+canoniek adres NUL keer (bewust vervangen), en alle 12 historische adressen uit sectie 139
+opnieuw NUL keer. Na de build: `git status --porcelain`/`git diff` LEEG - `declare_id!`/
+`Anchor.toml` expliciet bevestigd terug op het canonieke adres, trap werkte correct.
+
+Deploy (na een eerste mislukte poging door een netwerktimeout, opgelost door de half-
+geschreven buffer te sluiten en met een priority fee opnieuw te proberen):
+`solana program show EwBHjzFCt9inNb9WBWeZjV4fcQ925GHWNpjNaaZgXkj3` bevestigt 637552 bytes;
+`solana program dump` + sha256 komt exact overeen met het lokaal geverifieerde binary
+(byte-voor-byte identiek on-chain).
+
+### INCIDENT: rooktest v1 liep per ongeluk tegen het CANONIEKE programma
+
+**Root cause:** het rooktest-script gebruikte `anchor.workspace.Spankwallet`, wat de IDL
+leest uit het PROJECT'S EIGEN `target/idl/spankwallet.json` - niet uit de losse,
+`declare_id!`-geswapte build-map die voor de `.so` zelf gebruikt was. Dat bestand bevatte
+nog het CANONIEKE adres (van een eerdere, normale build). Gevolg: `init_wallet` en een
+vault-funding-transfer zijn daadwerkelijk tegen het echte, live canonieke programma
+uitgevoerd, niet tegen het wegwerpadres.
+
+**Volledig forensisch onderzoek (read-only, vóór enige correctie):**
+
+*Alle aangeraakte accounts* (bevestigd: `InitWallet` creëert uitsluitend `wallet`+`vault`,
+geen PasskeysAccount/PolicyAccount/andere satellite-PDA - instructions.rs:156-173; en geen
+enkele volgende instructie werd bereikt):
+
+| Adres | Type | Grootte | Eigenaar | Inhoud |
+|---|---|---|---|---|
+| `3u3uAqkWJyuGc86618EV1VLy9jyTRyof1D3RQbn8CP9Z` | WalletAccount | 247 bytes | canoniek programma | 1.905.000 lamports; owner_passkey/backup_authority = volledig synthetische, door het script gegenereerde test-sleutels |
+| `7GFF1UBsnFi27Je4LcJyKNbjsNmEpscGr2i47M7peufB` | Vault | 41 bytes | canoniek programma | 50.858.520 lamports (0,05 SOL bewuste funding + rent-exempt-minimum) |
+
+De twee adressen uit de daaropvolgende `ConstraintSeeds`-fout (`EqeHt4Q8D7rdFxi3UbDNDAdr-
+XLxbaiFFcgcrSfCRJMbX`, `DhBr7wMR3HQwdKpndCMhHSsCgn8sVPuXQqpf7NhmsGN2`) bestaan NIET on-chain
+(`AccountNotFound`) - die mislukte `execute`-poging heeft niets aangeraakt.
+
+*Geen enkel contact met de zeventien echte wallets, de multisig, of de vault-authority*
+(bewijs, niet aanname): `solana transaction-history` op beide adressen - WalletAccount **1**
+transactie totaal, Vault **2** transacties totaal, dat zijn ALLE transacties die ooit tegen
+deze adressen plaatsvonden. Volledig uitgelezen (`solana confirm -v`, complete accountlijst
+per transactie):
+- Tx 1 (`init_wallet`, slot 498322838): accounts = fee-payer, de twee nieuwe PDA's, System
+  Program, het canonieke programma (alleen als aangeroepen programma, zie hieronder),
+  Secp256r1-precompile, Instructions-sysvar. Geen ander adres.
+- Tx 2 (vault-funding, slot 498322840): accounts = fee-payer, de nieuwe vault, System
+  Program. Geen ander adres.
+De mislukte `execute()`-poging is NOOIT als transactie op de keten beland (bevestigd via de
+fee-payer's volledige recente transactiegeschiedenis - geen signature tussen de vault-
+funding-tx en de eerdere deploy-tx) - Anchor's client-side preflight-simulatie ving de
+`ConstraintSeeds`-fout af vóór verzending: nul transactiekosten, nul on-chain voetafdruk.
+
+*Fee-payer-balans, exact:* vóór het incident (uit de tx-details zelf) `89,226868384 SOL` →
+na de vault-funding-tx `89,174089864 SOL`. Verschil `0,052778520 SOL` = 0,05 SOL (bewuste
+funding) + 0,001905 SOL (WalletAccount-rent) + 0,00085852 SOL (Vault-rent) +
+0,000015 SOL (twee tx-fees) - klopt tot op de lamport nauwkeurig, geen onverklaard verschil.
+
+*Geen enkele authority-/ownership-/configuratie-instructie tegen het programma zelf:* in
+Tx 1 heeft het canonieke programma-account de permissievlag `-r-x` (alleen leesbaar +
+uitvoerbaar, d.w.z. aangeroepen als programma) - NIET `-rw-`. Er is dus niets geschreven
+naar het programma-account zelf (dat de upgrade-authority/executable-data bevat). De
+multisig-vault-authority (`89MEwqhfdqaz...`) komt in geen van beide transacties voor. Alles
+wat geraakt is, zijn twee gewone, nieuwe programma-DATA-accounts - precies wat elke
+willekeurige gebruiker met een `init_wallet`-aanroep tegen het echte programma had kunnen
+doen.
+
+**Beslissing (na expliciet akkoord):** de twee onbedoelde accounts op het canonieke
+programma blijven met rust - actief opruimen zou een extra, onnodige schrijfactie tegen
+canoniek zijn voor iets dat al bewezen onschadelijk is (geen van de zeventien echte wallets
+geraakt, geen SOL extern verloren, geen programma-configuratie aangeraakt).
+
+**Zijdelings tijdens het onderzoek:** een los, vooraf al bestaand buffer-account
+(`3zLEuPV7GvS4zhjYm3PnLPYqGnVkmUisQhE1HeNh3N1s`, 1,47377304 SOL) trof ik aan op naam van
+dezelfde fee-payer-wallet. Gecontroleerd, niet aangenomen: gedumpt en onderzocht - 211584
+bytes, bevat geen spankwallet- of active-defense-adres, komt in geen enkel logbestand van
+deze sessie voor. Losstaand restant van iets anders (deze wallet wordt breed hergebruikt als
+fee-payer over meerdere, niet-spankwallet-projecten), onaangeroerd gelaten.
+
+### Correctie en herhaalde rooktest, nu daadwerkelijk tegen het wegwerpadres
+
+Fix: het rooktest-script bouwt nu EXPLICIET een `Program`-object uit de IDL van de
+`declare_id!`-geswapte build (`new Program(idlJson, provider)`, adres gelezen uit
+`idl.address`), in plaats van `anchor.workspace.Spankwallet`. Vóór elke stap wordt
+`program.programId` gecontroleerd tegen zowel het verwachte wegwerpadres als een expliciete
+"is dit niet per ongeluk het canonieke adres"-check. Ná elke stap wordt de daadwerkelijke
+transactie opgehaald en de lijst van daadwerkelijk aangeroepen programma's gecontroleerd
+(harde stop als het canonieke adres daarin voorkomt), VOORDAT die stap als geslaagd
+gerapporteerd wordt.
+
+(Onderweg twee eigen scriptfouten gevonden en gefixt, geen van beide een bevinding over de
+programmacode: de `secp256r1`-precompile-instructie ontbrak bij `add_passkey`; en 500.000
+lamports naar een gloednieuw, leeg ontvangeraccount ligt onder Solana's generieke rent-
+exempt-minimum - beide puur test-scriptfouten.)
+
+**Resultaat, elke stap met bevestigd aangeroepen programma-ID (uitsluitend
+`EwBHjzFCt9inNb9WBWeZjV4fcQ925GHWNpjNaaZgXkj3`, nooit het canonieke adres):**
+
+1. `init_wallet` - OK. `walletPda` dataLen=256 (nieuwe layout, spend-cap-velden aanwezig -
+   ter vergelijking: het incident tegen het OUDE canonieke programma gaf 247 bytes, de
+   layout van vóór het spend-cap-mechanisme, precies zoals sectie 136 al voorspelde).
+2. `execute`, `spend_threshold_lamports=0` (fail-safe default, bevestigd 0 bij een verse
+   wallet) - OK, ontvanger-balans exact 1.000.000 lamports. Bewijst het ongewijzigde
+   instant-gedrag voor bestaande/nieuwe wallets, nu LIVE i.p.v. alleen lokaal.
+3. `add_passkey` (PASSKEY 2 registreren) - OK, PasskeysAccount-eigenaar bevestigd =
+   wegwerpadres.
+4. **NIEUW, op verzoek:** `execute` ondertekend door PASSKEY 2 ALLEEN (niet de
+   owner-passkey) - OK, ontvanger-balans exact 2.000.000 lamports. Dit bewijst dat
+   `read_passkeys_account`'s `owner == &crate::ID`-controle een BESTAAND account correct
+   herkent (het scenario dat bij een kapotte controle juist zou falen) - niet alleen het
+   toevallige "bestaat nog niet"-pad van stap 3 en 1.
+5. `initiate_threshold_change` (drempel 0,01 SOL, venstercap 0,02 SOL, via de wachtrij) -
+   OK. `PendingAction` teruggelezen: `kind=3` (ThresholdChange), `confirmed=false`.
+
+**Bewust NIET geprobeerd (24u-afhankelijk):** `finalize_threshold_change` en de glijdende-
+vensterrollover. Die logica is al bewezen via de lokale testsuite met de
+`test-fast-pending-timelock`/`test-fast-spend-window`-features (sectie 124/132-134,
+`yarn test:pending-action`/`yarn test:spend-window-rollover`) - dit RC-binary bevat die
+features NIET (deel 1, stap 3 bevestigde afwezigheid), dus een live 24u-wachttijd is binnen
+deze sessie niet haalbaar. **Onderscheid, expliciet:** wat hierboven staat is vandaag LIVE
+op devnet bewezen tegen het daadwerkelijke RC-binary; de 24u-afhankelijke afronding
+(finalize + rollover) leunt uitsluitend op de lokale fast-timelock-suite, niet op iets dat in
+deze sessie live is waargenomen - de twee bewijsniveaus zijn hier bewust niet vermengd.
+
+Geen enkele actie in dit hele deel raakte het canonieke adres met een schrijfactie
+(afgezien van het gecorrigeerde incident hierboven, dat volledig is uitgezocht, gedocumenteerd
+en bewust ongewijzigd gelaten).

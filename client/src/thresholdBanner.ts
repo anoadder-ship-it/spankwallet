@@ -46,10 +46,12 @@ export interface ThresholdBannerState {
 }
 
 const SCOPE_DISCLAIMER =
-  "Dit dekt uitsluitend SOL via execute/hunt. transfer_token en execute_advanced blijven " +
-  "altijd direct, ongeacht deze drempel (STATUS.md sectie 127, punt 3 - nog niet besloten). " +
-  "Een cumulatieve limiet over meerdere transacties (de \"glijdende-vensterlimiet\") bestaat " +
-  "nog niet (stap B, nog niet gebouwd).";
+  "Dit dekt uitsluitend SOL via execute/hunt. transfer_token en execute_advanced hebben geen " +
+  "instant-pad om te dekken - die twee vereisen altijd de wachtrij (initiate_token_transfer/" +
+  "finalize_token_transfer resp. initiate_advanced_action/finalize_advanced_action), " +
+  "ongeacht deze drempel (STATUS.md sectie 131). Een cumulatieve limiet over meerdere " +
+  "transacties (de \"glijdende-vensterlimiet\") is gebouwd en wordt automatisch mee " +
+  "afgedwongen zodra deze drempel > 0 staat (STATUS.md sectie 132-134).";
 
 /**
  * STATUS.md sectie 127 punt 3: BEWUST geen voorgestelde richtwaarde. Een

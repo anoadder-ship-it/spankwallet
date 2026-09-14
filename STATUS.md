@@ -12810,3 +12810,46 @@ en de eigen alert-nummers: `active-defense/STATUS.md` sectie 32. `js-yaml` was d
 | #7/#6 | active-defense | toml | dismissed | tolerable_risk |
 | #5 | active-defense | stream-json | dismissed | not_used |
 | #1 | active-defense | bigint-buffer | open (al eerder gedocumenteerd, bewust buiten scope van deze ronde) | - |
+
+## 139. Audit vóór release-candidate-verificatie: sectienummering/kruisverwijzingen/code-consistentie gecontroleerd, twee bevindingen gefixt na akkoord (2026-09-14)
+
+Op verzoek een grondige controlerond vóór de RC-verificatie begint (audit, geen bouwwerk).
+Vier delen: STATUS.md-integriteit (beide repo's), spend-cap-codeconsistentie, eindstaat met
+verse testruns, en bevestiging dat sectie 31/`.obp-staging`/`notes/` in active-defense
+onaangeroerd bleven (bevestigd - zie daar).
+
+**Sectienummering/kruisverwijzingen: geen fouten.** Beide STATUS.md's 1..N strikt oplopend,
+geen gaten/duplicaten (active-defense's "30.1" is een bewuste audit-addendum, geen fout).
+Cross-repo-verwijzingen (spankwallet-sectie 81/95/110/138 vanuit active-defense) kloppen
+allemaal qua onderwerp. README-instructietabel (28, incl. kind-aanduidingen) klopt exact
+tegen `lib.rs`. `verify-no-test-features-in-binary.ts` + beide build-scripts consistent.
+
+**Twee triviale, direct gefixte typefouten:**
+- `tests/pendingAction.ts:1806`: "sectie 216" bestond niet (max was 138) - bleek een
+  typefout voor "regel 216" van het inmiddels verwijderde `tests/actionNonce.ts` (bevestigd
+  via `git log -L`). Gefixt.
+- `client/index.html`'s `<title>` zei nog "alle 5 stappen" (de pagina heeft er inmiddels 25) -
+  vervangen door een getal-onafhankelijke titel.
+
+**Eén substantiële, na expliciet akkoord gefixte stale claim:** `client/src/thresholdBanner.ts`'s
+`SCOPE_DISCLAIMER` (user-facing tekst in de wallet-UI) beweerde nog dat de
+glijdende-vensterlimiet "nog niet bestaat (stap B, nog niet gebouwd)" - maar sectie 132-134
+hebben die wél gebouwd, en ze wordt automatisch mee afgedwongen zodra
+`spend_threshold_lamports > 0` (bevestigd tegen `instructions.rs`'s daadwerkelijke
+gate-logica: dezelfde `> 0`-poort omvat zowel de instant-drempel als `apply_spend_window`).
+Bijkomende bevinding tijdens het kritisch herlezen: dezelfde disclaimer citeerde "STATUS.md
+sectie 127, punt 3" voor de transfer_token/execute_advanced-bewering, maar die "punt 3"
+bestaat niet binnen sectie 127 - vermoedelijk per ongeluk hergebruikt van een andere,
+niet-verwante "sectie 127 punt 3"-verwijzing elders (geen voorgestelde richtwaarde). Tekst
+herschreven: correcte verwijzing naar sectie 131 (transfer_token/execute_advanced zijn altijd
+wachtrij, geen instant-pad om te dekken) + sectie 132-134 (vensterlimiet gebouwd/actief).
+`tests/thresholdBanner.ts` blijft groen (assert op de substring "execute/hunt", niet op de
+volledige tekst).
+
+**Verse eindstaat, twee keer gedraaid (vóór en ná de thresholdBanner-fix):** `yarn test`
+beide keren **106 passing / 42 pending / 0 failing**, identiek. `cargo check --workspace`,
+`client`'s `tsc --noEmit` en `vite build` alle drie schoon. `git fetch` + HEAD-vergelijking:
+exact synchroon met `origin/main` (0/0).
+
+**Actieve-defense-specifieke bevindingen** (README-fix + een nieuw ontdekt operationeel
+probleem met de devnet-upgrade-authority-wallet) staan in active-defense's eigen STATUS.md.

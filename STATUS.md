@@ -12684,3 +12684,129 @@ GEPUSHT, de rest blijft bewust onaangeroerd:**
   verder onderzocht en dus geen bevestigd feit - alleen wat hierboven al stond. OBP en de
   aparte `offline-bearer-protocol`-repo zijn een apart, later project; geen onderdeel van deze
   overdracht. Bij terugkomst: eerst met Michel bespreken vóór hier iets mee gebeurt.
+
+## 137. Vertrekcontrole (2026-09-14): twee onverklaarde multisig-transacties geïdentificeerd,
+onderzocht en afgesloten
+
+Bij de synchronisatiecontrole na een week afwezigheid bleken op het multisig-config-account
+(`A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp`) twee `SystemProgram::Transfer`-transacties
+van elk 5 SOL te staan (2026-09-03 14:08:50 en 14:08:59 - acht minuten ná de laatste commit
+van die dag) die in geen enkele STATUS.md-sectie stonden. Ondertekenaar
+`dev2JBjyB5CshoGsiJCwzdmJYiEUwAXMdqDR7txoFBJ` matchte geen van de drie bekende multisig-leden
+(telefoon/hoofd-pc/Windows-pc) - reden om het uit te zoeken vóór er van uitgegaan werd dat het
+onschuldig was.
+
+**Onderzoek, stap voor stap:**
+1. Volledige `getTransaction`-dump (jsonParsed) van beide signatures opgehaald: exact één
+   signer per transactie, geen Squads-programma aangeroepen (alleen `SystemProgram` +
+   `ComputeBudget`) - dus geen `propose`/`approve`/`execute`, geen config-wijziging, geen
+   member-toevoeging.
+2. Multisig-account zelf gedecodeerd (Borsh, handmatig): `transaction_index` stond op 12 vóór
+   én na dit venster - geen nieuw Squads-voorstel aangemaakt.
+3. Ter bevestiging de voorstel-PDA's voor index 11 t/m 16 zelf gederiveerd
+   (`solders.Pubkey.find_program_address`, seeds `["multisig", multisig_pda, "transaction",
+   index_le_u64]`) en elk rechtstreeks op devnet opgevraagd: #11/#12 bestaan (bekend, #12 =
+   Rejected), #13 t/m #16 bestaan niet. Geen voorstel hoort bij deze twee transacties.
+4. Ondertekenaar-adres zelf onderzocht: eigendom van `SystemProgram` (gewone wallet, niet
+   executable), saldo ~6.029.467 SOL, recente handtekeninggeschiedenis toont tientallen
+   `transfer`-transacties binnen enkele minuten verspreid over de dag - gedrag van een
+   voortdurend uitkerende faucet, niet van een individuele gebruiker. Op devnet ondertekent
+   `solana airdrop` altijd de faucet zelf; de ontvanger hoeft niet te tekenen of toestemming te
+   geven - dus dat een onbekende sleutel hier als signer optrad, zegt op zichzelf niets over
+   controle over de multisig.
+
+**Bevestigd door Michel: dit waren zijn eigen twee `solana airdrop 5 A5iDbqC8...
+--url devnet`-aanroepen, vlak vóór vertrek, per ongeluk tegen het multisig-config-PDA gericht
+in plaats van de vault (`89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`, de eigenlijke
+upgrade-authority).** Geen incident - afgesloten.
+
+**Rest van de vertrekcontrole, ter herbevestiging:** devnet-programma
+(`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`) nog op slot 488465385 (2026-08-26, identiek
+aan de sectie-135-baseline); multisig-config (threshold 2/3, 72u-timelock, dezelfde drie
+leden, `config_authority` nog steeds `Pubkey::default`) ongewijzigd sinds 2026-08-28; beide
+repo's (spankwallet, active-defense) 0 ahead/0 behind t.o.v. `origin/main`, geen open PR's/
+issues, geen pushes door iemand anders; `yarn test` (106 passing/42 pending) en
+`yarn test:pending-action` (39 passing/1 pending) beide 0 failing.
+
+## 138. Dependabot-ronde (2026-09-14): 6 nieuwe alerts sinds vertrek, drie disposities
+
+Sinds vertrek (laatste stand: 2026-09-03) kwamen 6 nieuwe Dependabot-alerts binnen in
+spankwallet, geen van alle eerder gezien of gedocumenteerd:
+
+- **#24 js-yaml 4.3.1** (high, CVE-2026-84375, CVSS 7.5, dev-only via `mocha`) - **gefixt**:
+  npm-override `"js-yaml": "^4.3.2"` toegevoegd aan `package.json`, `npm install` gedraaid om
+  `package-lock.json` bij te werken. `npm ls js-yaml --all` bevestigt 4.3.2 overal (was
+  eerder per ongeluk via `yarn install` een los `yarn.lock` gegenereerd - verwijderd, dit
+  project gebruikt npm/`package-lock.json`, niet yarn, ook al heten de scripts `yarn test`).
+  Triviale patch-bump, geen major-versiesprong. `yarn test:pending-action` opnieuw gedraaid ná
+  de override: 39 passing/1 pending, identiek aan de baseline. Alert #24 staat nog op "open"
+  op GitHub - verwacht, Dependabot sluit hem pas automatisch zodra de gepushte lockfile
+  herscand wordt, geen actie nodig.
+- **#23/#22 toml 3.0.0** (high, GHSA-82x6-q7mm-w9cf uncontrolled recursion / GHSA-v5mp-jgw5-2x6j
+  prototype pollution via `__proto__`) - **afgewezen, `dismissed_reason: "tolerable_risk"`**.
+- **#21/#20/#19 stream-json 1.9.1** (medium, GHSA-528h-pc64-c93x, O(diepte²) event-loop-DoS via
+  geneste JSON) - **afgewezen, `dismissed_reason: "not_used"`**.
+
+**Waarom twee verschillende disposities voor twee ogenschijnlijk vergelijkbare gevallen - dit
+is het onderscheid zelf, niet alleen de uitkomst (op expliciet verzoek na terechte vraag
+waarom niet allebei hetzelfde):**
+
+`toml.parse()` heeft precies één call-site in de hele `node_modules`-boom (geverifieerd: elke
+`require('toml')` process-breed doorzocht, 2 treffers - cjs- en esm-build van hetzelfde
+bronbestand, `@coral-xyz/anchor/dist/{cjs,esm}/workspace.js:56`):
+`toml.parse(fs.readFileSync("Anchor.toml"))`, met `"Anchor.toml"` als hardcoded
+string-literal, geen variabele. **De vulnerabele functie wordt dus daadwerkelijk uitgevoerd**,
+elke keer dat `anchor.workspace.*` wordt aangeroepen (in onze eigen tests). Wat ontbreekt is
+niet de aanroep maar de aanvaller-controleerbare input: ons `Anchor.toml` is een lokaal,
+zelf-geauteerd bestand, nooit netwerk- of gebruikersinvoer - de trigger-precondition (TOML met
+kwaadaardige diepe nesting of `__proto__`-sleutels) is aantoonbaar afwezig. Vandaar
+`tolerable_risk`, niet `not_used`: `not_used` zou ten onrechte beweren dat `toml.parse()` hier
+nooit wordt aangeroepen - dat is feitelijk onjuist.
+
+`stream-json` wordt in het hele `jayson`-pakket uitsluitend aangeraakt door één functie,
+`Utils.parseStream` (`lib/utils.js:73`). Alle aanroepen van díe functie in het hele
+`jayson`-pakket geïnventariseerd: precies 4, allemaal in `jayson`'s eigen tcp/tls-client- en
+-servervarianten (`lib/client/tcp.js:63`, `lib/client/tls.js:62`, `lib/server/tcp.js:39`,
+`lib/server/tls.js:39`). Vervolgens gecontroleerd of `@solana/web3.js` of
+`@coral-xyz/anchor` ooit een van die vier bestanden requiret: **nul treffers**, in geen van
+beide pakketten. `@solana/web3.js` importeert uitsluitend `jayson/lib/client/browser`
+(`index.cjs.js:15`, `createRpcClient`/`clientBrowser` op regel 5044) en het daadwerkelijke
+transport is `fetch()`/`node-fetch` (regels 5041/5061), nooit een raw TCP/TLS-socket. Onze
+eigen code (root/client/desktop, elk `.ts`/`.js`-bestand) roept `jayson` nergens rechtstreeks
+aan - nul treffers. `admin/https-server.js` gebruikt Node's ingebouwde `https`-module, geen
+`jayson`. **De vulnerabele functie zelf wordt dus in geen enkel pad dat wij daadwerkelijk
+uitvoeren ooit aangeroepen, ongeacht welke input er zou binnenkomen** - een fundamenteel
+andere zekerheid dan bij `toml` (waar de aanroep wél plaatsvindt maar de input veilig is).
+Vandaar `not_used`.
+
+**Het onderscheid in één zin:** `tolerable_risk` is voor "de kwetsbare code draait, maar de
+trigger-conditie doet zich bij ons niet voor" (`toml`, zelfde patroon als het rand/atty-
+precedent in sectie 130); `not_used` is voor "de kwetsbare functie wordt in ons daadwerkelijke
+require-/aanroeppad nooit uitgevoerd, punt" (`stream-json`). Beide zwaarder onderbouwd dan een
+educated guess - elk op een uitputtende grep van de volledige dependency-boom, niet op een
+steekproef of alleen `npm ls`'s dependency-declaratie (die toont alleen wélke pakketten
+elkaar declareren, niet welke functies daadwerkelijk aangeroepen worden).
+
+**Bewuste keuze om niet te upgraden ondanks de fix beschikbaar zijn:** beide zijn
+major-versiesprongen (toml 3→4, stream-json 1→3) in transitieve dependencies van
+`@coral-xyz/anchor` resp. `@solana/web3.js`→`jayson` - een ongeteste dependency-bump vlak vóór
+de devnet-buffer-build draagt meer risico dan de al-aantoonbaar-laag-risico kwetsbaarheden
+zelf wegnemen.
+
+**Zelfde onderbouwing toegepast op `active-defense`** (zelfde `@coral-xyz/anchor@0.31.1`/
+`@solana/web3.js`-versies, zelfde `package.json`-structuur) - expliciet gecontroleerd dat
+`active-defense`'s `jayson`-gebruik identiek verloopt (`jayson/lib/client/browser`,
+fetch-transport, geen tcp/tls-requires) vóór dezelfde dispositie daar toegepast werd. Details
+en de eigen alert-nummers: `active-defense/STATUS.md` sectie 32. `js-yaml` was daar al 4.3.2
+(via `mocha@10.8.2`, geen aparte override nodig) - geen alert, geen actie.
+
+**Eindstatus, bevestigd via `GET .../dependabot/alerts` ná alle PATCH-aanroepen:**
+
+| Alert | Repo | Pakket | Status | Reden |
+|---|---|---|---|---|
+| #24 | spankwallet | js-yaml | open (fix gepusht, wacht op Dependabot-herscan) | - |
+| #23/#22 | spankwallet | toml | dismissed | tolerable_risk |
+| #21/#20/#19 | spankwallet | stream-json | dismissed | not_used |
+| #7/#6 | active-defense | toml | dismissed | tolerable_risk |
+| #5 | active-defense | stream-json | dismissed | not_used |
+| #1 | active-defense | bigint-buffer | open (al eerder gedocumenteerd, bewust buiten scope van deze ronde) | - |

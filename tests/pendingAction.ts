@@ -1803,8 +1803,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       // lokaal, wat op termijn uit elkaar had kunnen lopen met de gedeelde
       // helper zonder dat iets dat zou opmerken. check_current_action_nonce
       // wordt hier bewezen op initiate_advanced_action specifiek (een
-      // ANDERE aanroeper dan execute), niet aangenomen vanuit sectie 216's
-      // oude test.
+      // ANDERE aanroeper dan execute), niet aangenomen vanuit regel 216 van
+      // tests/actionNonce.ts se oude (inmiddels verwijderde) test.
       await expectAnchorError(
         callInitiateAdvancedAction(
           passkey,

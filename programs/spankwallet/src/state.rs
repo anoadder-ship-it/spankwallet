@@ -174,6 +174,32 @@ impl WalletAccount {
         + 8
         + 8
         + 1;
+
+    /// STATUS.md sectie 141-vervolg (bronfix): byte-offset, IN DE RUWE
+    /// accountbytes (inclusief de 8-byte Anchor-discriminator), waar de
+    /// `Some(RecoveryState)`-payload zou beginnen - direct ná
+    /// `recovery_state`'s eigen 1-byte Option-tag. ALTIJD hetzelfde getal,
+    /// voor elke WalletAccount ooit, want elk veld ervóór (seed_key t/m
+    /// backup_authority) is vlak/vast-groot, nooit een Option - dit getal
+    /// verandert dus nooit, ongeacht welke velden er later nog achter
+    /// `disarmed` bijkomen. Gebruikt om de vrijgekomen bytes expliciet te
+    /// nullen zodra `recovery_state` van `Some` naar `None` gaat
+    /// (`cancel_recovery`/`finalize_recovery`) - Borsh's `Option::None`-
+    /// serialisatie schrijft ZELF alleen de tag-byte, nooit de oude
+    /// `Some`-payload-bytes terug naar nul, wat zonder deze expliciete
+    /// opruiming stale data achterlaat die een latere, langere
+    /// structuurdefinitie stilzwijgend als (foutieve) veldwaarden zou lezen
+    /// - empirisch aangetoond tegen twee echte devnet-accounts, zie sectie
+    /// 141.
+    pub const RECOVERY_STATE_PAYLOAD_OFFSET: usize = 8
+        + PASSKEY_PUBKEY_LEN
+        + 32
+        + PASSKEY_PUBKEY_LEN
+        + 1
+        + 1
+        + 8
+        + 32
+        + 1;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]

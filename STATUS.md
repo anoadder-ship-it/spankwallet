@@ -13007,3 +13007,473 @@ deze sessie live is waargenomen - de twee bewijsniveaus zijn hier bewust niet ve
 Geen enkele actie in dit hele deel raakte het canonieke adres met een schrijfactie
 (afgezien van het gecorrigeerde incident hierboven, dat volledig is uitgezocht, gedocumenteerd
 en bewust ongewijzigd gelaten).
+
+## 141. RC-verificatie deel 3: 2 van de 17 echte WalletAccounts falen te deserialiseren - root cause bevestigd nog actief, drie ontwerprichtingen voor een structurele fix (ontwerpnotitie, nog NIETS gebouwd) (2026-09-14)
+
+Vervolg op sectie 140 (deel 2). Doel van deel 3: bewijzen of de zeventien bestaande, echte
+WalletAccounts een in-place upgrade naar de huidige broncode (commit `5238a56`) correct
+overleven - het deel dat nog nooit getest was, en dat een wegwerp-deploy (deel 2, begint met
+nul wallets) niet kan aantonen.
+
+### Stap 8: ruwe bytes opgehaald (read-only, script vooraf getoond en akkoord bevonden)
+
+`getProgramAccounts` tegen het canonieke programma, gefilterd op de WalletAccount-
+discriminator: **18 accounts gevonden, niet 17.** Het 18e is `3u3uAqkWJyuGc86618EV1VLy9-
+jyTRyof1D3RQbn8CP9Z` - exact het account uit het sectie-140-incident (dataLen=247,
+lamports=1.905.000, tot op de lamport gelijk aan wat daar al vastgelegd staat), niet een
+nieuwe "achttiende echte gebruiker". Uitgesloten van onderstaande analyse.
+
+**dataLen-verdeling van de overige 17 (komt exact overeen met de eerdere meting in
+`scripts/checkWorstCaseAccountSafety.ts`, sectie 84/85 - onafhankelijke bevestiging, niets
+veranderd sindsdien):**
+
+| dataLen | Aantal |
+|---|---|
+| 231 bytes | 12 |
+| 239 bytes | 4 |
+| 247 bytes | 1 |
+
+Geen enkele op 256 bytes (de volledige nieuwe layout) - bevestigt sectie 136's aanname dat
+het spend-cap-mechanisme nog nergens live is.
+
+### Stap 9: offline Rust-testharnas - resultaat: 15/17 OK, 2/17 FOUT
+
+Tijdelijke test toegevoegd aan `programs/spankwallet/src/state.rs`'s bestaande
+`#[cfg(test)] mod tests` (`rc_part3_all_17_real_wallets_decode_against_current_layout`, na
+deze audit weer te verwijderen - geen permanente testfixture, gebonden aan `/tmp`-paden en
+een momentopname). Laadt de daadwerkelijke, op 2026-09-14 gelezen ruwe bytes van elk van de
+17 en roept de ECHTE `WalletAccount::try_deserialize` aan (native `cargo test`, geen
+SBF/validator nodig - pure Borsh-logica). Kruiscontrole: voor elk geslaagd account werden
+`bump`/`vault_bump`/`created_at`/`backup_authority` (en, waar aanwezig, `action_nonce`/
+`session_epoch`) onafhankelijk uit de ruwe bytes geparsed (zelfde offset-logica als
+`scripts/checkAllOldWallets.ts`) en vergeleken met wat Anchor decodeerde - voor alle 15
+geslaagde accounts **exact gelijk**, geen enkele afwijking in de oude laag.
+
+**Resultaat: 15/17 slagen zonder panic/fout, `spend_threshold_lamports=0`/`disarmed=false`
+(fail-safe default, zoals ontworpen) voor alle 15. 2/17 falen met
+`AccountDidNotDeserialize`:**
+
+| Wallet | dataLen |
+|---|---|
+| `3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ` | 231 |
+| `FSGNLavhzEvCtk948Y3jEFw2hEgV7GvPQnutp5ZnKs2R` | 247 |
+
+Geen enkele panic (`std::panic::catch_unwind` om elke uitkomst te garanderen kunnen
+rapporteren) - beide faalgevallen zijn nette, door Anchor zelf afgevangen fouten.
+
+### Root cause (uitgezocht via de volledige, begrensde transactiegeschiedenis van beide wallets)
+
+`3Ape3ge72...` (7 tx, 2026-08-10): `InitWallet → Execute → `**`InitiateRecovery →
+CancelRecovery`**` → Hunt → Hunt → TransferToken`.
+`FSGNLavhz...` (6 tx, 2026-08-26): `InitWallet → AddPasskey → AddSessionKey →
+ExecuteViaSession → `**`InitiateRecovery → FinalizeRecovery`**.
+
+Bij allebei: een voltooide recovery-cyclus. `initiate_recovery` zet `recovery_state =
+Some(RecoveryState { initiated_at, new_owner_passkey })` (41 bytes payload). Zowel
+`cancel_recovery` als `finalize_recovery` zetten daarna `wallet.recovery_state = None;`
+(instructions.rs, bevestigd in de huidige broncode) - Borsh's serialisatie van
+`Option::None` schrijft UITSLUITEND de 1-byte-tag, nooit de oude `Some`-payload-bytes terug
+naar nul. Bij een `None`-tag leest de deserialisatie de daaropvolgende bytes gewoon door als
+de VOLGENDE velden (`recovery_timelock_seconds` → `deposit_authority`-tag → `action_nonce` →
+`session_epoch` → `spend_threshold_lamports` → `disarmed`) - de 41 stale bytes van de oude
+`RecoveryState` worden dus stilzwijgend herïnterpreteerd als die velden. Bij deze twee
+wallets landt dat toevallig op een niet-0/1-byte voor `disarmed` (Borsh's `bool`-decodering
+faalt hard op elke waarde buiten 0/1) - vandaar de nette fout i.p.v. een stille corruptie.
+
+**Vaststelling, het belangrijkste punt: dit is GEEN afgesloten, historisch eenmalig moment.**
+`cancel_recovery`/`finalize_recovery` doen in de HUIDIGE broncode nog exact hetzelfde - géén
+expliciete byte-opruiming, waar dan ook. Elke wallet, ook elk van de 15 die vandaag goed
+decoderen, krijgt dezelfde stale bytes zodra de eigenaar (of een aanvaller met
+`backup_authority`) ooit een recovery-cyclus doorloopt. De 15 zijn niet gezond omdat het
+mechanisme werkt - ze zijn gezond omdat ze toevallig nooit `recovery_state = Some` zijn
+geweest. Verdergaand risico (logisch gevolg van hetzelfde, bevestigde mechanisme, niet apart
+met een derde live voorbeeld gedemonstreerd): een ANDERE combinatie stale bytes zou net zo
+goed stilzwijgend, ZONDER foutmelding, een verkeerde `recovery_timelock_seconds`,
+`action_nonce`, `session_epoch` of `spend_threshold_lamports` kunnen opleveren - een
+gecorrumpeerde (bijv. te korte) `recovery_timelock_seconds` zou de recovery-wachttijd zelf
+kunnen ondermijnen. De huidige twee gevallen "falen hard" is dus geluk (een toevallig
+ongeldige boolean-byte), geen garantie.
+
+### Drie ontwerprichtingen voor een structurele fix - GEEN daarvan gebouwd
+
+**(a) Permissionless-achtige reparatie-/backfill-instructie.** Zet expliciet de bytes vanaf
+het einde van de oude, logische laaggrens tot het einde van het account terug naar nul, voor
+elk account waarvan `recovery_state` momenteel `None` is (dus aantoonbaar geen levende
+`Some`-payload in die regio). **Kernprobleem, niet triviaal:** een normale Anchor-instructie
+met `wallet: Account<'info, WalletAccount>` laadt het account via `try_deserialize` VOORDAT
+de instructiebody draait - voor deze twee (en elke toekomstige soortgelijke) wallet zou
+Anchor de transactie dus al weigeren vóórdat de reparatie zelf ooit kan draaien. De
+reparatie-instructie moet het account daarom als ruwe `UncheckedAccount`/`AccountInfo`
+nemen (Anchors automatische deserialisatie omzeilen), de discriminator + een paar vaste-
+offset-velden (bijv. `bump`) handmatig controleren als sanity-check, en dan rechtstreeks in
+de bytes schrijven.
+**Wel of geen passkey-handtekening nodig?** Argument VOOR permissionless (geen handtekening):
+als de deserialisatie al kapot is, kan de eigenaar sowieso geen enkele normale, passkey-
+ondertekende instructie meer laten slagen tegen dit account (catch-22 - ze kunnen niet
+"zelf" repareren via het gebruikelijke pad). De reparatie zelf verplaatst geen waarde, wijzigt
+geen autorisatie, en zet uitsluitend bekende, veilige defaults (`0`/`false`) - hetzelfde
+vertrouwensniveau als het al-bestaande permissionless `close_expired_session`. Voorwaarde:
+de instructie moet op byte-niveau aantoonbaar ALLEEN de regio ná de laatst-bekende-geldige
+laaggrens aanraken, nooit de kernvelden (seed_key/owner_passkey/backup_authority/etc.) -
+anders is het geen reparatie maar een aanvalsvector.
+
+**(b) Defensievere deserialisatie.** Een eigen `AccountDeserialize`-implementatie voor
+`WalletAccount` (i.p.v. de huidige `#[account]`-derive) die veld-voor-veld met een cursor
+leest en NIET hard faalt op een ongeldige `bool`/`Option`-tag voor de nieuwste velden, maar
+expliciet terugvalt op de veilige default. **Beperking, expliciet: dit dekt alleen het
+"foutmelding"-scenario, niet het "stille corruptie"-scenario.** Voor een `bool` is elke
+waarde buiten 0/1 detecteerbaar en dus veilig op te vangen; voor een vlak `u64`
+(`spend_threshold_lamports`, `action_nonce`, `recovery_timelock_seconds`) is ELKE
+willekeurige 8-byte-reeks een "geldige" waarde - er is geen enkele manier om garbage van een
+echt getal te onderscheiden zonder een aparte, expliciete geldigheidscontrole (bijv. een
+plausibiliteitsgrens op `recovery_timelock_seconds`). Lost dus het waargenomen probleem bij
+deze twee wallets op, maar NIET het onderliggende risico dat een andere bytecombinatie een
+stille, verkeerde waarde oplevert.
+
+**(c) Het structurele patroon zelf heroverwegen voor toekomstige veldtoevoegingen.** Het
+huidige patroon (compile-time worst-case `LEN`, vertrouwen op nooit-beschreven nulpadding
+voor nieuwe achteraan-velden) is precies wat hier faalt zodra een `Option`-veld ooit
+`Some` is geweest. Opties, oplopend in ingrijpendheid:
+  - Nooit meer een nieuw veld toevoegen ACHTER een `Option`-veld dat ooit `Some` kan zijn
+    (`recovery_state`) - toekomstige velden bewust vóór de Options plaatsen, of in een apart
+    account. Lost het probleem voor NIEUWE velden op, repareert niets aan de bestaande
+    lay-out.
+  - Een expliciete, verplichte migratie-instructie eisen bij elke toekomstige
+    layoutwijziging (leest de oude, kleinere structuur expliciet in, herschrijft het HELE
+    account met expliciete defaults, i.p.v. op impliciete padding te vertrouwen) - net als
+    optie (a), maar dan als staand beleid voor elke volgende wijziging, niet als eenmalige
+    reparatie.
+  - Een expliciete `account_version`-byte, op een vaste, nooit-verplaatsende positie
+    (bijv. direct na de Anchor-discriminator), die bij elke schrijfactie wordt bijgewerkt en
+    door elke instructie gelezen wordt om te bepalen welke velden geldig zijn - vervangt
+    "afleiden uit `data.len()`/padding" door een expliciete, gecontroleerde bron van
+    waarheid. Grondigste optie, ook de grootste wijziging.
+  - Als staand proces, ongeacht welke van bovenstaande gekozen wordt: dit exacte soort
+    controle (deel 3, stap 8/9 - echte bytes door de echte deserialisatie halen) verplicht
+    maken vóór ELKE toekomstige layoutwijziging, niet ad hoc bij een audit.
+
+### Dit is nu het centrale go/no-go-punt
+
+Geen van de drie richtingen is gebouwd. Dit vereist een keuze van Michel voordat er ook maar
+aan een multisig-voorstel gedacht wordt - een upgrade die vandaag zou plaatsvinden zou deze
+twee wallets onmiddellijk en volledig op slot zetten, voor elke instructie.
+
+### Aanvulling: drie externe patronen onderzocht en tegen de daadwerkelijke broncode geverifieerd - nog steeds NIETS gebouwd
+
+Op verzoek: drie extern gevonden patronen (Anchor's `Migration`-type, het `schema_version`-
+patroon, `try_from_slice_unchecked`) beoordeeld, elk met codeverificatie tegen wat hier
+daadwerkelijk geïnstalleerd is - niet tegen aannames.
+
+**Belangrijke correctie op de uitgangspremisse vooraf:** dit project draait niet op Anchor
+0.31.1. `programs/spankwallet/Cargo.toml`/`Cargo.lock`/`Anchor.toml`/`anchor --version`
+bevestigen allemaal **anchor-lang/anchor-spl/anchor-cli 1.1.2** (een post-1.0-versie).
+`@coral-xyz/anchor: ^0.31.1` in `package.json` is uitsluitend de TS-CLIËNT-package, die een
+eigen, losstaande versienummering voert - dit zegt niets over de Rust-kant. Dit verandert
+punt 1 hieronder fundamenteel.
+
+**1. Anchor's `Migration<'info, From, To>` (PR #4060).** Volgens de Anchor-changelog
+geïntroduceerd in **Anchor 1.0.0** - dus, gegeven de correctie hierboven, WEL beschikbaar in
+dit project vandaag, geen major-upgrade nodig. Geverifieerd door de daadwerkelijk vendored
+crate-broncode te lezen (`~/.cargo/registry/src/.../anchor-lang-1.1.2/src/accounts/
+migration.rs`, bestaat, volledig gelezen inclusief de eigen testsuite):
+- `Migration<'info, From, To>::try_from(&info)` deserialiseert het account UITSLUITEND als
+  `From` (met discriminator-check); `to.exit()` serialiseert pas ná een expliciete
+  `.migrate(new_data: To)`-aanroep, typisch gecombineerd met `realloc`/`realloc::zero`.
+- **Conceptueel exact wat hier nodig is:** definieer `WalletAccountOld` als de bevroren, ORIGINELE
+  laag (de 231/239/247-byte-varianten, zonder de nieuwe velden) met een EXPLICIET
+  overschreven discriminator (`#[account(discriminator = [...])]` - bevestigd aanwezig in
+  `anchor-syn-1.1.2/src/lib.rs` regel 111-112, "Override the default 8-byte discriminator")
+  gelijk aan het al-live `WalletAccount`-discriminator (`9e62ab99d440f2d5`, bevestigd via de
+  ruwe bytes van deel 3). Een `migrate_wallet_account`-instructie met
+  `Migration<'info, WalletAccountOld, WalletAccount>` + `realloc = WalletAccount::LEN,
+  realloc::zero = true` leest dan UITSLUITEND het oude, altijd-welgevormde veldenprefix (raakt
+  de stale-bytes-regio dus nooit aan), construeert `WalletAccount` met EXPLICIETE waarden voor
+  de nieuwe velden, en `realloc::zero = true` nult de HELE herallocatie-regio - geen enkele
+  afhankelijkheid meer van toevallige padding, voor deze migratie én voor elke toekomstige.
+  **Dit zou voor alle 17 uniform werken, niet alleen de 2 kapotte** (`WalletAccountOld`
+  hoeft alleen tot de oude, gedeelde grens te lezen, ongeacht of een individueel account 231,
+  239 of 247 bytes was).
+- **Beoordeling:** dit is dus GEEN toekomstrichting die op een major-upgrade wacht - het is
+  vandaag al bruikbaar, en is qua ontwerp de meest solide van de drie. Wel een reëel
+  aandachtspunt: `Migration` vervangt niet automatisch alle bestaande `Account<'info,
+  WalletAccount>`-gebruik in `execute`/`hunt`/etc. - die blijven falen tegen een
+  NIET-gemigreerd account totdat de migratie-instructie voor dat specifieke account is
+  aangeroepen. De migratie moet dus vóór (of atomisch met) de eerste post-upgrade-aanroep per
+  wallet gebeuren, niet impliciet "vanzelf" gebeuren.
+
+**2. `schema_version: u8`-patroon (Solana Cookbook, brede industriestandaard).** Voor
+`WalletAccount` zou dit een vast byte zijn, bijvoorbeeld direct ná de Anchor-discriminator
+(vóór `seed_key`), bijgewerkt bij elke schrijfactie, gelezen door elke instructie om te
+bepalen welke velden geldig zijn. **Antwoord op de expliciete vraag (met terugwerkende
+kracht toepasbaar op de 17 bestaande?): nee, niet vanzelf.** Een versiebyte kan niet
+achteraf "verschijnen" in bytes die al vastliggen - het zou ZELF een migratie-schrijfactie
+vereisen om er alsnog een correcte waarde in te zetten voor elk bestaand account (exact
+dezelfde soort actie als optie 1/optie (a)). `schema_version` is dus geen VERVANGING voor een
+migratie-instructie, maar een AANVULLING die vanaf het migratiemoment vooruit werkt: na een
+eenmalige migratie (bijv. via `Migration<From,To>` hierboven) zou elk account voortaan een
+expliciete, betrouwbare versie-marker dragen i.p.v. dat toekomstige code weer op
+`data.len()`/padding moet gokken zoals nu.
+
+**3. `try_from_slice_unchecked` (Solana Cookbook data-migration-guide).** Geverifieerd:
+de LETTERLIJKE Cookbook-functie (`solana_program::borsh::try_from_slice_unchecked`) bestaat
+in de dependency-boom van dit project (`solana-borsh` 2.2.1/3.0.2, beide aanwezig via
+transitieve dependencies). **Belangrijke nuance, direct relevant voor de kernvraag:** noch
+deze functie, noch Anchor's eigen equivalent (`AccountDeserialize::try_deserialize_unchecked`
+- bevestigd gedefinieerd in `anchor-lang-1.1.2/src/lib.rs:365`, automatisch gegenereerd voor
+`WalletAccount` via de `#[account]`-macro) lost het waargenomen probleem op. "Unchecked"
+betekent hier UITSLUITEND "sla de 8-byte-discriminatorcontrole over" - de volledige
+veld-voor-veld Borsh-parse (inclusief de `bool`-validatie die de twee falende accounts nu al
+laat struikelen) blijft identiek. De technische sleutel voor optie (a) is dus niet
+`try_deserialize_unchecked`, maar het account als ruwe `AccountInfo`/`UncheckedAccount`
+benaderen en de bytes rechtstreeks lezen/schrijven ZONDER enige Borsh-structdeserialisatie
+van de betrokken regio - exact wat deel 3's eigen Rust-testharnas al deed voor de
+kruiscontrole, en exact wat een reparatie-instructie zou moeten doen als `Migration`
+(punt 1) niet gekozen wordt.
+
+**4. De kernvraag: stale byte vs. bewust ingestelde waarde - en repareren bij de bron.**
+Voor de twee NIEUWSTE velden (`spend_threshold_lamports`/`disarmed`) is het antwoord
+ondubbelzinnig JA, veilig te onderscheiden: geen enkele ooit-gedeployde programmaversie heeft
+ooit doelbewust naar die specifieke bytes van een van de 17 accounts geschreven (die velden
+bestonden niet vóór deze sessie) - elke waarde die daar nu staat is per definitie ofwel
+originele nulpadding, ofwel stale RecoveryState-restant. Een reparatie/migratie mag die 9
+bytes dus ONVOORWAARDELIJK op `0`/`false` zetten, voor alle 17, zonder enig risico een bewust
+ingestelde waarde te overschrijven. Voor de OUDERE, wél-ooit-echt-beschreven velden
+(`action_nonce`, `session_epoch`, `recovery_timelock_seconds`) ligt dat anders - daar KAN een
+toekomstig, ander stale-bytepatroon een schijnbaar plausibele maar foutieve waarde opleveren
+die niet betrouwbaar te onderscheiden is van een echte, en die dus NOOIT blind overschreven
+mag worden.
+
+**Repareren bij de bron (Michel's eigen suggestie) beoordeeld: dit raakt de wortel, niet
+het symptoom.** `cancel_recovery`/`finalize_recovery` expliciet laten nullen wat ze
+vrijgeven (de 41 bytes RecoveryState-payload, op het moment dat `recovery_state` van `Some`
+naar `None` gaat) is superieur aan elke achteraf-reparatie, om een precieze reden: op DAT
+moment weet de code EXACT en ONDUBBELZINNIG welke bytes vrijkomen (het is dezelfde code die
+de waarde net nog vasthield) - geen forensische reconstructie nodig, geen enkel risico om een
+andere, legitieme waarde te verwarren met stale data. Dit voorkomt het probleem voor ELKE
+toekomstige recovery-cyclus, bij ELKE wallet (ook de 15 nu-gezonde) - een eenmalige
+achteraf-reparatie voor de 2 bekende gevallen lost alleen het verleden op, niet de vandaag nog
+actieve oorzaak. **Dit zou naast, niet in plaats van, een eenmalige migratie voor de 2 (of,
+gezien punt 1's `Migration`-mechanisme uniform op alle 17 toepasbaar is, bij voorkeur alle 17
+proactief) bestaande accounts moeten gebeuren.**
+
+### Herziene aanbeveling (nog steeds geen code)
+
+Combinatie van drie eerder losse punten blijkt, met deze verificatie, één samenhangend
+ontwerp: **(1)** `cancel_recovery`/`finalize_recovery` aanpassen om de vrijgekomen
+`RecoveryState`-bytes expliciet te nullen op het moment van vrijgave (repareert de oorzaak
+structureel, voor altijd, ongeacht toekomstige layoutwijzigingen) - **(2)** een
+`migrate_wallet_account`-instructie op basis van Anchor's eigen `Migration<'info, From, To>`
+(al beschikbaar, geen upgrade nodig), toegepast op alle 17 bestaande accounts vóór/tijdens de
+upgrade, die de twee nieuwste velden expliciet op `0`/`false` zet via `realloc::zero = true`
+- **(3)** een `schema_version`-byte, ALS ONDERDEEL van diezelfde migratie-instructie
+toegevoegd, zodat elke volgende layoutwijziging vanaf nu een expliciete, betrouwbare
+versiebron heeft i.p.v. weer op padding te vertrouwen. Optie (b) uit de oorspronkelijke
+sectie 141 (defensievere deserialisatie) wordt hiermee overbodig - de bron is gerepareerd, dus
+er is geen kapotte data meer om defensief tegen te decoderen.
+
+Nog steeds niets gebouwd. Dit is nog steeds Michel's beslissing.
+
+### Tweede aanvulling: drie openstaande vragen beantwoord, met codebewijs - nog steeds NIETS gebouwd
+
+**Vraag 1 - catch-22, empirisch getest tegen de twee echte, corrupte byte-sets.** Bevestigd,
+NIET alleen beredeneerd: een tijdelijke test (`rc_part3_vraag1_migration_from_type_
+vermijdt_de_kapotte_byte`, `state.rs`) definieert `WalletAccountOldForMigrationTest` - alle
+velden t/m `session_epoch`, met een expliciet discriminator-override
+(`#[account(discriminator = [0x9e, 0x62, 0xab, 0x99, 0xd4, 0x40, 0xf2, 0xd5])]`, gelijk aan
+het live `WalletAccount`-discriminator) - en roept `try_deserialize` letterlijk aan tegen de
+twee opgeslagen, echte corrupte byte-sets. **Resultaat: beide slagen.** `WalletAccount` zelf
+faalt (herbevestigd, ter contrast, in dezelfde testrun). Dus: **ja, een migratie-instructie
+die het account via `WalletAccountOld` benadert raakt de kapotte byte nooit aan, en de
+eigenaar van beide getroffen wallets kan wél gewoon voor hun eigen migratie tekenen** - de
+instructie die hun handtekening verifieert (via `owner_passkey`, dat in het vaste,
+altijd-veilige prefix zit) crasht niet meer op hun corrupte state.
+
+**Onverwachte, belangrijke bijvangst van deze test:** voor `3Ape3ge72...` (231-byte-vintage,
+dus van vóór `action_nonce`/`session_epoch` bestonden) decodeerde `WalletAccountOld`
+`action_nonce=11743083837406067974` - overduidelijk GEEN echte waarde, zelf ook stale bytes
+(deze account is te oud om ooit een echte `action_nonce` gehad te hebben; de recovery-cyclus
+overlapt bij een 231-byte-vintage-account ook déze velden, niet alleen
+`spend_threshold_lamports`/`disarmed`). Voor `FSGNLavhz...` (247-byte-vintage, WEL van na
+`action_nonce`/`session_epoch`) gaf hetzelfde veld `action_nonce=2` - een geloofwaardige,
+eerder al onafhankelijk bevestigde ECHTE waarde. **Conclusie: "lees `WalletAccountOld` en
+vertrouw alle velden daarin blindelings" is NIET voor elk account veilig** - voor
+231-byte-vintage-accounts die ooit een recovery-cyclus doorliepen (zoals `3Ape3ge72`) moet een
+migratie-instructie `action_nonce`/`session_epoch` OOK expliciet op een veilige default
+zetten, niet overnemen uit `WalletAccountOld`. Dit is met de huidige informatie niet
+automatisch uit `data.len()` af te leiden zonder de exacte historische velduitrol-volgorde
+(231→239→247→256) te kennen - precies wat dit project al wel documenteert, maar een
+migratie-instructie zou dat expliciet moeten coderen, niet aannemen. **Aanbeveling: vóór het
+bouwen van de migratie-instructie, ALLE 17 s eigen transactiegeschiedenis controleren op een
+recovery-cyclus** (niet alleen de 2 al bekende) - dit deel is nog niet gedaan.
+
+**Vraag 2 - uniform (alle 17) of alleen de 2 kapotte? Mijn afweging: uniform, en de
+vraag-1-bijvangst versterkt dat argument aanzienlijk.** Vóór deze test leek "raak niet aan wat
+niet stuk is" nog een sterk argument voor een minimale, gerichte reparatie. Na deze test staat
+vast dat "stuk" niet betrouwbaar te herkennen is aan een harde fout alleen - een 231-byte-
+vintage-account met een undetected recovery-cyclus in de historie kan VANDAAG AL een
+stilzwijgend verkeerde `action_nonce`/`session_epoch` hebben, zonder dat er ook maar één
+foutmelding is - de bestaande kruiscontrole in stap 9 kan dit soort fout NIET vangen (die
+vergelijkt Anchor's decode met een even kwetsbare, dezelfde-offset-aannames-gebruikende ruwe
+parse - allebei zouden dezelfde garbage teruggeven, dus "geen afwijking gevonden" bewijst hier
+niets). Een gerichte reparatie ("alleen de 2 bekende") laat dit risico bij de overige 11
+231-byte-accounts volledig onderzocht noch afgedekt. Een uniforme migratie via `Migration<
+From, To>` - met, per de bijvangst hierboven, EXPLICIETE (niet overgenomen)
+defaults voor `action_nonce`/`session_epoch` bij 231-byte-vintage-accounts - dekt dit
+structureel af, geeft precies één geauditeerd pad voor alle 17, en is de natuurlijke plek om
+meteen de `schema_version`-byte (sectie 141's eerdere aanbeveling) voor iedereen te zetten.
+Tegenargument dat ik serieus neem maar niet doorslaggevend vind: 15 extra
+migratie-aanroepen voor accounts die vandaag zonder foutmelding werken - maar zodra de
+migratielogica bewijsbaar een no-op-equivalent is voor een werkelijk schoon account (dezelfde
+waarden, expliciet herschreven), weegt dat niet op tegen het afdekken van het stille-
+corruptie-risico.
+
+**Vraag 3 - toegangscontrole voor de migratie-instructie: permissionless, niet passkey,
+niet backup_authority.** Vraag 1 bevestigt dat passkey-gating technisch haalbaar IS (geen
+catch-22 meer) - maar operationeel is permissionless hier sterker, om een reden die rechtstreeks
+uit vraag 2's aanbeveling volgt: als alle 17 uniform en proactief gemigreerd moeten worden
+(inclusief het detecteren/repareren van het stille `action_nonce`-risico bij accounts waarvan
+de eigenaar mogelijk niet eens weet dat er ooit een recovery-cyclus was), is het wachten op 17
+individuele, bewuste eigenaar-handtekeningen een onnodige operationele afhankelijkheid - een
+enkele permissionless-aanroep (door wie dan ook, bijvoorbeeld dezelfde partij die de upgrade
+zelf uitvoert) kan alle 17 in één keer naar de schone staat brengen, zonder op iemand te
+wachten. Dit past bij het bestaande projectpatroon (`close_expired_session` is permissionless,
+precies omdat de UITKOMST onvoorwaardelijk veilig/gunstig is, ongeacht wie de aanroep
+triggert - geen waardeoverdracht, geen autorisatiewijziging, uitsluitend bekende, veilige
+defaults). Dezelfde redenering geldt hier: de migratie verplaatst geen geld, wijzigt geen
+`owner_passkey`/`backup_authority`, en de enige velden die expliciet gezet worden
+(`spend_threshold_lamports=0`, `disarmed=false`, evt. `action_nonce=0`/`session_epoch=0` voor
+231-byte-vintage-accounts) zijn stuk voor stuk al het bestaande fail-safe-default van het
+ontwerp zelf - er is dus niets "onverwachts" dat een willekeurige derde partij zou kunnen
+opleggen aan een eigenaar. Een apart `backup_authority`-vangnet is overbodig: als de eigenaar
+zijn passkey kwijt is, bestaat daar al een dedicated pad voor (de gewone
+recovery-flow) - een tweede, parallelle migratie-toegangsroute zou onnodige complexiteit
+toevoegen zonder een scenario te dekken dat niet al gedekt is.
+
+### Hoe de bron-fix (cancel_recovery/finalize_recovery) getest zou worden - empirisch, niet alleen beredeneerd
+
+Zelfde stijl als de rest van dit project (bijv. de bestaande `uint8ArrayByteFidelity.ts`/
+`checkAllOldWallets.ts`-aanpak: ruwe bytes rechtstreeks uitlezen, niet op het type-systeem
+vertrouwen). Voorgestelde test (tegen een echte lokale validator, `anchor test
+--validator legacy`, geen synthetische Rust-unittest - dit moet het daadwerkelijke on-chain
+schrijfgedrag meten):
+
+1. Wallet aanmaken, `initiate_recovery` aanroepen (`recovery_state` wordt `Some`).
+2. **Vóór** `cancel_recovery`/`finalize_recovery`: de ruwe accountbytes ophalen
+   (`getAccountInfo`) en bevestigen dat offset 149-189 (de `RecoveryState`-payload) daadwerkelijk
+   niet-triviale, van nul verschillende bytes bevat (sanity-check dat de test iets zinvols
+   meet, niet toevallig al-nul data).
+3. `cancel_recovery` aanroepen (los herhalen voor `finalize_recovery`, apart testgeval -
+   beide paden zetten `recovery_state = None` en moeten allebei getest worden).
+4. **Ná** de aanroep: de ruwe accountbytes opnieuw ophalen en EXPLICIET, byte-voor-byte,
+   bevestigen dat offset 149 t/m 189 (41 bytes) nu ALLEMAAL `0x00` zijn - niet alleen dat
+   `recovery_state` logisch `None` decodeert (dat getest de HUIDIGE, kapotte situatie ook al
+   zou "slagen" voor, want de tag zelf is altijd correct 0). Dit is precies het verschil
+   tussen "lijkt opgelost" en "is aantoonbaar opgelost".
+5. Regressietest tegen de HUIDIGE (ongefixte) code eerst draaien om te bevestigen dat stap 4
+   voor de bestaande code FAALT (rode test vóór de fix, groene test erna) - hetzelfde
+   fail-eerst-patroon als de al-bestaande `old_231/239/247_byte_...`-tests in `state.rs`.
+6. Aanvullend, als tweede, onafhankelijke test: een WalletAccount kunstmatig zo prepareren
+   dat het ná de fix een `recovery_state = Some → None`-cyclus doorloopt bij een KUNSTMATIG
+   VERKORTE (231-byte) account-vorm (of: tegen de echte `3Ape3ge72`-bytes, offline, een
+   gesimuleerde "wat als de bron-fix toen al bestond had"-reconstructie) - bevestigt dat de
+   fix ook met terugwerkende kracht redeneerbaar is (al lost dat de twee AL BESTAANDE
+   corrupte accounts natuurlijk niet met terugwerkende kracht op - daarvoor blijft de
+   migratie-instructie uit vraag 1/2 nodig).
+
+Nog steeds geen code gebouwd - dit is het testontwerp, niet de test zelf. Ik wacht op
+Michels akkoord voordat dit (of de migratie-instructie, of de bron-fix) daadwerkelijk
+geschreven wordt.
+
+### Derde aanvulling: de vereiste voorafcontrole - ALLE 17 s transactiegeschiedenis, niet alleen de 2 bekende - nog steeds NIETS gebouwd
+
+Op verzoek, vóór er ook maar één regel productiecode geschreven wordt: de volledige
+transactiegeschiedenis van alle 15 nog niet gecontroleerde wallets opgehaald (read-only) en
+elke instructienaam bevestigd.
+
+**Resultaat, volledig:**
+
+| Categorie | Aantal | Wallets |
+|---|---|---|
+| Voltooide recovery-cyclus (`InitiateRecovery` → `Cancel`/`FinalizeRecovery`) | 2 | `3Ape3ge72...`, `FSGNLavhz...` (al bekend uit deel 3) |
+| Lopende, NIET-voltooide recovery (`InitiateRecovery`, nog geen Cancel/Finalize) | 1 | `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ` |
+| Nooit `InitiateRecovery` aangeroepen | 14 | alle overige |
+
+**Geen enkele NIEUWE getroffen wallet gevonden.** De 14 die nooit `initiate_recovery`
+aanriepen zijn structureel gevrijwaard van dit specifieke corruptiepad - er is nooit een
+moment geweest waarop `recovery_state` van `Some` naar `None` overging, dus geen stale bytes
+om te herïnterpreteren. `5MoXqgBD...` zit middenin een lopende recovery (`recovery_state` nu
+`Some`, dus rechtstreeks gelezen, niet herïnterpreteerd via de None-tag-doorlees-route) - geen
+risico, en al bevestigd "OK" in de oorspronkelijke stap-9-testrun.
+
+**Vraag-1-stijl veld-voor-veld herhaling, voor de 2 daadwerkelijk getroffen wallets:**
+
+| Wallet (vintage) | `action_nonce` (via `WalletAccountOld`) | `session_epoch` | Beoordeling |
+|---|---|---|---|
+| `3Ape3ge72...` (231-byte, vóór deze velden bestonden) | `11743083837406067974` | `9932421821989444450` | **Beide corrupt** - deze vintage kan nooit een echte waarde voor een van beide gehad hebben |
+| `FSGNLavhz...` (247-byte, wél na deze velden) | `2` | `1` | **Beide legitiem** - `session_epoch=1` klopt exact met precies 1 voltooide recovery (`finalize_recovery` telt `session_epoch += 1` op, startwaarde 0); `action_nonce=2` klopt met de twee nonce-verbruikende instructies (`AddPasskey`, `AddSessionKey`) vóór de recovery in de eigen, geverifieerde historie |
+
+**Conclusie - precies wat de migratie-instructie moet coderen, niet aannemen:** het "veilig
+over te nemen uit `WalletAccountOld`"-bereik verschilt per GETROFFEN wallet, niet uniform per
+byte-grootte:
+- `FSGNLavhz...`: `action_nonce`/`session_epoch` mogen worden overgenomen zoals
+  `WalletAccountOld` ze leest.
+- `3Ape3ge72...` (de ENIGE 231-byte-vintage wallet met een voltooide recovery, van de 12
+  231-byte-accounts in totaal): `action_nonce`/`session_epoch` moeten EXPLICIET op `0` gezet
+  worden, niet overgenomen.
+- Alle overige 15 (14 zonder ooit een recovery + `5MoXqgBD`'s huidige, ongewijzigde
+  `Some`-staat, die de migratie-instructie sowieso ongemoeid kan laten totdat de eigenaar zelf
+  de lopende recovery afrondt): geen speciale behandeling nodig, `WalletAccountOld`'s velden
+  zijn betrouwbaar.
+
+Dit is nu een volledig, uitputtend antwoord voor alle 17 - geen open vlekken meer. Nog steeds
+niets gebouwd. Ik wacht op Michels akkoord om de bron-fix en de migratie-instructie
+daadwerkelijk te schrijven.
+
+### Vierde aanvulling: bronfix gebouwd en empirisch bewezen (rood/groen, echte validator)
+
+Op akkoord: `cancel_recovery`/`finalize_recovery` aangepast om de vrijgekomen
+`RecoveryState`-bytes expliciet te nullen op het moment dat `recovery_state` van `Some` naar
+`None` gaat.
+
+**Wijziging:**
+- `state.rs`: nieuwe, altijd-stabiele constante `WalletAccount::RECOVERY_STATE_PAYLOAD_OFFSET`
+  (149 - de positie direct ná `recovery_state`'s Option-tag; onafhankelijk van elk later
+  toegevoegd veld, want alles ervóór is vlak/vast-groot).
+- `errors.rs`: nieuwe, in de praktijk onbereikbare defensieve errorcode
+  `WalletAccountTooShortForRecoveryCleanup`.
+- `instructions.rs`: nieuwe helper `clear_recovery_state_payload_bytes()` - nult rechtstreeks
+  41 bytes in de ruwe accountbytes, aangeroepen direct ná `recovery_state = None` in zowel
+  `cancel_recovery` als `finalize_recovery`.
+
+**Rood-vóór-groen, empirisch, tegen een echte lokale validator (`tests/recovery.ts`, twee
+nieuwe tests):**
+- **Rood** (fix tijdelijk uitgeschakeld): 2 failing, met de niet-nul restbytes zichtbaar in
+  de foutmelding.
+- **Fout in de test zelf ontdekt en gecorrigeerd, tijdens de "groene" run** (zelf gemeld,
+  niet verzwegen): de eerste testversie eiste dat het VOLLE 41-byte-gebied na de fix nul is
+  - onjuist, want `recovery_timelock_seconds`/`action_nonce`/`session_epoch`/
+  `spend_threshold_lamports`/`disarmed` horen daar legitiem, niet-nul te staan (correct
+  teruggeschreven door Anchor's eigen `exit()`). Alleen de 7 bytes ná `disarmed` (buiten elk
+  huidig veld, binnen de historisch gereserveerde ruimte) horen nul te zijn - precies wat de
+  fix beschermt tegen een toekomstige langere structuurdefinitie. Test gecorrigeerd, fout
+  gedocumenteerd in de code zelf.
+- **Nagevraagd en expliciet bevestigd (niet aangenomen):** de gecorrigeerde, smallere
+  assertie faalde OOK al bij de oorspronkelijke rode run - gecontroleerd met de reeds
+  vastgelegde rode-run-bytes (`87a8397d583f33` resp. `22f01d26023174`, beide ondubbelzinnig
+  niet-nul). De gecorrigeerde test bewijst dus wel degelijk iets, geen toevallige match met
+  de te brede oorspronkelijke assertie.
+- **Groen** (fix actief, gecorrigeerde assertie): 7/7 passing in `recovery.ts`.
+- **Volledige suite ná de fix:** 108 passing (was 106) / 42 pending / 0 failing - niets
+  anders gebroken.
+
+De tijdelijke deel-3-verificatietests uit sectie 141 (`rc_part3_all_17_...`,
+`rc_part3_vraag1_...`) zijn uit `state.rs` verwijderd (bonden aan `/tmp`-paden en een
+momentopname, geen permanente testfixture) - hun bevindingen staan al volledig gedocumenteerd
+in sectie 141 zelf.
+
+**Reikwijdte, expliciet:** deze fix repareert de twee al-bestaande, corrupte accounts NIET
+met terugwerkende kracht - dat vereist de aparte migratie-instructie. Hij voorkomt
+uitsluitend dat het probleem zich nog een keer voordoet, voor elke recovery-cyclus vanaf nu,
+bij alle 17 (of toekomstige) wallets.
+
+Vervolg (migratie-instructie, stap 2) hieronder / in een volgende sectie.

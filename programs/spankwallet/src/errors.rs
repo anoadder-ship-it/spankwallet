@@ -220,4 +220,14 @@ pub enum SpankWalletError {
     // reden als hierboven).
     #[msg("execute_advanced is permanent geblokkeerd voor directe aanroep - gebruik initiate_advanced_action/finalize_advanced_action")]
     AdvancedActionMustUseQueue,
+
+    // STATUS.md sectie 141-vervolg (bronfix, cancel_recovery/
+    // finalize_recovery): defensieve grens, in de praktijk onbereikbaar -
+    // alle 17 bestaande WalletAccounts zijn minstens 231 bytes, ruim boven
+    // de 190 die clear_recovery_state_payload_bytes() nodig heeft. Bestaat
+    // uitsluitend om nooit stilzwijgend buiten de accountgrenzen te
+    // schrijven, mocht een toekomstige, nog kortere account-vorm ooit
+    // bestaan.
+    #[msg("WalletAccount is te kort om de recovery_state-payload-regio veilig te nullen")]
+    WalletAccountTooShortForRecoveryCleanup,
 }

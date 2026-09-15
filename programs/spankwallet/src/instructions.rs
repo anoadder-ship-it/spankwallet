@@ -631,6 +631,30 @@ fn consume_action_nonce(wallet: &mut WalletAccount) -> Result<()> {
     Ok(())
 }
 
+/// STATUS.md sectie 141-vervolg (bronfix): moet aangeroepen worden op het
+/// EXACTE moment dat `recovery_state` van `Some` naar `None` gaat
+/// (`cancel_recovery`/`finalize_recovery`) - nooit ergens anders, en nooit
+/// weggelaten bij een toekomstige derde plek die `recovery_state` ooit weer
+/// op `None` zet. Nult expliciet de 41 bytes die de `Some(RecoveryState)`-
+/// payload zou hebben ingenomen, rechtstreeks in de ruwe accountbytes -
+/// Borsh's eigen `Option::None`-serialisatie doet dit NIET vanzelf (schrijft
+/// alleen de 1-byte-tag, laat de oude payload-bytes onaangeroerd). Zonder
+/// deze opruiming blijven die 41 bytes stale data bevatten die een latere,
+/// langere structuurdefinitie stilzwijgend als (foutieve) veldwaarden zou
+/// inlezen - empirisch aangetoond tegen twee echte, corrupte devnet-accounts
+/// (deel 3 van de RC-verificatie, sectie 141). Deze fix repareert die twee
+/// bestaande accounts NIET met terugwerkende kracht (daarvoor is de aparte
+/// migratie-instructie nodig) - hij voorkomt uitsluitend dat het nog een
+/// keer gebeurt, voor elke recovery-cyclus vanaf nu.
+fn clear_recovery_state_payload_bytes(wallet_info: &AccountInfo) -> Result<()> {
+    let start = WalletAccount::RECOVERY_STATE_PAYLOAD_OFFSET;
+    let end = start + RecoveryState::LEN;
+    let mut data = wallet_info.try_borrow_mut_data()?;
+    require!(data.len() >= end, SpankWalletError::WalletAccountTooShortForRecoveryCleanup);
+    data[start..end].fill(0);
+    Ok(())
+}
+
 // execute
 
 #[derive(Accounts)]
@@ -3285,6 +3309,7 @@ pub fn cancel_recovery(
     )?;
     consume_action_nonce(&mut ctx.accounts.wallet)?;
     ctx.accounts.wallet.recovery_state = None;
+    clear_recovery_state_payload_bytes(&ctx.accounts.wallet.to_account_info())?;
     Ok(())
 }
 
@@ -3343,6 +3368,7 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
 
     wallet.owner_passkey = recovery.new_owner_passkey;
     wallet.recovery_state = None;
+    clear_recovery_state_payload_bytes(&wallet.to_account_info())?;
     // B2 (STATUS.md sectie 76): elke bestaande sessiesleutel wordt hier in
     // één klap ongeldig - zie execute_via_session/transfer_token_via_session/
     // execute_advanced_via_session voor de bijbehorende epoch-check.

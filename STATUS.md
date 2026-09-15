@@ -13805,3 +13805,55 @@ uitzondering, niet een volledige live-migratie van alle 17 - dat blijft, net als
 elke schrijfactie tegen het canonieke devnet-programma zelf (Deel B draaide, net als Deel A,
 tegen een eigen, lokale validatorinstantie met de bytes als genesis - het canonieke adres is
 ook deze keer uitsluitend read-only benaderd, voor de verse fetch).
+
+## 144. Multisig-voorstel-voorbereiding, stap 0: RC-verificatie deel 1 herhaald tegen de HUIDIGE HEAD (69a59a4) - een echt gat gevonden en gedicht (2026-09-15)
+
+Vóór er aan het multisig-voorstel voor de spend-cap-devnet-upgrade gebouwd wordt: deel 1
+(STATUS.md sectie 139) liep destijds tegen `5238a56`, niet tegen de huidige, uiteindelijke
+HEAD (die de bronfix, `migrate_wallet_account`, en de dubbele-migratie-guard uit sectie 143
+bevat). Op verzoek volledig herhaald tegen `69a59a4f531fb0c46f42cdaf5ab644726e12f534`.
+
+**Gevonden gat, verplicht te melden vóórdat er verder gebouwd werd:** sectie 142's
+samenvatting schrijft "canoniek adres exact 1x en 12 historische wegwerp-/testadressen 0x in
+het binary" toe aan deel 1 (sectie 139) - maar sectie 139's eigen tekst bevat helemaal geen
+byte-verificatiestap (alleen een documentatie-audit + `yarn test`), en nergens in de repo,
+STATUS.md of git-geschiedenis stond een daadwerkelijke, opsombare lijst van die 12 adressen.
+Het enige tot dan toe werkende mechanisme (`verify-program-id-in-binary.ts`) controleerde
+uitsluitend tegen wat er *op het moment van draaien* in de lokale, niet-gecommitte
+`~/.config/spankwallet/program-keypairs/`-map stond (op dat moment 3 bestanden) - de
+oorspronkelijke 12 waren dus nergens duurzaam vastgelegd, alleen ooit genoemd in een
+gespreksgeschiedenis die niet meer beschikbaar was.
+
+**Gemeld en gestopt, zoals afgesproken vóór verder bouwen.** Op Michels antwoord: de
+volledige lijst van 12 bleek nog wel bekend (uit de conversatiegeschiedenis, nooit als
+bestand vastgelegd) - alsnog aangeleverd, met herkomst per adres.
+
+**Structurele fix, niet alleen deze ene keer opgelost:** nieuw, gecommit bestand
+`scripts/historical-throwaway-program-ids.json` - uitsluitend PUBLIEKE adressen (nooit
+secrets), voor precies de gevallen waar geen private key bewaard is/moest worden.
+`verify-program-id-in-binary.ts`'s negatieve controle combineert voortaan TWEE bronnen: (a)
+de bestaande, niet-gecommitte keypair-store (secret keys, waar die nog relevant zijn) en (b)
+dit nieuwe, wél-gecommitte manifest. Ontbreekt een van beide, dan is dat expliciet gemeld,
+geen stille fout - zelfde discipline als de rest van dit project. Dit dicht het gat
+structureel: een toekomstige RC-ronde is niet langer afhankelijk van wat er toevallig nog in
+een lokale, ongetrackte map staat, of van wat iemand zich nog herinnert uit een eerdere
+sessie.
+
+**Resultaat, stap 0 volledig, tegen `69a59a4`:**
+- Geïsoleerde build (verse `git worktree`, eigen `CARGO_TARGET_DIR`, `cargo-build-sbf --arch
+  v3`, geen cache-hergebruik): **reproduceerbaar** - twee onafhankelijke builds (vóór en ná
+  het manifest bijgewerkt was - de manifest-wijziging raakt alleen TS-tooling, niet de
+  Rust-broncode) gaven exact hetzelfde resultaat: 653.256 bytes,
+  sha256=`4187b8095b30c53a8ccb9d94cd8f6aa619633ba64ffc852fd8c19c23fe9ce40f`.
+- `declare_id!` op deze commit: al het canonieke devnet-adres, geen sync/swap nodig.
+- `verify-no-test-features-in-binary.ts`: exit 0.
+- Byte-verificatie, volledig: canoniek adres (`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`)
+  exact 1× (offset 10368). **16 bekende identiteiten (3 keypair-store + 13 manifest, incl. de
+  12 aangeleverde + `EwBHjz...` uit deel 2) stuk voor stuk 0×.** Geen enkele afwijking.
+- Volledige lokale testsuite, tegen exact deze commit: `yarn test` **114 passing / 42
+  pending / 0 failing** (klopt exact tegen de bekende baseline: 108 vóór sectie 143 + de 6
+  nieuwe Deel-A-tests uit `migrateWalletAccount.ts`); `yarn test:pending-action` **39
+  passing / 1 pending / 0 failing**.
+
+**Geen enkel resultaat wijkt af van wat eerder bekend was, ná het dichten van het gat.** Stap
+0 is hiermee schoon afgesloten - verder naar stap 1 (de daadwerkelijke devnet-buffer).

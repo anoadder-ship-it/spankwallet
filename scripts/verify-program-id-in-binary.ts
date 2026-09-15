@@ -9,18 +9,24 @@
 //      rauwe .so-bytes (niet in de broncode - de bytes die daadwerkelijk
 //      geüpload zouden worden). Nul treffers = verkeerd/geen programma;
 //      meer dan 1 treffer = dubbelzinnig, niet automatisch te vertrouwen.
-//   2. NEGATIEF: GEEN van de bekende test-/wegwerpadressen (uit
-//      ${XDG_CONFIG_HOME:-~/.config}/spankwallet/program-keypairs/) mag
-//      voorkomen - zowel lokale-validator-testadressen als devnet-
-//      wegwerpdeploys (STATUS.md sectie 87: 2NHovxaquuaf1RsPsKAPk9rVAcN4nt-
-//      foFCiHWYhpCAp8, de B1-B7-throwaway-deploy, staat hier ook expliciet
-//      in - een devnet-adres kan net zo goed per ongeluk voor "de echte,
-//      deploybare build" worden aangezien als een lokaal testadres). Dit is
-//      de controle die de daadwerkelijke voetangel tegenhoudt: een test-
-//      artefact dat voor een deploybare devnet-.so wordt aangezien (zie
-//      STATUS.md - "de .so is een valstrik"-sectie). Bestaat de keypair-
-//      store niet, dan is dat geen fout - de controle wordt dan expliciet
-//      (niet stilzwijgend) overgeslagen.
+//   2. NEGATIEF: GEEN van de bekende test-/wegwerpadressen mag voorkomen -
+//      zowel lokale-validator-testadressen als devnet-wegwerpdeploys
+//      (STATUS.md sectie 87: 2NHovxaquuaf1RsPsKAPk9rVAcN4ntfoFCiHWYhpCAp8,
+//      de B1-B7-throwaway-deploy). Dit is de controle die de daadwerkelijke
+//      voetangel tegenhoudt: een test-artefact dat voor een deploybare
+//      devnet-.so wordt aangezien (zie STATUS.md - "de .so is een
+//      valstrik"-sectie). Twee, elkaar aanvullende bronnen, want niet elk
+//      bekend wegwerpadres heeft een bewaarde private key:
+//        a. ${XDG_CONFIG_HOME:-~/.config}/spankwallet/program-keypairs/ -
+//           volledige keypairs (secret key nodig geweest/nog nodig voor
+//           iets anders). Bestaat de map niet, dan is dat geen fout - dit
+//           deel wordt dan expliciet (niet stilzwijgend) overgeslagen.
+//        b. scripts/historical-throwaway-program-ids.json (WEL gecommit,
+//           bevat UITSLUITEND publieke adressen, nooit secrets) - voor
+//           wegwerpadressen waarvan de private key bewust nooit bewaard is
+//           (STATUS.md sectie 140/143: EwBHjzFCt9inNb9WBWeZjV4fcQ925GHWNp-
+//           jNaaZgXkj3, deel 2's eenmalige devnet-rooktest-adres). Ontbreekt
+//           dit bestand, dan is dat ook geen fout - alleen (a) draait dan.
 //
 // Gebruik:
 //   node_modules/.bin/ts-node --transpile-only \
@@ -100,48 +106,81 @@ function main(): void {
   const xdgConfigHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
   const keypairStore = path.join(xdgConfigHome, "spankwallet", "program-keypairs");
 
-  if (!fs.existsSync(keypairStore)) {
-    console.log(
-      `MELDING (negatieve controle OVERGESLAGEN): ${keypairStore} bestaat niet - ` +
-        "geen bekende test-/wegwerpadressen om tegen te controleren. Dit is geen " +
-        "fout, maar de negatieve controle heeft in dit geval NIET gedraaid."
-    );
-    console.log("ALLE UITGEVOERDE CONTROLES GESLAAGD.");
-    return;
-  }
+  type KnownIdentity = { label: string; pubkey: string; bytes: Buffer };
+  const knownIdentities: KnownIdentity[] = [];
 
-  const keypairFiles = fs
-    .readdirSync(keypairStore)
-    .filter((f) => f.endsWith("-keypair.json"));
-
-  if (keypairFiles.length === 0) {
-    console.log(
-      `MELDING (negatieve controle OVERGESLAGEN): ${keypairStore} bestaat, maar ` +
-        "bevat geen *-keypair.json-bestanden."
-    );
-    console.log("ALLE UITGEVOERDE CONTROLES GESLAAGD.");
-    return;
-  }
-
-  const localIdentities = keypairFiles.map((file) => {
-    const fullPath = path.join(keypairStore, file);
-    let keypair: Keypair;
-    try {
-      const secret = JSON.parse(fs.readFileSync(fullPath, "utf8"));
-      keypair = Keypair.fromSecretKey(Uint8Array.from(secret));
-    } catch {
-      fail(`FOUT (ongeldig keypair-bestand): ${fullPath} kon niet gelezen worden als een geldig Solana-keypair.`);
+  // Bron (a): volledige keypairs (secret key ooit nodig geweest/nog nodig).
+  if (fs.existsSync(keypairStore)) {
+    const keypairFiles = fs.readdirSync(keypairStore).filter((f) => f.endsWith("-keypair.json"));
+    for (const file of keypairFiles) {
+      const fullPath = path.join(keypairStore, file);
+      let keypair: Keypair;
+      try {
+        const secret = JSON.parse(fs.readFileSync(fullPath, "utf8"));
+        keypair = Keypair.fromSecretKey(Uint8Array.from(secret));
+      } catch {
+        fail(`FOUT (ongeldig keypair-bestand): ${fullPath} kon niet gelezen worden als een geldig Solana-keypair.`);
+        return;
+      }
+      knownIdentities.push({
+        label: `${keypair.publicKey.toBase58()} (uit ${file})`,
+        pubkey: keypair.publicKey.toBase58(),
+        bytes: Buffer.from(keypair.publicKey.toBytes()),
+      });
     }
-    return { file, pubkey: keypair.publicKey.toBase58(), bytes: Buffer.from(keypair.publicKey.toBytes()) };
-  });
+    if (keypairFiles.length === 0) {
+      console.log(`MELDING: ${keypairStore} bestaat, maar bevat geen *-keypair.json-bestanden.`);
+    }
+  } else {
+    console.log(`MELDING: ${keypairStore} bestaat niet - dit deel van de negatieve controle wordt overgeslagen.`);
+  }
+
+  // Bron (b): publieke-adressen-manifest (geen secrets) - voor wegwerpadressen
+  // waarvan de private key bewust nooit bewaard is.
+  const manifestPath = path.join(__dirname, "historical-throwaway-program-ids.json");
+  if (fs.existsSync(manifestPath)) {
+    let manifest: Array<{ address: string; description?: string }>;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    } catch {
+      fail(`FOUT (ongeldig manifest): ${manifestPath} kon niet gelezen worden als geldige JSON.`);
+      return;
+    }
+    for (const entry of manifest) {
+      let pk: PublicKey;
+      try {
+        pk = new PublicKey(entry.address);
+      } catch {
+        fail(`FOUT (ongeldig adres in manifest): "${entry.address}" in ${manifestPath} is geen geldig base58-adres.`);
+        return;
+      }
+      knownIdentities.push({
+        label: `${entry.address} (uit ${path.basename(manifestPath)}${entry.description ? ": " + entry.description : ""})`,
+        pubkey: entry.address,
+        bytes: Buffer.from(pk.toBytes()),
+      });
+    }
+  } else {
+    console.log(`MELDING: ${manifestPath} bestaat niet - dit deel van de negatieve controle wordt overgeslagen.`);
+  }
+
+  if (knownIdentities.length === 0) {
+    console.log(
+      "MELDING (negatieve controle OVERGESLAGEN): geen enkele bron van bekende " +
+        "test-/wegwerpadressen beschikbaar. Dit is geen fout, maar de negatieve " +
+        "controle heeft in dit geval NIET gedraaid."
+    );
+    console.log("ALLE UITGEVOERDE CONTROLES GESLAAGD.");
+    return;
+  }
 
   let foundAny = false;
-  for (const { file, pubkey, bytes } of localIdentities) {
+  for (const { label, bytes } of knownIdentities) {
     const offsets = findAllOccurrences(soBytes, bytes);
     if (offsets.length > 0) {
       foundAny = true;
       console.error(
-        `FOUT (BEKEND TEST-/WEGWERPADRES AANGETROFFEN): ${pubkey} (uit ${file}) komt ` +
+        `FOUT (BEKEND TEST-/WEGWERPADRES AANGETROFFEN): ${label} komt ` +
           `${offsets.length} keer voor in\n` +
           `${soPath}, op offsets ${offsets.join(", ")}.\n` +
           "Dit is precies het artefact dat deze controle moet tegenhouden: een " +
@@ -156,7 +195,7 @@ function main(): void {
 
   console.log(
     `OK (geen bekende test-/wegwerpadressen aangetroffen): gecontroleerd tegen ` +
-      `${localIdentities.length} bekende identiteit(en) uit ${keypairStore}.`
+      `${knownIdentities.length} bekende identiteit(en) (keypair-store + manifest).`
   );
   console.log("ALLE CONTROLES GESLAAGD.");
 }

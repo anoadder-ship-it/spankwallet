@@ -1,0 +1,54 @@
+[
+  {
+    "address": "EwBHjzFCt9inNb9WBWeZjV4fcQ925GHWNpjNaaZgXkj3",
+    "description": "RC-verificatie deel 2 (STATUS.md sectie 140): vers, eenmalig gegenereerd wegwerpadres voor de devnet-rooktest. Private key nooit bewaard (bewust, eenmalig keypair) - vandaar hier als publiek adres vastgelegd, niet als keypair-bestand."
+  },
+  {
+    "address": "2NHovxaquuaf1RsPsKAPk9rVAcN4ntfoFCiHWYhpCAp8",
+    "description": "B1-B7-throwaway-devnet (STATUS.md sectie 87). Ook aanwezig als keypair in ~/.config/spankwallet/program-keypairs/ (spankwallet-b1b7-throwaway-devnet-keypair.json) - hier bewust ALSNOG expliciet vastgelegd, zodat de controle niet stilzwijgend afhankelijk blijft van die lokale, niet-gecommitte keypair-store."
+  },
+  {
+    "address": "4ywru3zEtQZv2pv5S7azb9PBMh3bDKzR7HS47QKpkBfa",
+    "description": "Lokaal testadres, gebruikt voor een tijdelijke declare_id!-ID-swap tijdens lokaal testen. Ook aanwezig als keypair (spankwallet-keypair.json) - zelfde reden als hierboven om ook hier expliciet vast te leggen."
+  },
+  {
+    "address": "7DTzYDR8wkT5gcrA4cf2LYp97ExnZ8by5B3akx6WSiLG",
+    "description": "AUDIT M-2 (session-PDA isWritable in execute_via_session) throwaway-devnet-deploy."
+  },
+  {
+    "address": "4mE8U2TFRpDDPR3681KdPCwgQMVr2xhaMebvBp9gKW58",
+    "description": "Oud devnet-programma-adres, van vóór het huidige canonieke adres (9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9)."
+  },
+  {
+    "address": "HHBf6fbFSXNKYNbJS26ch6YywwbrY5otiDLoLaVSXenQ",
+    "description": "Lokale-validator-testdeploy (gesloten)."
+  },
+  {
+    "address": "BAbTe7HWMfGXvd7ifP1cXLETs1h2hTHi6cY1EGg9r3Sj",
+    "description": "Per-ongeluk gegenereerd `anchor keys sync`-artefact - nooit daadwerkelijk gebouwd/gedeployed, voorzichtigheidshalve toch op de lijst."
+  },
+  {
+    "address": "BUtmiNmqdyZvDfzgu3DTzK39QPTqFUn4aYiAMHemckqk",
+    "description": "Permanente, gepinde spankwallet-testfixture."
+  },
+  {
+    "address": "G1D5ckPj3ZMBeYNfEz24dGhvPExqNP6Y3SFNx3V7RbK5",
+    "description": "Active-defense's spankwallet-test-blocklist."
+  },
+  {
+    "address": "DGaTtEj3Hr54MedgZj2CyCpFgH1e6ATNTNweG9v46ypq",
+    "description": "Active-defense's spankwallet-test-blocklist."
+  },
+  {
+    "address": "8vPFH4YYVzRr2euemkXDHRz2McH58BBKfwJtQUumc8x5",
+    "description": "Active-defense's spankwallet-test-blocklist."
+  },
+  {
+    "address": "9W3CGKhd7hgywf3xfP8snNmB2AgmzwQ3rdDFDV3hUurK",
+    "description": "Active-defense's blocklist + leftover keypair spankwallet-root."
+  },
+  {
+    "address": "ERAEjxMgxserGuj8hc6v7LVy6ZaXaVxwDtXFLbsxj8wY",
+    "description": "Vroege devnet-deploy-bevestiging (voorzichtigheidshalve op de lijst)."
+  }
+]

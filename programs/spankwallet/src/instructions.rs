@@ -3417,13 +3417,19 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
 /// gevallen niet afdekken).
 #[derive(Accounts)]
 pub struct MigrateWalletAccount<'info> {
+    // STATUS.md sectie 143 (bronfix, dubbele-migratie-gat): BEWUST GEEN
+    // `realloc`-constraint hier - anchor-syn's `linearize()` (constraints.rs)
+    // plaatst Realloc altijd vóór elke Raw/`constraint = ...`-check op
+    // hetzelfde veld, dus een guard via een `constraint = ...`-attribuut zou
+    // hoe dan ook pas NA de resize draaien en dus nooit het verschil tussen
+    // "nog niet gemigreerd" en "al gemigreerd" kunnen zien (beide zijn dan al
+    // 256 bytes). De guard EN de realloc zelf gebeuren daarom bewust
+    // handmatig, vooraan in migrate_wallet_account() - zie de toelichting
+    // daar.
     #[account(
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        realloc = WalletAccount::LEN,
-        realloc::payer = payer,
-        realloc::zero = false,
     )]
     pub wallet: Migration<'info, WalletAccountOld, WalletAccount>,
 
@@ -3457,6 +3463,58 @@ const WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH: Pubkey =
     pubkey!("3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ");
 
 pub fn migrate_wallet_account(ctx: Context<MigrateWalletAccount>) -> Result<()> {
+    // STATUS.md sectie 143 (dubbele-migratie-gat, empirisch gevonden tijdens
+    // de live-validator-integratietest): WalletAccountOld deelt bewust
+    // hetzelfde discriminator als WalletAccount (state.rs), en Borsh's
+    // try_deserialize_unchecked controleert nooit of de hele buffer verbruikt
+    // is - een AL-gemigreerd, 256-byte account deserialiseert daardoor gewoon
+    // opnieuw succesvol als WalletAccountOld (leest de eerste velden, negeert
+    // de rest). Zonder deze guard zou een tweede aanroep dus NIET falen, maar
+    // spend_threshold_lamports/disarmed stilzwijgend terugzetten naar
+    // 0/false - empirisch bevestigd (zie STATUS.md sectie 143) vóórdat deze
+    // guard bestond.
+    //
+    // Deze check MOET gebeuren VOORDAT de accountbuffer wordt vergroot - zie
+    // de toelichting bij MigrateWalletAccount hierboven voor waarom dat een
+    // handmatige realloc vereist i.p.v. Anchor's eigen `realloc`-constraint.
+    // Elke bestaande, nog-niet-gemigreerde WalletAccount is 231, 239 of 247
+    // bytes - altijd STRIKT kleiner dan WalletAccount::LEN (256); elk account
+    // dat al exact WalletAccount::LEN is, is per definitie al gemigreerd
+    // (deze migratie is de ENIGE plek die de accountgrootte ooit naar 256
+    // brengt).
+    let wallet_info = ctx.accounts.wallet.as_ref().clone();
+    require!(
+        wallet_info.data_len() != WalletAccount::LEN,
+        SpankWalletError::WalletAccountAlreadyMigrated
+    );
+
+    // Handmatige realloc - spiegelt exact wat Anchor's eigen
+    // `realloc`/`realloc::payer`/`realloc::zero = false`-constraint zou
+    // hebben gedaan (zie anchor-syn-1.1.2's generate_constraint_realloc):
+    // rent-exempt-minimum voor de nieuwe grootte berekenen, het tekort (indien
+    // aanwezig) van `payer` overmaken, dan pas de buffer vergroten. Altijd een
+    // groei (231/239/247 -> 256, dankzij de guard hierboven), dus alleen het
+    // "grow"-pad is nodig - geen krimp-tak zoals de generieke constraint-
+    // codegen die wel heeft.
+    let rent = Rent::get()?;
+    let new_rent_minimum = rent.minimum_balance(WalletAccount::LEN);
+    if new_rent_minimum > wallet_info.lamports() {
+        let top_up = new_rent_minimum
+            .checked_sub(wallet_info.lamports())
+            .unwrap();
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.key(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.payer.to_account_info(),
+                    to: wallet_info.clone(),
+                },
+            ),
+            top_up,
+        )?;
+    }
+    wallet_info.resize(WalletAccount::LEN)?;
+
     let is_stale_action_nonce_wallet =
         ctx.accounts.wallet.key() == WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH;
 

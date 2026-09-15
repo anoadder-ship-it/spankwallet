@@ -230,4 +230,20 @@ pub enum SpankWalletError {
     // bestaan.
     #[msg("WalletAccount is te kort om de recovery_state-payload-regio veilig te nullen")]
     WalletAccountTooShortForRecoveryCleanup,
+
+    // STATUS.md sectie 143 (dubbele-migratie-gat, gevonden tijdens de
+    // live-validator-integratietest van migrate_wallet_account): empirisch
+    // bevestigd dat WalletAccountOld::try_deserialize een AL-gemigreerd,
+    // 256-byte account nog steeds succesvol leest - het discriminator is
+    // bewust gelijk aan WalletAccount's eigen discriminator (state.rs), en
+    // Borsh's try_deserialize_unchecked controleert nooit of de hele buffer
+    // verbruikt is. Zonder een expliciete guard zou een tweede
+    // migrate_wallet_account-aanroep dus NIET falen, maar
+    // spend_threshold_lamports/disarmed stilzwijgend terugzetten naar
+    // 0/false. instructions.rs::migrate_wallet_account controleert daarom
+    // zelf de ruwe accountlengte VOORDAT enige realloc plaatsvindt (zie de
+    // toelichting daar voor waarom dit niet via Anchor's eigen
+    // `realloc`-constraint of een `constraint = ...`-attribuut kan).
+    #[msg("Deze WalletAccount is al gemigreerd naar de huidige layout")]
+    WalletAccountAlreadyMigrated,
 }

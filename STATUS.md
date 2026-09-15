@@ -13677,3 +13677,131 @@ losse kanttekening is maar een harde eis: het voorstel moet zelf, in zijn eigen
 uitvoeringsstappen, de migratie van alle 17 direct na de upgrade-bevestiging opnemen - niet
 aan een latere, aparte sessie overlaten. Zo blijft het venster praktisch nul, zonder dat er
 technisch iets gescheiden hoeft te worden.
+
+## 143. `migrate_wallet_account`: bronfix + migratie-instructie gecommit (Deel A), en de laatste, nog ontbrekende live-proef geleverd (Deel B) (2026-09-15)
+
+Vervolg op sectie 141/142. Twee onderdelen, op Michels expliciete akkoord.
+
+### Deel A: bronfix + permanente regressietest gecommit en gepusht
+
+Gegroepeerd in de gebruikelijke stijl - programmacode apart van tests:
+
+- **`d18e1fd`** - `programs/spankwallet: migrate_wallet_account - guard tegen dubbele
+  migratie`. `errors.rs` (+16), `instructions.rs` (+64/-3). Bevat zowel de al in sectie 141
+  gebouwde bronfix/migratie-instructie als de nieuw ontdekte dubbele-migratie-guard (zie
+  hieronder).
+- **`f02afab`** - `tests: live-validator-integratietest voor migrate_wallet_account (deel A)`.
+  `tests/migrateWalletAccount.ts` (309 regels) + `tests/migrateWalletAccountValidator.ts`
+  (123 regels, herbruikbare eigen-validator-infrastructuur, gebruikt door zowel Deel A als
+  Deel B) + de drie synthetische fixtures (`tests/fixtures/migrateWalletAccountOld
+  {231,239,247}.json`). Puur synthetisch, geen `/tmp`-afhankelijkheid, geen echte
+  devnet-data - dekt de succesvolle migratie (groei naar 256 bytes, exact rentverschil, elk
+  veld correct overgenomen) én de nieuwe `WalletAccountAlreadyMigrated`-guard bij een tweede
+  aanroep.
+
+**Bevestigd vóór het schrijven van dit verslag:** `git fetch origin` + `git rev-parse HEAD`
+vs. `git rev-parse origin/main` - exacte match (`f02afab...`), dus beide commits staan
+bevestigd op `origin/main`, niet alleen lokaal.
+
+**Waarom een guard tegen dubbele migratie nieuw bijkwam (niet in sectie 141 voorzien):**
+tijdens het schrijven van Deel A's tweede testgeval bleek dat een tweede
+`migrate_wallet_account`-aanroep op een al-256-byte-account, zonder guard, gewoon opnieuw als
+`WalletAccountOld` deserialiseerde (zelfde discriminator) en `spend_threshold_lamports`/
+`disarmed` stilzwijgend terug op `0`/`false` zette - een tweede, zelfstandig corruptiepad,
+los van het oorspronkelijke `RecoveryState`-probleem. De guard controleert de accountlengte
+expliciet vóór elke realloc (Anchors eigen realloc-constraint draait altijd vóór een
+constraint-attribuut op hetzelfde veld, dus de automatische realloc-constraint is vervangen
+door een handmatige lengte-check + realloc/rent-topup vooraan in de instructie zelf) en
+faalt met de nieuwe `WalletAccountAlreadyMigrated`-errorcode. Empirisch bevestigd in Deel A's
+tweede testgeval (rood vóór de guard, groen erna) - zie de testcode zelf voor de volledige
+rood/groen-beschrijving.
+
+### Deel B: de laatste, nog ontbrekende live-proef - tegen de ECHTE, corrupte bytes van `3Ape3ge72`
+
+Sectie 142 noemde dit expliciet als "NOOIT geprobeerd": `migrate_wallet_account` via een
+ECHTE on-chain transactie/`Context` (Deel A bewijst dit nu wel, maar alleen tegen
+synthetische fixtures) - en, los daarvan, de migratie-instructie was nooit tegen de
+daadwerkelijke, corrupte bytes van een van de twee echte getroffen wallets getest via een
+echte transactie (sectie 141's bewijs was offline, via `Migration::try_from`/`.migrate()`/
+`.exit()` buiten een `Context` om). Deel B dicht beide gaten tegelijk, voor `3Ape3ge72
+RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ` - de ENE wallet met de gedocumenteerde
+`action_nonce`/`session_epoch`-uitzondering.
+
+**Bronbytes: het oorspronkelijke deel-3-bestand bleek weg.**
+`/tmp/spankwallet-rc-part3-wallet-bytes-real17/3Ape3ge72...bin` (2026-09-14) bestond niet meer
+bij aanvang van Deel B - de hele map was verdwenen (`/tmp` is niet persistent gebleken over de
+sessiegrens heen), en er was ook geen hash van dat bestand in sectie 141 vastgelegd om tegen
+te vergelijken. Voorgelegd aan Michel vóórdat er iets met een vervanging gebeurde. Akkoord: een
+verse, read-only herhaling van exact dezelfde methode als deel 3 stap 8 - een KALE
+`Connection.getAccountInfo` (géén Keypair/Wallet/AnchorProvider/Program-object, dus geen
+enkel write-pad mogelijk, hetzelfde soort voorzorg als na het deel-2-IDL-incident), tegen het
+canonieke devnet-programma, wegschrijven uitsluitend naar `/tmp`, nooit naar de repo of
+on-chain.
+
+**Verse fetch, vóór de validator ooit gestart werd, expliciet geverifieerd tegen wat deel 3
+oorspronkelijk vastlegde (sectie 141):**
+
+| Veld | Deel 3 (2026-09-14) | Verse fetch (2026-09-15) | Gelijk? |
+|---|---|---|---|
+| `dataLen` | 231 | 231 | Ja |
+| `action_nonce` (via directe byte-offsets, zelfde logica als `checkAllOldWallets.ts`) | `11743083837406067974` | `11743083837406067974` | Ja, exact |
+| `session_epoch` | `9932421821989444450` | `9932421821989444450` | Ja, exact |
+
+Alle drie exact gelijk - geen bestandshash mogelijk (origineel bestand weg), maar deze drie
+onafhankelijke velden zijn een sterker bewijs dan een kale hash: ze bevestigen niet alleen
+"de bytes zijn ongewijzigd", maar specifiek dat het DEZELFDE corruptie is, op dezelfde plek.
+Het wallet is sinds de laatste bekende transactie (2026-08-10, sectie 141) niet meer
+aangeraakt - verwacht, want dit traject heeft de 17 echte wallets bewust uitsluitend
+read-only benaderd (sectie 142), en er is nog geen upgrade/migratie live geweest.
+
+**De live-validatortest zelf (eenmalig, na afloop verwijderd - zie onder):** zelfde
+infrastructuur als Deel A (`migrateWalletAccountValidator.ts`, hergebruikt), eigen
+validatorinstantie op eigen poorten (los van Deel A's poorten, zodat beide onafhankelijk
+kunnen draaien), met de verse, geverifieerde bytes van `3Ape3ge72` als enige genesis-account
+op zijn echte adres. Twee testgevallen:
+
+1. **Genesis-check, vóór enige transactie:** onafhankelijk (rechtstreekse byte-offsets, niet
+   via Anchor) bevestigd dat de geladen bytes daadwerkelijk `dataLen=231` en de exacte
+   corrupte `action_nonce`/`session_epoch` van hierboven bevatten - **geslaagd**, dus
+   aantoonbaar niet per ongeluk een van de drie synthetische Deel-A-fixtures geladen.
+2. **De daadwerkelijke migratie, via een echte transactie/`Context`:** `migrateWalletAccount()`
+   aangeroepen tegen het echte adres. **Geslaagd, alle assertions:**
+   - `dataLen`: 231 → 256.
+   - Rentverschil: rentPayer (aparte signer dan de fee-payer, dus zonder transactiekosten
+     vermengd) betaalde exact `174000` lamports - het account ging van `2.498.640` naar
+     `2.672.640` lamports (het exacte rent-exempte minimum voor 256 bytes op deze validator).
+   - **De kern: `action_nonce`/`session_epoch` werden `0`/`0`** - expliciet bevestigd
+     NIET gelijk aan de corrupte `WalletAccountOld`-waarden
+     (`11743083837406067974`/`9932421821989444450`) die in testgeval 1 nog aanwezig waren. De
+     `WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH`-uitzondering uit `instructions.rs`
+     (sectie 141, vijfde aanvulling) is dus LIVE, via een echte transactie, tegen de echte
+     bytes bevestigd - niet langer alleen offline gesimuleerd.
+   - `spend_threshold_lamports=0`, `disarmed=false` (fail-safe defaults).
+   - `seed_key`, `wallet_seed_hash`, `bump` (254), `vault_bump` (255), `created_at`
+     (`1786363912`), `backup_authority`, `recovery_state=None`,
+     `recovery_timelock_seconds` (`259200`), `deposit_authority=None`: allemaal 1-op-1
+     overgenomen, exact zoals onafhankelijk vastgesteld vóór de migratie.
+
+**Resultaat: exacte match met wat deel 3 (sectie 141, vijfde aanvulling) offline al
+voorspelde** - `3Ape3ge72` kreeg destijds in de offline simulatie ook al
+`action_nonce=0 session_epoch=0` als de gedocumenteerde uitzondering, met alle overige velden
+1-op-1 overgenomen. Deel B bevestigt dit nu via de ECHTE Anchor-instructie, een ECHTE
+transactie, tegen een ECHTE (opnieuw geverifieerde) corrupte byte-set - het laatste,
+in sectie 142 nog openstaande bewijsniveau voor deze ene, kritieke uitzondering is hiermee
+gesloten.
+
+**Eenmalig bewijs, zoals afgesproken - opgeruimd, niet gecommit:**
+`tests/migrateWalletAccountPartB.realDevnetWallet.ts` (het testbestand zelf) en alle
+`/tmp`-bestanden (de verse rauwe bytes, de genesis-fixture-JSON, het eenmalige fetch-scriptje)
+zijn na deze test verwijderd. `git status` bevestigt een schone werkboom. Dit is bewust geen
+permanente fixture (gebonden aan een `/tmp`-momentopname van één specifiek, uniek corrupt
+wallet) - het bewijs staat hierboven, volledig, in plaats daarvan.
+
+**Nog steeds NIET live geprobeerd, bewust (ongewijzigd t.o.v. sectie 142):** `finalize_
+threshold_change`/de glijdende-vensterrollover (24u-afhankelijk); de overige 16 van de 17
+echte wallets via een echte migratie-transactie (Deel B dekte bewust alleen de ENE
+uitzondering, niet een volledige live-migratie van alle 17 - dat blijft, net als in sectie
+142, onderdeel van de daadwerkelijke upgrade-uitvoering, niet van dit verificatietraject);
+elke schrijfactie tegen het canonieke devnet-programma zelf (Deel B draaide, net als Deel A,
+tegen een eigen, lokale validatorinstantie met de bytes als genesis - het canonieke adres is
+ook deze keer uitsluitend read-only benaderd, voor de verse fetch).

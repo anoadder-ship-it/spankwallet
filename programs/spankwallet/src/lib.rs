@@ -243,6 +243,14 @@ pub mod spankwallet {
         instructions::finalize_recovery(ctx)
     }
 
+    // STATUS.md sectie 141/141-vervolg (bouw): migratie-instructie voor de
+    // spend-cap-laagwijziging, Migration<From, To>-gebaseerd, permissionless,
+    // zie instructions.rs::migrate_wallet_account voor de volledige
+    // toelichting.
+    pub fn migrate_wallet_account(ctx: Context<MigrateWalletAccount>) -> Result<()> {
+        instructions::migrate_wallet_account(ctx)
+    }
+
     pub fn add_session_key(
         ctx: Context<AddSessionKey>,
         session_key: Pubkey,

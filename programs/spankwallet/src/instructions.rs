@@ -3401,6 +3401,99 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
     Ok(())
 }
 
+/// STATUS.md sectie 141/141-vervolg (bouw): migratie-instructie voor de
+/// spend-cap-laagwijziging (sectie 115). Gebouwd op Anchor's eigen
+/// `Migration<'info, From, To>`-type - beschikbaar sinds anchor-lang 1.0.0,
+/// dit project draait al op 1.1.2 (Cargo.lock/Anchor.toml bevestigen dit,
+/// zie sectie 141-vervolg) - GEEN framework-upgrade nodig. Permissionless
+/// (zelfde precedent als `close_expired_session`, sectie 141-vervolg vraag
+/// 3): de uitkomst is onvoorwaardelijk veilig ongeacht wie de aanroeper is -
+/// geen waardeoverdracht, geen autorisatiewijziging, uitsluitend bekende,
+/// veilige defaults voor de twee nieuwe velden. Werkt uniform voor elke
+/// bestaande `WalletAccount` (sectie 141-vervolg vraag 2: uniform boven
+/// gericht, want "slaagt zonder crash" bleek niet hetzelfde als "geeft
+/// correcte waarden terug" - een gericht-alleen-de-2-bekende-gevallen-fix
+/// zou het sluimerende corruptierisico bij eventuele toekomstige/onbekende
+/// gevallen niet afdekken).
+#[derive(Accounts)]
+pub struct MigrateWalletAccount<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        realloc = WalletAccount::LEN,
+        realloc::payer = payer,
+        realloc::zero = false,
+    )]
+    pub wallet: Migration<'info, WalletAccountOld, WalletAccount>,
+
+    /// Permissionless: wie dan ook mag deze migratie triggeren en de kleine,
+    /// eenmalige rent-toename betalen die nodig is voor de gegroeide
+    /// accountruimte (oud: 231/239/247 bytes, nieuw: 256) - zelfde
+    /// precedent als `close_expired_session` hierboven.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+/// STATUS.md sectie 141-vervolg ("derde aanvulling"): de ENIGE, met de hand
+/// onderzochte uitzondering op "action_nonce/session_epoch worden 1-op-1
+/// overgenomen uit WalletAccountOld". Dit ENE adres is van de zeventien
+/// bekende wallets het enige dat zowel (a) 231-byte-vintage is (van vóór
+/// action_nonce/session_epoch bestonden) ALS (b) een voltooide
+/// recovery-cyclus doorliep - de bytes die WalletAccountOld voor
+/// action_nonce/session_epoch bij DIT account leest zijn zelf ook stale
+/// RecoveryState-restanten, geen echte waarden (empirisch bevestigd:
+/// action_nonce las 11743083837406067974, session_epoch
+/// 9932421821989444450 - onmogelijke waarden voor een account van deze
+/// leeftijd/herkomst). GEEN GENERIEK PATROON, GEEN AFLEIDBARE REGEL (bijv.
+/// "alle 231-byte-accounts" is FOUT - de overige 11 231-byte-accounts zijn
+/// wél schoon, zie de volledige geschiedeniscontrole in STATUS.md sectie
+/// 141-vervolg): voeg hier NOOIT een tweede adres aan toe zonder dezelfde,
+/// volledige transactiegeschiedeniscontrole opnieuw te doen voor dat
+/// specifieke account.
+const WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH: Pubkey =
+    pubkey!("3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ");
+
+pub fn migrate_wallet_account(ctx: Context<MigrateWalletAccount>) -> Result<()> {
+    let is_stale_action_nonce_wallet =
+        ctx.accounts.wallet.key() == WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH;
+
+    let new_wallet = {
+        let old = ctx.accounts.wallet.try_as_from()?;
+        WalletAccount {
+            seed_key: old.seed_key,
+            wallet_seed_hash: old.wallet_seed_hash,
+            owner_passkey: old.owner_passkey,
+            bump: old.bump,
+            vault_bump: old.vault_bump,
+            created_at: old.created_at,
+            backup_authority: old.backup_authority,
+            recovery_state: old.recovery_state,
+            recovery_timelock_seconds: old.recovery_timelock_seconds,
+            deposit_authority: old.deposit_authority,
+            // Zie WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH hierboven
+            // voor waarom dit ENE adres hier een uitzondering is - voor
+            // elke andere wallet worden deze twee velden gewoon 1-op-1
+            // overgenomen.
+            action_nonce: if is_stale_action_nonce_wallet { 0 } else { old.action_nonce },
+            session_epoch: if is_stale_action_nonce_wallet { 0 } else { old.session_epoch },
+            // Bewust ALTIJD 0/false, voor elke wallet zonder uitzondering -
+            // geen enkele bestaande WalletAccount heeft deze velden ooit
+            // doelbewust beschreven (ze bestonden niet vóór deze migratie),
+            // dus er is structureel niets om over te nemen.
+            // WalletAccountOld kent deze velden zelfs niet - hier valt dus
+            // ook niets "per ongeluk" over te nemen.
+            spend_threshold_lamports: 0,
+            disarmed: false,
+        }
+    };
+
+    ctx.accounts.wallet.migrate(new_wallet)?;
+    Ok(())
+}
+
 // session keys (LazorKit-geinspireerd, slot-gebonden expiry, zie STATUS.md)
 //
 // Puur additief t.o.v. execute/transfer_token/execute_advanced hierboven:

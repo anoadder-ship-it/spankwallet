@@ -13476,4 +13476,61 @@ met terugwerkende kracht - dat vereist de aparte migratie-instructie. Hij voorko
 uitsluitend dat het probleem zich nog een keer voordoet, voor elke recovery-cyclus vanaf nu,
 bij alle 17 (of toekomstige) wallets.
 
-Vervolg (migratie-instructie, stap 2) hieronder / in een volgende sectie.
+### Vijfde aanvulling: migratie-instructie gebouwd en offline bewezen tegen alle 17 echte wallets
+
+Op akkoord: een permissionless `migrate_wallet_account`-instructie, gebouwd op Anchor's eigen
+`Migration<'info, From, To>`-type (beschikbaar sinds anchor-lang 1.0.0 - dit project draait
+al op 1.1.2, geen framework-upgrade nodig, zie sectie 141-vervolg's codeverificatie).
+
+**Wijziging:**
+- `state.rs`: nieuwe struct `WalletAccountOld` - de "From"-laag, exact de velden t/m
+  `session_epoch`, met een expliciet discriminator-override gelijk aan het al-live
+  `WalletAccount`-discriminator. Bewust GEEN `spend_threshold_lamports`, GEEN `disarmed` - de
+  structuur kan de regio waar de twee bekende corrupte accounts stale bytes hebben zitten
+  daardoor structureel nooit uitlezen.
+- `instructions.rs`: nieuwe `Accounts`-struct `MigrateWalletAccount` (`Migration<'info,
+  WalletAccountOld, WalletAccount>` + `realloc` naar `WalletAccount::LEN` + permissionless
+  `payer`), en de instructiefunctie zelf.
+- `lib.rs`: registratie van de nieuwe instructie.
+
+**De ene, met de hand onderzochte uitzondering - volledig uitgelegd, met de waarschuwing
+letterlijk in de code:**
+
+`3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ` is van de zeventien bekende wallets het ENIGE
+adres dat zowel (a) 231-byte-vintage is (van vóór `action_nonce`/`session_epoch` bestonden)
+ALS (b) een voltooide recovery-cyclus doorliep (`InitiateRecovery` → `CancelRecovery`,
+2026-08-10 - zie sectie 141-vervolg "derde aanvulling" voor de volledige
+transactiegeschiedeniscontrole van alle 17). Bij dit ene account zijn de bytes die
+`WalletAccountOld` voor `action_nonce`/`session_epoch` leest zelf óók stale
+`RecoveryState`-restanten, geen echte waarden - empirisch gemeten:
+`action_nonce=11743083837406067974`, `session_epoch=9932421821989444450`, allebei
+overduidelijk onmogelijke waarden voor een account van deze leeftijd/herkomst. Voor dit ENE
+adres worden `action_nonce`/`session_epoch` daarom expliciet op `0` gezet in plaats van
+overgenomen; voor alle andere 16 (inclusief de overige 11 231-byte-vintage-accounts, die WEL
+schoon zijn) worden ze gewoon 1-op-1 overgenomen uit `WalletAccountOld`.
+
+**Expliciete waarschuwing, ook letterlijk in de code (`instructions.rs`, bij
+`WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH`):** dit is GEEN generiek patroon en GEEN
+afleidbare regel (bijv. "alle 231-byte-accounts" is FOUT). Voeg hier nooit een tweede adres
+aan toe zonder dezelfde, volledige transactiegeschiedeniscontrole (sectie 141-vervolg "derde
+aanvulling") opnieuw uit te voeren voor dat specifieke account.
+
+**Bewezen, empirisch, niet aangenomen:**
+- `cargo check` + `cargo-build-sbf --arch v3`: beide schoon, `Migration<>` werkt correct
+  samen met `seeds`/`bump`/`realloc`-constraints in deze exacte toolchain.
+  `verify-no-test-features-in-binary.ts`: schoon.
+- **Offline gesimuleerd tegen alle 17 echte byte-sets** (tijdelijk testharnas, inmiddels
+  verwijderd - niet reproduceerbaar op een verse clone, gebonden aan `/tmp`-bestanden en een
+  momentopname): alle 17 migreren foutloos en decoderen daarna correct als de nieuwe
+  `WalletAccount` (`dataLen=256`), met per-wallet de juiste waarden. `3Ape3ge72` kreeg
+  `action_nonce=0 session_epoch=0` (de uitzondering); `7KfY6nKU`/`ECYCEqZp` behielden
+  `action_nonce=2`; `FSGNLavhz` behield `action_nonce=2 session_epoch=1` - stuk voor stuk
+  overeenkomend met eerder, onafhankelijk vastgestelde echte waarden. Voor alle 17:
+  `spend_threshold_lamports=0`, `disarmed=false`.
+- Volledige lokale testsuite ná de wijziging: **108 passing / 42 pending / 0 failing** -
+  ongewijzigd t.o.v. vóór deze instructie, niets anders geraakt.
+
+**Nog niet gedaan/bewust buiten scope van deze stap:** een live-validator-integratietest die
+de instructie daadwerkelijk via een echte `Context`/transactie aanroept (in plaats van de
+offline `Migration::try_from`/`.migrate()`/`.exit()`-simulatie) - de offline simulatie
+gebruikt wel de ECHTE Anchor-methodes, alleen buiten een echte validator om.

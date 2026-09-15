@@ -208,6 +208,34 @@ pub struct RecoveryState {
     pub new_owner_passkey: [u8; PASSKEY_PUBKEY_LEN],
 }
 
+/// STATUS.md sectie 141/141-vervolg (migratie-instructie): de "From"-laag
+/// voor `Migration<'info, WalletAccountOld, WalletAccount>`
+/// (instructions.rs::migrate_wallet_account) - exact de velden t/m
+/// `session_epoch`, met een EXPLICIET discriminator-override gelijk aan het
+/// al-live `WalletAccount`-discriminator (dit MOET hetzelfde account
+/// herkennen, geen nieuw, eigen discriminator). BEWUST GEEN
+/// `spend_threshold_lamports`, BEWUST GEEN `disarmed` - dat is het hele punt
+/// van deze aparte structuurdefinitie: hij kan de regio waar de twee bekende
+/// corrupte accounts stale `RecoveryState`-restbytes hebben zitten
+/// STRUCTUREEL nooit uitlezen, ongeacht wat daar staat (empirisch bevestigd
+/// tegen beide echte, corrupte byte-sets, sectie 141-vervolg vraag 1) - een
+/// generieke `WalletAccount`-deserialisatie zou daar nog steeds op falen.
+#[account(discriminator = [0x9e, 0x62, 0xab, 0x99, 0xd4, 0x40, 0xf2, 0xd5])]
+pub struct WalletAccountOld {
+    pub seed_key: [u8; PASSKEY_PUBKEY_LEN],
+    pub wallet_seed_hash: [u8; 32],
+    pub owner_passkey: [u8; PASSKEY_PUBKEY_LEN],
+    pub bump: u8,
+    pub vault_bump: u8,
+    pub created_at: i64,
+    pub backup_authority: Pubkey,
+    pub recovery_state: Option<RecoveryState>,
+    pub recovery_timelock_seconds: i64,
+    pub deposit_authority: Option<Pubkey>,
+    pub action_nonce: u64,
+    pub session_epoch: u64,
+}
+
 impl RecoveryState {
     pub const LEN: usize = 8 + PASSKEY_PUBKEY_LEN;
 }

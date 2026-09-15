@@ -13534,3 +13534,146 @@ aanvulling") opnieuw uit te voeren voor dat specifieke account.
 de instructie daadwerkelijk via een echte `Context`/transactie aanroept (in plaats van de
 offline `Migration::try_from`/`.migrate()`/`.exit()`-simulatie) - de offline simulatie
 gebruikt wel de ECHTE Anchor-methodes, alleen buiten een echte validator om.
+
+## 142. RC-verificatie deel 4: afsluitende documentatie en go/no-go-oordeel (2026-09-14)
+
+Vervolg op secties 139-141 (deel 1-3). Dit is de samenvatting op hoog niveau - voor de
+volledige details, het forensische bewijs, en de exacte cijfers: zie de genoemde secties
+zelf, hier niet herhaald.
+
+### Het traject, chronologisch
+
+**Deel 1 (sectie 139) - bron- en buildintegriteit.** Commit `5238a56` geverifieerd: schone
+werkboom, isolatie-build zonder cache-hergebruik, geen test-only Cargo-features, canoniek
+adres exact 1x en 12 historische wegwerp-/testadressen 0x in het binary, volledige lokale
+testsuite (106 passing/42 pending/0 failing) herbevestigd tegen exact deze commit. Geen
+bevindingen.
+
+**Deel 2 (sectie 140) - verse wegwerp-deploy.** Het commit-5238a56-binary opnieuw gebouwd met
+`declare_id!` tijdelijk op een vers wegwerpadres (`EwBHjz...`), gedeployed, en een rooktest
+gedraaid. **Incident onderweg:** de eerste rooktestpoging gebruikte `anchor.workspace`, wat
+per ongeluk het CANONIEKE, live programma raakte (niet het wegwerpadres) - volledig forensisch
+uitgezocht (geen van de 17 echte wallets/de multisig/de vault-authority geraakt, geen
+schrijfactie naar het programma-account zelf), root cause gefixt (expliciet IDL-object i.p.v.
+`anchor.workspace`), en de rooktest correct herhaald - uitsluitend tegen het wegwerpadres,
+elke stap expliciet bevestigd. Live bewezen: `init_wallet`, `execute` met drempel=0,
+`execute` ondertekend door een tweede passkey tegen een al-bestaand account (bewijst de
+`crate::ID`-eigenaarscontrole), `initiate_threshold_change` via de wachtrij.
+
+**Deel 3 (sectie 141, met drie aanvullingen) - de harde blokkade.** De daadwerkelijke,
+bestaande on-chain-bytes van alle 17 echte WalletAccounts (canoniek adres, read-only) door
+de nieuwe programmacode's deserialisatie gehaald: **2 van de 17 faalden**
+(`3Ape3ge72...`/`FSGNLavhz...`) - een harde blokkade, niet een kanttekening. Root cause
+gevonden (een voltooide `initiate_recovery`→`cancel/finalize_recovery`-cyclus laat
+`RecoveryState`-restbytes achter die een latere, langere structuurdefinitie stilzwijgend
+herïnterpreteert) en bevestigd NOG ACTIEF in de huidige code, niet historisch afgesloten.
+Drie externe patronen onderzocht en tegen de daadwerkelijke, vendored broncode geverifieerd
+(`Migration<From,To>` - al beschikbaar, dit project draait op anchor-lang 1.1.2, geen
+0.31.1 zoals aanvankelijk aangenomen; `schema_version`; `try_from_slice_unchecked`). Drie
+vervolgvragen empirisch beantwoord: (1) `WalletAccountOld` raakt de kapotte byte nooit aan,
+bevestigd tegen beide echte corrupte byte-sets - passkey-gating is dus haalbaar; (2) uniforme
+migratie boven gericht, want een onverwachte bijvangst bewees dat "slaagt zonder crash" niet
+hetzelfde is als "geeft correcte waarden terug"; (3) permissionless, zelfde precedent als
+`close_expired_session`. Volledige geschiedeniscontrole van alle 17 bevestigde: exact 2
+voltooide recovery-cycli, geen nieuwe getroffen wallets. Gebouwd en bewezen: de bronfix
+(`cancel_recovery`/`finalize_recovery` nullen voortaan expliciet de vrijgekomen bytes - LIVE
+rood/groen bewezen tegen een echte lokale validator, met synthetische testwallets) en de
+migratie-instructie (`migrate_wallet_account`, permissionless, `Migration<From,To>`-
+gebaseerd, met de gedocumenteerde eenmalige uitzondering voor `3Ape3ge72` - OFFLINE bewezen
+tegen alle 17 echte byte-sets, geen live transactie).
+
+### Twee bewijsniveaus, expliciet gescheiden (zelfde discipline als bij de 24u-timelock)
+
+**LIVE op devnet bewezen** (tegen het wegwerpadres `EwBHjz...`, NOOIT het canonieke adres):
+- `init_wallet`, `execute` met drempel=0, `execute` door een tweede passkey tegen een
+  bestaand account, `initiate_threshold_change` via de wachtrij (deel 2).
+- De bronfix zelf: `cancel_recovery`/`finalize_recovery` nullen de vrijgekomen bytes
+  aantoonbaar (deel 3-vervolg) - LIVE tegen een echte lokale validator, maar tegen
+  SYNTHETISCHE, in de test aangemaakte wallets, niet tegen de 17 echte.
+
+**OFFLINE bewezen tegen echte data** (geen live transactie, wel de daadwerkelijke bytes/
+-methodes):
+- Deserialisatie van alle 17 echte WalletAccounts tegen de nieuwe layout (deel 3, stap 9) -
+  2 faalden, root cause gevonden.
+- `WalletAccountOld`'s deserialisatie tegen de twee corrupte byte-sets (deel 3-vervolg,
+  vraag 1).
+- De migratie-instructie (`Migration::try_from`/`.migrate()`/`.exit()` - de ECHTE
+  Anchor-methodes, buiten een echte `Context`/validator om) tegen alle 17 echte byte-sets.
+
+**NOOIT geprobeerd, bewust:**
+- `finalize_threshold_change`/de glijdende-vensterrollover live (24u-afhankelijk, leunt op
+  de lokale fast-timelock-suite - zie deel 2).
+- `migrate_wallet_account` via een ECHTE on-chain transactie/`Context` (alleen offline
+  gesimuleerd - de `realloc`-CPI naar System Program zelf is dus nooit live getest).
+- Elke schrijfactie tegen de 17 echte, live wallets zelf - bewust, uitsluitend read-only
+  gelezen, nooit aangeraakt.
+
+### Wat er gevonden en opgelost is - eerlijk samengevat
+
+Twee dingen hadden dit traject stil kunnen laten ontsporen als deel 2/3 minder zorgvuldig
+waren uitgevoerd:
+
+1. **Het IDL-incident (deel 2):** een simpele, makkelijk te maken scriptfout
+   (`anchor.workspace` i.p.v. een expliciet IDL-object) had een write-actie tegen het echte,
+   multisig-bestuurde canonieke programma tot gevolg - buiten het RC-traject om, terwijl de
+   hele opzet van dit traject juist was om dat te VOORKOMEN. Ontdekt door zelf-controle
+   (elke stap bevestigt vooraf tegen welk adres hij gaat), niet door geluk.
+2. **De harde blokkade bij twee echte wallets (deel 3):** zonder deel 3's stap - de
+   daadwerkelijke, bestaande bytes door de nieuwe code halen - was dit nooit aan het licht
+   gekomen vóór een echte upgrade. De bestaande, synthetische Some/Some-unittests (`old_231/
+   239/247_byte_...`) gaven hier een VALSE geruststelling: ze bewijzen een theoretisch
+   worst-case scenario dat met de echte, vrijwel altijd None/None-accounts niets te maken
+   heeft.
+
+**Blijvend inzicht, niet alleen voor dit geval:** de bijvangst bij `3Ape3ge72` bewees dat
+"slaagt zonder crash" niet hetzelfde is als "geeft correcte waarden terug" - stille
+corruptie (een plausibel ogend, maar fout getal, zonder enige foutmelding) kan ERNSTIGER zijn
+dan een harde crash, want een crash wordt gezien en gestopt, stille corruptie niet. Voor ELKE
+toekomstige layoutwijziging aan `WalletAccount` (of enig ander account met een `Option`-veld
+dat ooit `Some` kan zijn): "deserialiseert zonder fout" is GEEN bewijs van correctheid - alleen
+een expliciete, veld-voor-veld-vergelijking tegen onafhankelijk geverifieerde waarden (zoals
+deel 3's kruiscontrole) bewijst dat.
+
+### Go/no-go-oordeel
+
+**Voorwaardelijk GO - niet onvoorwaardelijk, en niet nog een fase van uitstel.** De
+onderliggende ontwerpbeslissingen (bronfix bij de wortel, permissionless uniforme migratie
+via `Migration<From,To>`) zijn goed onderbouwd en, voor zover geverifieerd, correct. Maar het
+bewijs is niet compleet, en dat moet met dezelfde scherpte benoemd worden als de rest van dit
+traject:
+
+1. **Harde voorwaarde vóór het multisig-voorstel: een live-validator-integratietest van
+   `migrate_wallet_account`** (een echte transactie, echte `Context`, echte `realloc`-CPI naar
+   System Program) - dit is precies het soort gat dat dit hele traject bedoeld was te vangen
+   (deel 3's hele les was dat offline/synthetisch bewijs NIET hetzelfde is als live bewijs).
+   De offline simulatie bewijst dat de DATA-logica correct is; ze bewijst NIET dat de
+   `realloc`-mechaniek zelf - een andere Anchor-codepad dan wat tot nu toe live getest is -
+   op een echte validator zonder verrassingen werkt. Zonder deze test is "voorwaardelijk GO"
+   feitelijk nog "NO-GO, één stap te doen".
+2. **Harde voorwaarde in het uitvoeringsdraaiboek van het voorstel zelf** (geen losse
+   kanttekening erna, zie punt 5 hieronder): `migrate_wallet_account` voor alle 17 wallets
+   moet EXPLICIET, ONMIDDELLIJK ná bevestiging dat de upgrade live is, als verplichte stap in
+   het voorstel staan - niet als optionele follow-up die later "wel eens" gedaan wordt.
+
+Als aan deze twee voorwaarden is voldaan: GO. Zonder: NO-GO, ongeacht hoe overtuigend de rest
+van het bewijs is.
+
+### Volgordevraag (punt 5): één voorstel, of gescheiden?
+
+**Antwoord: één voorstel, één binary-upgrade - een gescheiden volgorde is technisch niet
+zinvol mogelijk, en zou het probleem juist verergeren.** `migrate_wallet_account` is
+gedefinieerd in termen van het NIEUWE `WalletAccount`-type (met `spend_threshold_lamports`/
+`disarmed`) - dat type bestaat pas ná de spend-cap-upgrade. Er is geen zinnige manier om
+`migrate_wallet_account` in een EERDERE, aparte upgrade te deployen zonder eerst de rest van
+de spend-cap-laagwijziging al te hebben doorgevoerd - het zijn, door hoe de code is
+opgebouwd, dezelfde binary, dezelfde upgrade, geen twee te scheiden stappen.
+
+De echte volgordevraag zit niet op binary-niveau maar op UITVOERINGSNIVEAU, ná de upgrade: het
+moment waarop de nieuwe binary live gaat en het moment waarop `migrate_wallet_account` voor de
+twee getroffen wallets (of, voor consistentie, alle 17) daadwerkelijk aangeroepen wordt, hoeven
+niet dezelfde transactie te zijn. In dat venster - hoe kort ook - zouden de twee bekende
+wallets voor elke instructie op slot staan. Dit is exact waarom voorwaarde 2 hierboven geen
+losse kanttekening is maar een harde eis: het voorstel moet zelf, in zijn eigen
+uitvoeringsstappen, de migratie van alle 17 direct na de upgrade-bevestiging opnemen - niet
+aan een latere, aparte sessie overlaten. Zo blijft het venster praktisch nul, zonder dat er
+technisch iets gescheiden hoeft te worden.

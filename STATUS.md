@@ -13998,3 +13998,65 @@ functionele equivalent zonder een signature te riskeren.
 hoogste bestaande index is nog altijd #12 (`Rejected`, sectie 104). De fout trad dus
 vermoedelijk op vóórdat er iets naar de chain verstuurd werd; niets on-chain is hierdoor in
 een inconsistente toestand terechtgekomen.
+
+## 147. Vervolg op sectie 145/146: voorstel #13 daadwerkelijk ingediend en 2-van-2 goedgekeurd - timelock loopt, exact tijdstip vastgelegd (2026-09-16)
+
+Na de fix uit sectie 146 is het spend-cap/migratie-voorstel daadwerkelijk ingediend en
+goedgekeurd via `wallet-signer.html`, tegen een echte wallet (Phantom). Alles hieronder
+rechtstreeks tegen devnet geverifieerd (via de echte productie-vendorbestanden), niet
+aangenomen.
+
+**Voorstel #13** (buffer `HRccWBKjfiLrTAZ9JwnukTkesSqUk2F38cRyDTvV7szK`, PDA
+`7VVPN5uRwChH3NWRoeSUZE2X7F3xFy3n4CxjmUy3aXQh`), drie transacties, alle drie `err: null`:
+
+| Stap | Signature | Slot | blockTime (UTC) |
+|---|---|---|---|
+| Indienen (vaultTransactionCreate+proposalCreate, 1 handtekening) | `25JHmxMbFHWY6P8HQZ8U1riciKSi3zQdudSdUNrqCxoNcgVYWPBwfBHV5VnkoDTk8be5wC2VVG52oCCtuj9jFzfP` | 499250270 | 2026-09-16T10:35:48Z |
+| Goedkeuring 1/2 (`2jDzaP3FbW5583hb4FeGZVU9MYseqBeFHwxycjzcvT7Q`, Phantom) | `4zTiRXTpsGSsXbU7suqy1KAniD5AoqKnQVrZJkhhtaDYS19RJ1zZoNy4YiXtpHcoRSUbYRQeY6ULZ3KMwRPwdBkU` | 499250326 | 2026-09-16T10:35:58Z |
+| Goedkeuring 2/2 (`CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3`) - haalt de threshold | `5gyVKXHUqfTA3vzgreRg53btLdpF18QUUWXqKnUhBni6rPJxC8jeZXvs7yrvBhbj8RxkePggoJcpsgYAxnGfUD8H` | 499255595 | **2026-09-16T10:50:36Z** |
+
+**Status on-chain: `Approved`**, `approved: [2jDzaP3F..., CP2fg9zg...]`, `rejected: []`. De
+`Approved`-timestamp staat letterlijk in het account zelf (niet afgeleid uit de tx-log) en
+komt exact overeen met de derde transactie hierboven - het programma zet deze timestamp zelf
+via `Clock::get()` op het moment dat de threshold gehaald wordt, dus dit IS het officiële
+startpunt van de timelock, niet een schatting.
+
+**Tussentijds, twee dingen apart onderzocht en beide onschadelijk gebleken:**
+- Eén eerdere approve-poging vanuit dezelfde, al-goedgekeurde Phantom-wallet gaf Phantom's
+  kant "Unexpected error (-32603)". Read-only gesimuleerd (`simulateTransaction`,
+  `sigVerify:false`, nooit verstuurd): het Squads-programma zelf weigert dit met
+  `AnchorError ... Error Code: AlreadyApproved. Error Number: 6010. "Member already approved
+  the transaction."` (`custom program error: 0x177a`). Phantom vertaalt deze specifieke
+  on-chain fout kennelijk niet naar leesbare tekst, maar het is verwacht,
+  programma-niveau-gedrag - geen storing, geen on-chain gevolg (de poging faalde al bij
+  simulatie).
+- **Voorstel #14** (zelfde buffer `HRccWBKj...`, dus een dode duplicaat van #13, PDA
+  `BTNqryVggdWo3XS6LpqLqCZ38Gn6oAnkiKy7WPg3xgVD`) ontstond per ongeluk (vermoedelijk knop 2
+  een tweede keer aangeklikt). Status `Active`, `approved: []` - volledig losstaande PDA,
+  geen gedeelde state met #13, geverifieerd geen enkele invloed op #13's
+  goedkeuringen/status. `findCanonicalProposal()`'s bestaande sorteerlogica (Approved > Active,
+  dan laagste index) kiest bij een scan sowieso #13. Niet urgent, maar aan te raden: #14 op
+  termijn afwijzen via knop 5 om toekomstige verwarring te voorkomen - geen actie ondernomen.
+
+**Multisig-config/vault/canoniek programma - bevestigd ongewijzigd sinds de eerdere controles
+vanavond:** `threshold=2`, `timeLock=259200` sec, drie leden ongewijzigd (zelfde
+permissiebitmask 7 elk), `configAuthority` = System Program (dus geen enkele partij kan de
+config nog wijzigen - immutable), `transactionIndex=14` (consistent met #13+#14, geen
+onverwachte sprong). Vault-PDA (`89MEwqhfdqaz...`) ongewijzigd adres, `10.2094 SOL`. Canoniek
+programma's `ProgramData` toont nog steeds slot `488465385` als laatste upgrade-slot - exact
+gelijk aan voorstel #11's uitvoeringsslot (sectie 95, 2026-08-26) - **er heeft dus part-4 geen
+enkele nieuwe upgrade plaatsgevonden.** De buffer `HRccWBKj...` zelf bestaat nog
+(`3.319.378.680` lamports, niet geconsumeerd) - een uitgevoerde upgrade zou dit account
+sluiten, dus dit bevestigt onafhankelijk dat er nog niet uitgevoerd is.
+
+**Timelock-rekenwerk, hier vastgelegd zodat het straks niet opnieuw hoeft:**
+```
+Approved sinds (UTC):        2026-09-16T10:50:36Z
++ timeLock (259200 sec/72u):
+Vroegst uitvoerbaar (UTC):   2026-09-19T10:50:36Z
+Vroegst uitvoerbaar (Europe/Amsterdam, CEST): zaterdag 19 september 2026, 12:50:36
+```
+
+**Checklist-herinnering (sectie 145, ongewijzigd):** bij daadwerkelijke uitvoering vanaf
+2026-09-19T10:50:36Z (of later) EERST `scripts/watchUpgradeAndMigrateCriticalWallets.ts`
+starten en laten draaien, PAS DAARNA de execute-transactie via de multisig versturen.

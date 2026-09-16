@@ -13857,3 +13857,68 @@ sessie.
 
 **Geen enkel resultaat wijkt af van wat eerder bekend was, ná het dichten van het gat.** Stap
 0 is hiermee schoon afgesloten - verder naar stap 1 (de daadwerkelijke devnet-buffer).
+
+## 145. Multisig-voorstel-voorbereiding, stap 3: het tussenvenster tussen upgrade-executie en migratie gedicht - een pre-armde watcher i.p.v. een handmatig te starten script (2026-09-15/16)
+
+Het voorstel (buffer `HRccWBKjfiLrTAZ9JwnukTkesSqUk2F38cRyDTvV7szK`, sectie 90's discipline
+gevolgd voor de BUFFER/PAGE_BUILD-drieslag in `admin/wallet-signer.html`) bundelt de
+spend-cap-fixes met `migrate_wallet_account` (sectie 143). `scripts/migrateAllWalletAccounts.ts`
+(sectie 144, stap 2) dekt de volledige, permissionless migratie van alle 17 wallets - maar
+Michel wees terecht af dat dit script als "iemand start het na de upgrade handmatig" in het
+draaiboek zou staan: een menselijke-geheugen-afhankelijkheid, exact de foutklasse die sectie
+144 zelf net structureel dichtte voor de 12 wegwerpadressen.
+
+**Onderzocht, niet aangenomen: kan de upgrade en de migratie in ÉÉN Squads-transactie?**
+Tegen een lokale validator met devnet's eigen, gekloonde feature-set: een transactie met
+[Upgrade-instructie, aanroep op het net-geupgradede programma] faalt ALTIJD - de aanroep wordt
+op loader-niveau geweigerd (programma nog niet "deployed" vanuit het perspectief van diezelfde
+transactie), vóórdat het programma's eigen code ooit draait. Omdat Solana-transacties atomisch
+zijn, zou bundelen dus niet alleen de migratie laten falen maar de HELE upgrade laten mislukken
+- een strikt slechter voorstel dan twee losse transacties.
+
+**Gebouwd: `scripts/watchUpgradeAndMigrateCriticalWallets.ts`.** Een pre-armde watcher die
+- vóór de upgrade-executie gestart wordt,
+- via `onAccountChange` op de ProgramData-account van het canonieke programma luistert,
+- en zodra de upgrade bevestigd is, zonder menselijke tussenkomst `migrate_wallet_account`
+  verstuurt voor de twee al bekende, kritieke wallets (`3Ape3ge72.../FSGNLavhz...` - sectie
+  141, de enige twee waarvan al vaststaat dat ELKE instructie erop faalt zolang ze niet
+  gemigreerd zijn).
+
+**Empirisch bewezen, tegen een lokale validator met het echte programma op het canonieke
+adres en drie synthetische oude wallets als genesis:** trigger + migratie van alle drie
+binnen 5 seconden na de upgrade, elk op de eerste poging. De resterende 15 wallets blijven,
+net als in sectie 144, de taak van `scripts/migrateAllWalletAccounts.ts` - niet urgent, geen
+watcher nodig, want die falen niet zolang ze niet gemigreerd zijn.
+
+**Terugvalplan, expliciet:** als deze watcher om wat voor reden dan ook niet draait op het
+moment van executie (proces gecrasht, netwerk weg, laptop dicht), is dat geen verslechtering
+t.o.v. de bestaande situatie - de twee wallets falen dan gewoon door zoals nu, totdat iemand
+`scripts/migrateAllWalletAccounts.ts` alsnog handmatig draait. De watcher is dus een strikte
+verbetering (kleiner venster als hij draait), geen nieuwe faalafhankelijkheid.
+
+**Uitvoeringsvolgorde, expliciet herbevestigd door Michel en hier duurzaam vastgelegd (niet
+alleen in gespreksgeschiedenis - zelfde discipline als sectie 144's adresmanifest):**
+
+> Wanneer de 72-uurs-timelock van het voorstel is verstreken en de upgrade daadwerkelijk
+> uitgevoerd gaat worden: EERST `scripts/watchUpgradeAndMigrateCriticalWallets.ts` starten en
+> laten draaien, en PAS DAARNA de upgrade-transactie zelf via de multisig (`admin/
+> wallet-signer.html`, "Execute") versturen. Nooit andersom - de watcher moet al een actieve
+> `onAccountChange`-subscriptie hebben VOORDAT de upgrade-transactie landt, anders werkt het
+> triggermechanisme niet (zie hierboven, de reden waarom bundelen in één transactie niet kan).
+
+Checklist vóór executie, in volgorde:
+1. Controleer dat het voorstel op de multisig alle benodigde handtekeningen heeft en de
+   72-uurs-timelock is verstreken.
+2. Start `node_modules/.bin/ts-node --transpile-only
+   scripts/watchUpgradeAndMigrateCriticalWallets.ts` en wacht op de "GEARMD"-melding.
+3. Pas dan, via `admin/wallet-signer.html`, de upgrade-transactie op "Execute" zetten.
+4. Wachten tot de watcher meldt dat beide kritieke wallets gemigreerd zijn (of, bij een
+   storing in de watcher, `scripts/migrateAllWalletAccounts.ts` handmatig draaien als
+   terugval).
+5. Daarna `scripts/migrateAllWalletAccounts.ts` draaien voor de resterende 15 wallets
+   (permissionless, niet urgent, geen tijdsdruk).
+
+**Status: het voorstel en de bijbehorende scripts zijn klaar om ingediend/uitgevoerd te
+worden.** Er is geen enkele stap meer die alleen in het geheugen van een mens of een
+gespreksgeschiedenis bestaat - de volgorde hierboven staat nu zowel in dit STATUS.md-item als
+in de codecommentaar van `watchUpgradeAndMigrateCriticalWallets.ts` zelf.

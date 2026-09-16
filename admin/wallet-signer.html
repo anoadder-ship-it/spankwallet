@@ -96,7 +96,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-09-15T21:13:59Z-nieuwe-buffer-HRccWBKj-spend-cap-migratie-vervangt-728EpFN";
+      var PAGE_BUILD = "2026-09-16T00:00:00Z-window-Buffer-polyfill-toegevoegd-fix-ReferenceError";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -123,11 +123,43 @@
 
       log("[debug] module-script gestart, imports worden nu een voor een geladen...", "log-debug");
 
+      // Root cause (gevonden 2026-09-16, tijdens het indienen/goedkeuren van
+      // het spend-cap/migratie-voorstel): @sqds/multisig's Borsh-(de)codec
+      // (@metaplex-foundation/beet, gebundeld in vendor/multisig.mjs en zijn
+      // gedeelde chunk) verwijst op tientallen plekken kaal naar de globale
+      // `Buffer` (Buffer.from/alloc/copy/...), zonder enige import - een
+      // aanname die alleen in Node klopt. Zolang deze imports nog via
+      // esm.sh liepen (vóór STATUS.md sectie 107/109, commit 88c55e4) werd
+      // dat onzichtbaar door esm.sh's eigen automatische Node-builtin-
+      // polyfilling; de lokale esbuild-vendoring van 2026-08-28 verving dat
+      // zonder dit specifieke gat te ontdekken (wel al ontdekt en gefixt
+      // voor `process`, zie de wallet-standard-mobile-import verderop) -
+      // findCanonicalProposal()'s decode-pad (Proposal/VaultTransaction.
+      // fromAccountAddress) en buildApproveTx()/buildSquadsExecuteTx()'s
+      // encode-pad zijn sindsdien vermoedelijk nooit meer in een echte
+      // browser tegen een echt bestaand voorstel gedraaid, tot dit gat op
+      // 2026-09-16 empirisch geraakt werd ("Buffer is not defined").
+      // Vaste fix, zelfde discipline als de andere gevendorde libraries:
+      // buffer@6.0.3 (feross/buffer, de standaardpolyfill die zowat elke
+      // bundler gebruikt) los gebundeld met esbuild naar vendor/buffer.mjs
+      // (geen externe CDN - zou zowel de CSP als de privacyreden van
+      // sectie 107/109 ondermijnen) en HIER, vóór elke andere vendor-import,
+      // als window.Buffer gezet zodat elke latere aanroep (web3.js zelf
+      // gebruikt Buffer ook, in dezelfde gedeelde chunk) hem al aantreft.
       let Connection, PublicKey, TransactionMessage, TransactionInstruction, VersionedTransaction, SYSVAR_RENT_PUBKEY, SYSVAR_CLOCK_PUBKEY;
       let multisig;
       let getWallets;
       let bs58;
       let nacl;
+
+      try {
+        const bufferMod = await import("./vendor/buffer.mjs");
+        window.Buffer = bufferMod.Buffer;
+        log("[debug] Buffer-polyfill geladen (lokaal gevendored, buffer@6.0.3) - vereist door @sqds/multisig en @solana/web3.js.", "log-debug");
+      } catch (err) {
+        log("FOUT: Buffer-polyfill kon niet geladen worden: " + err.message);
+        throw err;
+      }
 
       try {
         const web3 = await import("./vendor/web3.mjs");

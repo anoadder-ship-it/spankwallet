@@ -13922,3 +13922,79 @@ Checklist vóór executie, in volgorde:
 worden.** Er is geen enkele stap meer die alleen in het geheugen van een mens of een
 gespreksgeschiedenis bestaat - de volgorde hierboven staat nu zowel in dit STATUS.md-item als
 in de codecommentaar van `watchUpgradeAndMigrateCriticalWallets.ts` zelf.
+
+## 146. `wallet-signer.html`: "Buffer is not defined" tijdens indienen/goedkeuren van het spend-cap/migratie-voorstel - root cause gevonden, gefixt, empirisch bewezen tegen de echte vendor-bestanden (2026-09-16)
+
+Tijdens het daadwerkelijke indienen/goedkeuren van het voorstel uit sectie 145
+(buffer `HRccWBKjfiLrTAZ9JwnukTkesSqUk2F38cRyDTvV7szK`) gooide `vendor/multisig.mjs` een
+`ReferenceError: Buffer is not defined`, geraakt via `findCanonicalProposal` →
+`buildApproveTx`/`buildSquadsExecuteTx`. Op verzoek eerst de root cause uitgezocht (git
+blame/log, niet aangenomen) vóórdat er iets gefixt werd.
+
+**Root cause: een pre-bestaand gat sinds 2026-08-28 (commit `88c55e4`), GEEN regressie van
+de BUFFER/PAGE_BUILD-wijziging van gisteravond (sectie 90's drieslag).** `git show` op die
+laatste commit bevestigt: uitsluitend de `BUFFER`-constante, de zichtbare buffertekst en
+`PAGE_BUILD` gewijzigd - geen enkele regel raakt import-/moduleladinglogica.
+
+De daadwerkelijke oorzaak: `@sqds/multisig`'s Borsh-(de)codec
+(`@metaplex-foundation/beet`, gebundeld in `vendor/multisig.mjs` en zijn gedeelde chunk
+`vendor/chunk-IYJ5Z2CH.mjs`) verwijst op tientallen plekken kaal naar de globale `Buffer`
+(`Buffer.from`/`.alloc`/`.copy`/...) zonder enige import - een aanname die alleen in Node
+ambient klopt. Zolang deze imports nog rechtstreeks via `esm.sh` liepen (vóór sectie
+107/109, dus vóór voorstel #11's uitvoering op 2026-08-26 - sectie 95) werd dit onzichtbaar
+gehouden door esm.sh's eigen automatische polyfilling van Node-builtins. Commit `88c55e4`
+(2026-08-28) verving dat door een lokaal met esbuild gebouwde bundel (privacyreden: esm.sh
+zag IP + pakketversies per bezoek) - esbuild polyfillt Node-builtins NIET automatisch. Die
+commit ontdekte en fixte toen al een vergelijkbaar gat voor `process` (via `esbuild
+--inject`), maar het `Buffer`-gat, dieper in `@sqds/multisig`'s encode/decode-pad, niet -
+de Playwright-smoke-test van die dag verifieerde alleen dat imports laadden en verwachte
+functienamen in de bundel aanwezig waren, nooit dat `findCanonicalProposal()` (decodeert
+een echt bestaand `Proposal`/`VaultTransaction`-account) of `buildApproveTx()`/
+`buildSquadsExecuteTx()` (encodeert instructiedata) daadwerkelijk uitgevoerd werden.
+
+**Vermoedelijk voor het eerst sinds 28 augustus daadwerkelijk in een browser tegen een
+bestaand voorstel geraakt op 2026-09-16** - geen eerder voorstel na die datum heeft dit pad
+zichtbaar succesvol doorlopen (voorstel #12, sectie 104, werd via een aparte, niet van
+`findCanonicalProposal` afhankelijke route herkend/afgewezen).
+
+**Fix, zelfde discipline als de andere negen gevendorde libraries:** `buffer@6.0.3`
+(feross/buffer - de standaardpolyfill die vrijwel elke bundler onder water gebruikt), al
+aanwezig in `node_modules` als transitieve dependency, los gebundeld met `npx esbuild
+--bundle --format=esm --platform=browser --minify` naar het nieuwe `admin/vendor/buffer.mjs`
+(28KB, geen `process`/`global`/`require`-restanten - geverifieerd, niet aangenomen). Bewust
+GEEN externe CDN (zou zowel de CSP als de expliciete privacyreden van sectie 107/109
+ondermijnen). In `wallet-signer.html` als ALLEREERSTE import geladen (vóór `web3.mjs`, dat
+dezelfde gedeelde chunk gebruikt), met `window.Buffer` gezet vóórdat enige andere
+vendor-module draait. `https-server.js`'s allowlist uitgebreid met exact dit ene nieuwe
+bestand.
+
+**Empirisch bewezen, tegen de ECHTE productiebestanden (niet een geïsoleerde test-stub) en
+het echte on-chain multisig-account, read-only:** een Node-harness die `global.Buffer`
+bewust verwijdert (browser zonder polyfill simuleren) en vervolgens `vendor/web3.mjs` +
+`vendor/multisig.mjs` rechtstreeks importeert:
+- **Zonder polyfill:** `ReferenceError: Buffer is not defined` - reproduceert de gemelde
+  fout exact, tegen dezelfde aanroep (`Multisig.fromAccountAddress`).
+- **Met polyfill:** slaagt voor het volledige pad dat de knoppen 2/3/4 daadwerkelijk
+  gebruiken - `Multisig`-decode (transactionIndex=12, threshold=2), `Proposal`-decode
+  (voorstel #12, status `Rejected`), `VaultTransaction`-decode (7 accountKeys, 1
+  instructie - hetzelfde pad als `vaultTxMatchesConfiguredBuffer`), en het ENCODE-pad:
+  `multisig.transactions.proposalApprove(...)` gebouwd (nooit verstuurd/ondertekend) - 1
+  instructie, 247 bytes na `serialize()`.
+- `node --check` schoon op alle drie gewijzigde/nieuwe bestanden.
+- Server herstart; allowlist opnieuw geverifieerd: `vendor/buffer.mjs` 200, een
+  niet-toegestaan bestand en een path-traversal-poging nog steeds 404 (zelfde controle als
+  sectie 88c55e4 en de oorspronkelijke allowlist-episode).
+
+**Niet gelukt, bewust niet verder geforceerd:** een volledige live-browserdoorloop
+(wallet verbinden + daadwerkelijk op een knop klikken) via de Chrome-automatiseringstool -
+Chrome's eigen self-signed-certificaat-interstitial op `https://127.0.0.1:8766` is een
+native beveiligingspagina die de extensie niet kan scripten (harde platformbeperking, geen
+poging tot omzeiling ondernomen). Die laatste stap (verbinden, daadwerkelijk indienen/
+goedkeuren) hoort sowieso bij Michels eigen wallet-extensie thuis, niet bij een geautomati-
+seerde agent - de bovenstaande Node-proef tegen de exacte productiebestanden is het
+functionele equivalent zonder een signature te riskeren.
+
+**Op dit moment staat er nog GEEN nieuw voorstel voor buffer `HRccWBKj...` on-chain** - de
+hoogste bestaande index is nog altijd #12 (`Rejected`, sectie 104). De fout trad dus
+vermoedelijk op vóórdat er iets naar de chain verstuurd werd; niets on-chain is hierdoor in
+een inconsistente toestand terechtgekomen.

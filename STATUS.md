@@ -14060,3 +14060,172 @@ Vroegst uitvoerbaar (Europe/Amsterdam, CEST): zaterdag 19 september 2026, 12:50:
 **Checklist-herinnering (sectie 145, ongewijzigd):** bij daadwerkelijke uitvoering vanaf
 2026-09-19T10:50:36Z (of later) EERST `scripts/watchUpgradeAndMigrateCriticalWallets.ts`
 starten en laten draaien, PAS DAARNA de execute-transactie via de multisig versturen.
+
+## 148. Voorstel #13 daadwerkelijk uitgevoerd: upgrade geland, watcher bleek niet actief, terugvalplan (sectie 145) handmatig gedraaid en voltooid voor alle 18 wallets (2026-09-20)
+
+De timelock uit sectie 147 (vroegst uitvoerbaar 2026-09-19T10:50:36Z) is verstreken; het
+voorstel is uitgevoerd. Alles hieronder rechtstreeks tegen devnet geverifieerd (RPC-reads,
+niet aangenomen), inclusief een tweede, onafhankelijke verificatieronde ná de migratie zelf.
+
+### 1. De upgrade-executie, volledig geverifieerd
+
+**Signature `3asvBNTB7xq7h9oiUDRQJGDzW8KKLUXabgF7qoESrkiRkE27XMFar1sb3YnJgBERtyDj5USyFeJyBGopNbqVnMQs`**,
+slot 501303135, blockTime 2026-09-20T08:54:53Z, `err: null`. Instructiepad:
+Squads `VaultTransactionExecute` → BPF Upgradeable Loader `Upgrade` (log bevestigt letterlijk
+`"Upgraded program 9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9"`). Buffer `HRccWBKj...` is
+geconsumeerd (preBalance 3.319.378.680 lamports → 0, teruggevloeid naar de vault als
+spill-account) - onafhankelijke bevestiging dat de upgrade daadwerkelijk is uitgevoerd, niet
+alleen goedgekeurd.
+
+**ProgramData (`5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq`), rechtstreeks geparsed:**
+laatste deploy-slot nu `501303135` (was `488465385` sinds voorstel #11, sectie 95) - exact
+gelijk aan de upgrade-transactie's eigen slot.
+
+**Byte-identiteit met HEAD, geverifieerd (niet aangenomen):** `git log
+69a59a4f531fb0c46f42cdaf5ab644726e12f534..HEAD -- programs/ Cargo.toml Cargo.lock` geeft
+niets terug - geen enkele wijziging aan de programma-broncode sinds de reproduceerbare build
+uit sectie 144 (653.256 bytes, sha256 `4187b8095b30c53a8ccb9d94cd8f6aa619633ba64ffc852fd8c19c23fe9ce40f`).
+De eerste 653.256 bytes van de on-chain ProgramData (na de 45-byte header, de rest is
+zero-padding tot de account-capaciteit) geven **exact dezelfde sha256**. De gedeployde bytes
+zijn dus letterlijk de HEAD-build, geen andere/oudere/gemanipuleerde binary.
+
+### 2. De watcher bleek niet actief - terugvalplan uit sectie 145 correct gevolgd
+
+`ps aux` (~7 minuten na de upgrade-executie) toonde **geen actief proces** van
+`scripts/watchUpgradeAndMigrateCriticalWallets.ts`. **Root cause kon niet met zekerheid
+worden vastgesteld** - geen procesrestant, geen log-bestand van dit script, geen
+shell-historyregel die het vermeldt (wel gecontroleerd: `~/.bash_history`, `find` naar
+recente/log-bestanden - niets gevonden dat aan dit script te koppelen is). Onbekend of het
+nooit gestart is, of gestart en vroegtijdig gestopt/gecrasht vóór de upgrade landde. Dit
+eerlijk als onbekend vastgelegd in plaats van aangenomen.
+
+**Het terugvalplan zelf werkte precies zoals sectie 145 voorspelde: geen verslechtering,
+alleen een groter tijdvenster.** `scripts/migrateAllWalletAccounts.ts` handmatig gedraaid
+(permissionless, idempotent - skipt reeds-256-byte-accounts). Twee runs nodig, doordat de
+publieke devnet-RPC halverwege de eerste run begon te rate-limiten (zie punt 3 hieronder):
+
+**Run 1** (14 van de toen bekende 18 wallets gemigreerd vóórdat het proces crashte op een
+onafgevangen WebSocket-fout):
+
+| Wallet | dataLen vóór | Migratie-sig |
+|---|---|---|
+| `2h6te5Fq5Tn4hgfrsAVB4c6rcK1HcvfY14mU9z8hNs3K` | 231 | `2YqVv98WtRyA437NKKn1x5AC1MFN84XjnuK16wYxJTgUgN9KdBXY5QxKQPw173WFbpirp6TRR6a27Uh92tKfQ511` |
+| **`3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ`** (kritiek) | 231 | `2txvMYfqfB3eYE2BH3WvZi2S9Gd7oi29CMkFE3uwm9PZcBoXJHGmkpGohzKNzDYNxdghPB2QtTXJSVhzraPhY3q1` |
+| `3u3uAqkWJyuGc86618EV1VLy9jyTRyof1D3RQbn8CP9Z` | 247 | `s2pfZGU7dUVvDcynYgp7pjLL96icebqxBgitPeYsdUsYaM9v29CmGzcSygzUnce6TpKi6mpCV1ZZpMfxvWC4iUS` |
+| `4iz9tFLxiBNuetFDrvHmBc4srXFv8JCWUHD2bDP2dR9c` | 231 | `3GTiK36iMGt3noVJEUcGPjpF6iBNBVTTptv6LuuU7p2RzndiF2Yxu6pAMd47sRyiLdWJ2up7BGx7he8E2fXzMDbr` |
+| `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ` | 231 | `5juWLCuavgZG2EeLFsBEU7HGXMJ6eW98AoD1uRN6RTuCwc7dRVVG7xqviTSFLxWk2YkVo27m8QD9PTdmxfERq6he` |
+| `61EHnUwRb7J3oU71Z4YuUmDbJwSYeYbDY4Ezxxkb17u9` | 231 | `2gp4eUMvUeoRb8rJrWn54xSRHtLKYt8TGMwZfYPvwsQ9gd3cFCav9F7Wz7hGxi6Aq631PfMZgD1acuTqxX22WYeF` |
+| `7KfY6nKU8zQZbsMZgBG8AdU9jx3xULXuzLwRrNYyCzft` | 239 | `41VZ2KJLJNSjKFDMeHE81woM1APnb131sU5tzuy2X79hy9aZMCCRyb6tHEdcPqrMqoejs4CMV5phzfWU5btjruTe` |
+| `8kxv4ZR4RraEtFKC2d99HS6rRVvrfKzS5WRCTnKb5Hz3` | 231 | `7YQ6a2jzXxhD3fRmjae1Xhj5hiPyX7huYYD6e8NysFJFvA65jJRMobYN6TqtUG6Kwy6NRNpaaqX3msqwzNQSce3` |
+| `8YDdYQ51ufVMA1WH4QmQwy3Cn6wrHtdxfyLUx1zWQLPg` | 239 | `5CLzsu42k1tmaPn6mwu5WakzJG2XUxSGXwQBfcnJnz9YCo3dxFpr8Cdwx4Qipi1Eg7VW5zSuULkQu5TV8vLqiMUR` |
+| `9M2m6iooqSsF9XvQcRrNtSnqDwN5Dn4hVMzpU2ySC7sm` | 239 | `MSYMUwXcjXxVny94TeUJTmgn8ke1Zqay3Y7TmpL7un7SxgKJ6oHkfzfZEX4Wd1yzJ3PQzNg2dyyFLedUcmC8n64` |
+| `Bq3eatTTJL2QBScVm6K3Jownue2KKACTZYQj3CdPin1y` | 231 | `ii3vrjRHkix3FrtgwuKPPCjZMkckxFeKRHoea3SzuX5yib2FBe77PHFXTryrid4ASbbKZbLZkN957SJaj4wyJxr` |
+| `DD5SZ2SASWF55SYnP49tsPM48bJ7iSN12s4mMx9Pwtqs` | 231 | `5TBjNwG42PgZMEB7VJ7J5hLZYruPCFSF5fAhQnBGxA55t2LkY279KBXXNGLeu3Ki3C24Hi3qN2aa8644nC7jtgE4` |
+| `Dsc1UNY1t8saH5rTfLBP6ZeMCrDDJxMeoox5mUKjqY1x` | 231 | `ZwNZu1ER8SKqykqwahojArJatJVUcWjFdbbA831rrFbB9SMMeY4b5DULMprMipkVotRQ7iwecYNwnSscZNjGV7a` |
+| `ECYCEqZpKaYSLWoC99dwHJgqTFmwhEygBggyxRh4K4WC` | 239 | `8WELSZpTBDt2piUskxbGGorXzmu4SQznsXSsgF8Ew18jMXhUjRBpq2RNLnn6CUB53tBQemNvQgVntG8T4HN4p9M` |
+| `FHRnMJLuq5MJH4DNMW6ajXeKyiiZ9FVxgHNreh9Kc8Zq` | 231 | `5KQ4oFk8HmzvKqiHJSDoywne3pPYDqcarxyyLdbNpJy9PEx92aL76m4nt54C9jTgzY4QkZnn9uyKLZs16Re4ub6t` (transactie landde écht - slot 501306147 - maar het script crashte vóórdat het dit kon loggen; pas achteraf via `getSignaturesForAddress` teruggevonden) |
+
+**Run 2** (resterende 3, ná herstart - script zelf meldde correct "15 al op 256 bytes,
+3 te migreren", exact kloppend met run 1's resultaat):
+
+| Wallet | dataLen vóór | Migratie-sig |
+|---|---|---|
+| **`FSGNLavhzEvCtk948Y3jEFw2hEgV7GvPQnutp5ZnKs2R`** (kritiek) | 247 | `5yrKsujyPfKXrYbYbcaZuHfgfCdvdRmQ1A5g4E8quNjDm2H4exLbUGeNqZHKDGHSUyM1dGG2yWP21Es6Gj3BnvWV` |
+| `GMiYVYyEzynjro5k4xThQEYNsfELKSomNan5H3qQ3jma` | 231 | `MVoZ2Ycyi74fMmhrJG48sDaq6zxDrkDAYCLVtCvqfhZsygH93G1Sg5d9gMk3iL1qgcN2o51wfs6HBpcjyCWUxBT` |
+| `HwZrjHc5tuUrZxDNi1zws7EWKWZ3HvP7WYkFztC1DTig` | 231 | `4YeUAY7ntZr8BCgDBrzQuX9xMe7sgaFCjvswwmvLbdbt9i2QWmf3zx13DtTacBpLAM9LphGJGgJ2YQv8hAZoEFko` |
+
+Script's eigen "nameting" (herhaalde `getProgramAccounts`-scan): 18 totaal, 0 nog niet op
+256 bytes. **Onafhankelijk herverifieerd** (niet enkel het script vertrouwd): een losse
+`getAccountInfo`/`getMultipleAccounts`-controle van alle 18 wallets bevestigt voor elk:
+owner = canoniek programma, dataLen = 256, discriminator = `9e62ab99d440f2d5` (=
+`sha256("account:WalletAccount")[0..8]`, de correcte `WalletAccount`-discriminator) - dus
+foutloos deserialiseerbaar. Voor de twee kritieke wallets specifiek nogmaals apart
+gecontroleerd (zelfde uitkomst).
+
+### 3. RPC-429-les, concreet vastgelegd voor een volgende keer
+
+De publieke `https://api.devnet.solana.com` rate-limit hard onder een strakke sequentiële
+loop van >10 accounts (elk account: `getLatestBlockhash` + `sendRawTransaction` +
+`confirmTransaction` + `getAccountInfo` = 4+ RPC-calls, geen backoff tussen wallets in
+`migrateAllWalletAccounts.ts`). Twee aparte faalmodi geraakt:
+1. **HTTP 429** op gewone JSON-RPC-calls - `@solana/web3.js` retryt dit intern met backoff
+   (zichtbaar als de `"Retrying after ...ms delay"`-regels), maar niet overal: `getLatestBlockhash`
+   staat in `migrateAllWalletAccounts.ts` BUITEN de try/catch van de loop-iteratie, dus een
+   uitgeputte retry daar crasht het hele proces (roept `main().catch()` niet netjes af, want
+   het is geen gevangen fout binnen een enkele wallet-poging).
+2. **WebSocket-niveau 429** (`"ws error: Unexpected server response: 429"`) tijdens
+   `confirmTransaction`'s interne subscriptie - dit is een `error`-event op de onderliggende
+   WebSocket-client, geen promise-rejection; zonder listener behandelt Node dit als een
+   onafgevangen fout die het proces direct beëindigt. **Dit is precies wat er bij
+   `FHRnMJLuq...` gebeurde: de migratie-transactie was al succesvol geland (bevestigd,
+   achteraf, via `getSignaturesForAddress`) vóórdat het proces crashte** - het script kreeg
+   dus nooit de kans om dat te loggen, wat de aanvankelijke telling (14 i.p.v. 15 "al
+   gemigreerd" bij run 2's start) tijdelijk verwarrend maakte totdat dit werd uitgezocht.
+
+**Concrete aanbeveling voor een volgende batch-migratie/-operatie van deze omvang (>10
+accounts) tegen de publieke devnet-RPC:**
+- Een vaste vertraging (bijv. 300-500ms) tussen opeenvolgende wallets inbouwen, in plaats van
+  zo snel mogelijk te vuren.
+- `getLatestBlockhash` (en elke andere RPC-call buiten de huidige try/catch) binnen dezelfde
+  try/catch van de loop-iteratie plaatsen, zodat een falende call voor wallet N niet de hele
+  resterende batch (N+1..einde) laat crashen.
+- Overwegen een eigen/betaald RPC-endpoint te gebruiken voor dit soort batch-operaties, of
+  expliciet te documenteren dat een crash midden in een run geen probleem is (het script is
+  idempotent - gewoon opnieuw draaien), zodat een toekomstige uitvoerder niet per ongeluk
+  aanneemt dat een crash op transactieniveau ook betekent dat er niets gelukt is.
+
+### 4. Bijgewerkte wallet-telling: 18, niet 17 - uitgezocht, niet aangenomen
+
+`scripts/migrateAllWalletAccounts.ts` vond **18** WalletAccount-discriminator-accounts, niet
+de 17 uit sectie 144's telling (die zelf al een momentopname was: "de daadwerkelijke, op
+2026-09-14 gelezen ruwe bytes van elk van de 17"). Het 18e, extra account t.o.v. die telling:
+
+**`3u3uAqkWJyuGc86618EV1VLy9jyTRyof1D3RQbn8CP9Z`** - `created_at` (rechtstreeks uit de
+account-bytes geparsed, offset 108, i64) = `1789402506` = **2026-09-14T16:15:06Z**, exact
+dezelfde dag als de 17-wallet-snapshot. Alle andere 17 wallets zijn aangemaakt tussen
+2026-08-10 en 2026-08-26 - dit account is dus de enige uitschieter, bijna drie weken later
+dan de op-één-na-jongste (2026-08-26T19:01:52Z, `FSGNLavhz...` zelf).
+
+**Volledige on-chain transactiegeschiedenis van dit account: precies 2 transacties, ooit.**
+1. `InitWallet` (sig `5YyDTPmLZGDTnRoChdGM3Ct3TGd2e8MzbmuZRvh4Yw47imokbRtP8ofeDBx2ES6oG1RdVYJduyGfpmhNCaSRauta`,
+   slot 498322838, 2026-09-14T16:15:06Z, `err: null`) - standaard, succesvolle
+   passkey-wallet-aanmaak (Secp256r1SigVerify-instructie aanwezig, geen afwijkend patroon).
+   **Fee-payer: `G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`** - exact dezelfde lokale
+   `~/.config/solana/id.json`-operator-keypair die ook vandaag alle 18 migratie-transacties
+   heeft betaald, en die door dit hele project heen consequent als test-/operator-sleutel
+   gebruikt wordt (geen extern/onbekend adres).
+2. De migratie van vandaag (`3GTiK...` - zie tabel hierboven, run 1).
+
+**Conclusie: verklaarbaar, geen zorg.** Dit is een eigen, legitiem test-account, aangemaakt
+door de bekende operator-sleutel op exact de dag van de 17-wallet-RC-verificatieronde -
+vrijwel zeker een testartefact van diezelfde sessie dat net buiten die specifieke scriptrun
+viel, geen extern/onverwacht adres en geen enkel teken van misbruik (geen recovery-cyclus,
+geen ongebruikelijke balans-/instructiepatronen - slechts twee transacties totaal). Na
+migratie: 256 bytes, correcte discriminator, **geen speciale behandeling nodig** (in
+tegenstelling tot `3Ape3ge72...`, waarvoor de on-chain instructie zelf een expliciete
+`action_nonce`/`session_epoch`-uitzondering bevat, sectie 143) - dit 18e account liep gewoon
+door het generieke migratiepad, net als de andere 15 niet-kritieke wallets.
+
+### 5. Eindstatus: is het spend-cap-mechanisme nu volledig live?
+
+**Structureel: ja, volledig en geverifieerd.** Het canonieke devnet-programma draait nu op
+de exacte HEAD-build (byte-voor-byte geverifieerd, punt 1), en alle 18 bestaande
+WalletAccount-accounts staan op de volledige nieuwe 256-byte-laag met de
+`spend_threshold_lamports`/`disarmed`-velden (punt 2), inclusief de twee wallets waarvan al
+vaststond dat ze zonder migratie blijvend zouden falen. Dit is het punt waar het traject dat
+bij sectie 99 begon (het allereerste spend-cap-ontwerp) operationeel landt: het mechanisme
+bestaat niet langer alleen in code/tests, maar is daadwerkelijk gedeployed en van toepassing
+op elke bestaande wallet.
+
+**Functioneel/gedragsmatig: NIET in deze sessie end-to-end getest tegen een echte,
+post-migratie devnet-wallet - dit expliciet vermeld in plaats van stilzwijgend aangenomen.**
+Wat wél bewezen is: de onderliggende logica zelf is uitgebreid getest vóór deze deploy
+(`yarn test` 114 passing / `yarn test:pending-action` 39 passing, sectie 144), en het
+fail-safe-default (`disarmed=false`, `spend_threshold_lamports=0` - het mechanisme staat
+dus per wallet standaard UIT totdat de eigenaar het bewust aanzet) was al eerder bevestigd
+voor de oude-laag-accounts vóór migratie. Wat nog NIET in deze sessie is uitgevoerd: een
+live `arm_wallet`/spend-drempel-instelling + een daadwerkelijke over-drempel-`execute`-poging
+tegen een echte, nu-gemigreerde devnet-wallet, om te bevestigen dat de handhaving ook
+functioneel correct is ná deze specifieke deploy (niet alleen structureel aanwezig). Dat is
+de enige resterende stap om dit traject ook functioneel, niet alleen structureel, af te
+sluiten - geen actie ondernomen zonder expliciet verzoek.

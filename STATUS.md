@@ -14298,3 +14298,27 @@ draaien):**
 **Nog niet vastgesteld, expliciet zo gelaten (geen aanname):** of finalize/testpunt 3-5
 daadwerkelijk zo uitpakken als hierboven verwacht - dat is precies wat fase 2 moet aantonen.
 Dit sectie-item wordt aangevuld (niet herschreven) zodra fase 2 gedraaid is.
+
+## 150. Voorstel #14 (het per-ongeluk-aangemaakte duplicaat, sectie 147/148) afgewezen en gesloten (2026-09-20)
+
+Sectie 148 noemde dit als "niet urgent, maar aan te raden" om toekomstige verwarring te
+voorkomen. Afgewezen via twee losse `ProposalReject`-transacties, allebei rechtstreeks
+on-chain geverifieerd (niet aangenomen):
+
+| Afwijzing | Signature | Slot | err |
+|---|---|---|---|
+| 1/2 | `53jdfRNyY4ond3F6reLvBpVPBrb9AWN7MWdJfmpsqHJFUY47jzYGwQSG15xQjJPrEhvqbD3Y36qnhDxKA9rVWunW` | 501355523 | `null` |
+| 2/2 | `2qgQpyLn8dFw4hDmfBxt97LXJgGB9pA4G7VowXyHwuj7Rof6nivA6hWpnFsG3JMdU4tQZsK2DaChFjD1SEzimTVt` | 501356412 | `null` |
+
+**Correctie op een eerdere aanname, hier vastgelegd zodat een toekomstige sessie dit niet
+opnieuw hoeft te ontdekken: de afwijzingsdrempel bleek gelijk aan de goedkeuringsdrempel
+(2-van-3 leden), niet 1 stem.** Na de eerste afwijzing (`53jdfRN...`) bleef voorstel #14's
+status nog gewoon `Active` - alleen `rejected: ['3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3']`
+werd bijgewerkt, exact zoals `approved` bij een eerste (nog onvoldoende) goedkeuring. Pas na
+de tweede afwijzing (`2qgQpyLn...`) klapte de status daadwerkelijk om.
+
+**Eindstatus, onafhankelijk gedecodeerd (dezelfde productie-`vendor/multisig.mjs`-decoder als
+sectie 146/147/148, `Proposal.fromAccountAddress`), bevestigd:** status **`Rejected`**,
+`rejected: ['3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3', 'CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3']`,
+`approved: []`, `cancelled: []`. Voorstel #13 (het uitgevoerde voorstel, sectie 148) blijft
+ongewijzigd `Executed`. Geen verdere actie nodig - dit sluit het opruimpunt uit sectie 148 af.

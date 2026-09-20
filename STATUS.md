@@ -14229,3 +14229,72 @@ tegen een echte, nu-gemigreerde devnet-wallet, om te bevestigen dat de handhavin
 functioneel correct is ná deze specifieke deploy (niet alleen structureel aanwezig). Dat is
 de enige resterende stap om dit traject ook functioneel, niet alleen structureel, af te
 sluiten - geen actie ondernomen zonder expliciet verzoek.
+
+## 149. Live functionele spend-cap-proef, fase 1: verse devnet-wallet, fail-safe default bevestigd, drempel geïnitieerd - fase 2 bewust uitgesteld tot de ECHTE 24u-timelock verstreken is (2026-09-20)
+
+Vervolg op sectie 148's open punt (structureel live, functioneel nog niet bewezen). Tegen
+het ECHTE, canonieke, nu-geüpgradede devnet-programma, met een VERSE wallet (niet een van de
+18 bestaande, om onnodig risico te vermijden) en een klein, echt bedrag SOL. Twee nieuwe,
+committed, herbruikbare scripts (zelfde conventie als `devnetPostUpgradeProof.ts`):
+`scripts/devnetSpendCapProofPhase1.ts` (dit verslag) en
+`scripts/devnetSpendCapProofPhase2.ts` (klaar, nog niet gedraaid - zie hieronder).
+
+**Testpunt 1 (fail-safe default direct na aanmaak): GESLAAGD, onafhankelijk herverifieerd.**
+Verse wallet `EHGqLUxvQUd8A1ZR77NsyPVibsGAN82QKkw6rsGkGJuD` (vault
+`9y66H4zqLiSCaRxGPSToFdcK32KV8D95yViY2ADwCJeW`), aangemaakt via `init_wallet`
+(sig `3dmmUSpfhDRqRhTUXG1jQLYcTj6izoD2JMauLPdkZue1XAPf74VKS1edJGe5rho4LDL1LjsSwQPqFinLFKvdvRLr`,
+`err: null`, onafhankelijk bevestigd). Direct daarna, zowel via het script als via een losse
+rechtstreekse RPC-read van de ruwe bytes: dataLen **256**, discriminator
+`9e62ab99d440f2d5` (correct), `spend_threshold_lamports` **0**, `disarmed` **false** - exact
+de fail-safe default, zoals ontworpen en zoals eerder al voor de bestaande (pre-migratie)
+wallets bevestigd (sectie 148 punt 5), nu voor het eerst op een wallet die vanaf het begin al
+op de volledige 256-byte-laag stond.
+
+**Vault gefund met een klein bedrag: 30.000.000 lamports (0,03 SOL)** - ruim genoeg voor alle
+geplande testtransacties in fase 2 (zie hieronder, totaal maximaal 12.000.000 lamports aan
+daadwerkelijk te verplaatsen bedragen), niets extra's.
+
+**`initiate_threshold_change` verstuurd en bevestigd**
+(sig `4VRduDvuR2Rp4NXTRfmk14vhwu5iZy7WFpRbQ7ZoHGNKGk1iQD5niUrDkbb4VVDix8jcsFtFVyBSxTGLamp2s6oe`,
+`err: null`): nieuwe drempel **5.000.000 lamports** (0,005 SOL, instant-per-transactie-cap),
+nieuwe vensterlimiet **12.000.000 lamports** (0,012 SOL, glijdende-24u-cap). Resulterende
+`PendingAction` (`9u7wXwjtXoHPpFoxLU5kYJ3Wm2TcNzJhxNgAK4XpYiph`), onafhankelijk gedecodeerd uit
+de ruwe bytes (niet enkel Anchors client vertrouwd): `kind=3` (ThresholdChange, klopt),
+`initiated_at=1789902191` (klopt exact met wat het script rapporteerde).
+
+**Fase 2 (finalize_threshold_change + testpunten 3/4/5) bewust uitgesteld - geen aanname,
+harde broncode-controle vooraf.** `instructions.rs` bevat twee cfg-varianten van
+`PENDING_ACTION_TIMELOCK_SECONDS`: `24*60*60` (productie) of `3` (uitsluitend onder de
+`test-fast-pending-timelock`-Cargo-feature). Sectie 148 punt 1 bevestigde al dat de gedeployde
+bytes byte-voor-byte de HEAD-build zijn, gebouwd zonder testfeatures (sectie 144's
+reproduceerbare build) - dus geldt hier de ECHTE 24 uur, niet te versnellen, en niet
+verstandig om vroegtijdig te proberen (zou alleen een voorspelbare, informatieloze
+timelock-weigering opleveren, geen nieuwe informatie).
+
+**Vroegst uitvoerbaar: 2026-09-21T11:03:11Z** (`initiated_at` + 86.400s, hier vastgelegd zodat
+het niet opnieuw hoeft te worden afgeleid). `scripts/devnetSpendCapProofPhase2.ts` bevat een
+eigen guard die vóór die tijd geen enkele transactie verstuurt (getest: draait nu al veilig,
+meldt correct "nog 23u 57m te gaan", exit code 2, geen tx). Het testmateriaal (passkey-privésleutel,
+backup-authority-keypair, alle PDA's, drempel/cap-waarden, `initiated_at`) staat weggeschreven
+op `~/.config/spankwallet/devnet-spend-cap-test-state.json` - buiten git, zelfde conventie als
+`~/.config/spankwallet/program-keypairs/` (nooit secrets committen, wel de scripts die ze
+gebruiken).
+
+**Resterend, zodra de timelock verstreken is (`scripts/devnetSpendCapProofPhase2.ts`
+draaien):**
+1. `finalize_threshold_change` - bevestigt dat de drempel/cap daadwerkelijk op de wallet
+   landen en de `SpendWindow`-account correct wordt aangemaakt.
+2. Testpunt 3: execute van 3.000.000 lamports (onder de drempel) - moet instant slagen.
+3. Testpunt 4: execute van 5.000.001 lamports (boven de drempel) - moet weigeren met
+   `AmountExceedsInstantThreshold`, aantoonbaar niets verplaatst.
+4. Testpunt 5: drie extra executes van 3.000.000 lamports kort na elkaar (teller loopt op:
+   6M -> 9M -> 12M, exact op de cap, elk nog onder de drempel dus individueel toegestaan),
+   gevolgd door een poging van slechts 1 lamport - moet weigeren met `SpendWindowExceeded`,
+   ondanks dat 1 lamport ver onder de per-transactie-drempel blijft. Dit is het scherpste
+   bewijs dat de twee mechanismen (instant-drempel vs. glijdend venster) onafhankelijk en
+   allebei daadwerkelijk afgedwongen worden door het nu-live programma, niet alleen in de
+   testsuite.
+
+**Nog niet vastgesteld, expliciet zo gelaten (geen aanname):** of finalize/testpunt 3-5
+daadwerkelijk zo uitpakken als hierboven verwacht - dat is precies wat fase 2 moet aantonen.
+Dit sectie-item wordt aangevuld (niet herschreven) zodra fase 2 gedraaid is.

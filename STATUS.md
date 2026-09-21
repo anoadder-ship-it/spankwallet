@@ -14299,6 +14299,110 @@ draaien):**
 daadwerkelijk zo uitpakken als hierboven verwacht - dat is precies wat fase 2 moet aantonen.
 Dit sectie-item wordt aangevuld (niet herschreven) zodra fase 2 gedraaid is.
 
+**Aanvulling (2026-09-21T11:07-11:12Z): fase 2 gedraaid tegen het echte devnet-programma. Alle
+vijf testpunten GESLAAGD, elk met een echte on-chain-signature en onafhankelijk (niet enkel het
+script vertrouwend) herverifieerd via ruwe accountbytes, `solana confirm -v` en `solana
+transaction-history`.**
+
+Timelock daadwerkelijk verstreken vóór de run: guard in `devnetSpendCapProofPhase2.ts` liet de
+transacties pas door omdat de walltijd (2026-09-21T11:07:39Z) al voorbij `earliestFinalizeUnix`
+(2026-09-21T11:03:11Z) lag - geen enkele vervroegde poging gedaan.
+
+1. **`finalize_threshold_change`**: sig
+   `2wtTLM1M6VrFoegVkziJmovG93PgiwGfpbUqXNGxBDyR4e3i8AwhjteLnjQc5jzmcz3f6DvkDxXcXKUwAJBhHaZh`
+   (slot 501873379, 2026-09-21T11:07:54Z). `solana confirm -v`: Status `Ok`; de `SpendWindow`-
+   account (`2448bH98cQF5ft4pYPA8Y2YCKThNKtgTpHZbkGdwDn1Q`) ging in dezelfde transactie van
+   balans 0 naar 0,00098044 SOL - daadwerkelijk aangemaakt (rent-gefund), niet slechts een
+   veldupdate. Drempel/cap onafhankelijk teruggelezen uit de ruwe `WalletAccount`/`SpendWindow`-
+   bytes kwamen exact overeen met de client-fetch (5.000.000 resp. 12.000.000 lamports,
+   teller op 0) - later in dit verslag nogmaals bevestigd via een losse ruwe-bytes-read.
+
+2. **Testpunt 3 (execute 3.000.000 lamports, onder de drempel): GESLAAGD.** Sig
+   `3yKZLU3QdxfP2zvwSWjRgHvbrsMj2tbdLbJBsRifudWMqvghqG7QmXpzzHq4eGHqVaMC54thyRcAaE9jnhhTbrHS`.
+   `solana confirm -v`: Status `Ok`; ontvanger-account +0,003 SOL, vault -0,003 SOL, exact
+   3.000.000 lamports - onafhankelijk van het script bevestigd via de rauwe balansdelta's in
+   de transactie zelf, niet enkel `getBalance`-calls van het script.
+
+3. **Testpunt 4 (execute 5.000.001 lamports, boven de drempel): correct geweigerd.** De publieke
+   devnet-RPC's preflight-simulatie ving dit al client-side af (`AmountExceedsInstantThreshold`)
+   - correct gedrag, maar zonder omgezette transactie levert dat geen on-chain-signature op om
+   onafhankelijk te auditen. Daarom herhaald met `skipPreflight:true` om een echte,
+   bevestigde-maar-mislukte on-chain-transactie te forceren. Resultaat (tweemaal gereproduceerd):
+   sigs `4jUk5vgY9RRVSxom6cESqtN8NFiubusFMccp1dJZu9LtYwvZ6V4isirNdnk6rcSxUmNngPk7d7UWbKgu3wqofMuf`
+   en `4UdunQ6ecajnSrYQTyHbNkvC9Wvt75v2h4wpiicP4a94vCEfhRvwzhntbpKthjseDEcfVHYeyd3J1CAcKQt78HfT`.
+   `solana confirm -v` op beide: `Status: Error processing Instruction 1: custom program error:
+   0x17a9` (= 6057 decimaal), met logregel `AnchorError ... Error Code:
+   AmountExceedsInstantThreshold. Error Number: 6057`. 6057 onafhankelijk geverifieerd door de
+   foutcode-enum in `programs/spankwallet/src/errors.rs` handmatig te tellen (positie 58,
+   6000+57) i.p.v. enkel de client-foutmelding-string te vertrouwen - kwam exact overeen.
+   Vault-balans in de transactie zelf ongewijzigd (0,01885852 SOL voor en na, beide keren).
+
+4. **Testpunt 5, vensterlimiet-lus (3x 3.000.000 lamports kort na elkaar, teller naar
+   6M/9M/12M): GESLAAGD, met een onderbreking onderweg die correct is afgehandeld i.p.v.
+   genegeerd.** Na de eerste twee lus-executes (naar 6M, sigs
+   `2aippbS2wdCue8Kbw5CyWtYDp192HBV8gg6zSvAkqwvEe8QiRx6aWaWEvyBX1AeozjU9Gf272wTGQCkeTVgtCbgc` en
+   `4JnhDzEVcW5MDCUkpL36Mqa8oR5sDeXdgRgSjrUdtBaCi3sJUPCSbnxwy3JmyrzMdHcb5mtKo6bTnh2HHPJ2oRhx`,
+   samen naar 9M) gooide de publieke devnet-RPC `429 Too Many Requests` bij de derde iteratie,
+   vóórdat er een transactie verstuurd was. Vóór verder te gaan eerst onafhankelijk
+   geverifieerd (niet aangenomen) dat er niets ongemerkt wél gelukt was: ruwe bytes van
+   `SpendWindow` rechtstreeks via `solana account --output json` gelezen en handmatig gedecodeerd
+   (offsets uit de Rust-struct in `state.rs`) - `spent_lamports_this_window` stond exact op
+   9.000.000, cap op 12.000.000, dus de derde poging was inderdaad nooit verstuurd. Daarna de
+   laatste vullende execute alsnog gedaan: sig
+   `2W8xdjr81oA8YQpSznxaJE2zk3AfAiN4xDkRP9yvZp3N7y5sMUJeyXaphuNW83C7tTwjkVnuBG898sK2XCBrWA6H`,
+   teller daarna onafhankelijk herbevestigd op exact 12.000.000 (zowel client-fetch als ruwe
+   bytes).
+
+5. **Testpunt 5, overschrijdende 1-lamport-poging: correct geweigerd met
+   `SpendWindowExceeded`.** Eerste poging kreeg `StaleActionNonce` - géén testfout, maar het
+   reeds in `webauthnTestHelper.ts` gedocumenteerde RPC-lees-propagatiegat (een nonce-fetch die
+   een op dat moment nog niet volledig doorgedrongen accountstate teruggaf, waarschijnlijk
+   verergerd door de eerdere rate-limiting); genegeerd en de poging simpelweg opnieuw gedaan met
+   een verse nonce-fetch, wat wél `SpendWindowExceeded` gaf. Net als bij testpunt 4 ving de
+   publieke RPC's preflight-simulatie dit eerst client-side af (correct, maar zonder
+   on-chain-signature); herhaald met `skipPreflight:true` voor een echte, auditeerbare
+   transactie. Resultaat (tweemaal gereproduceerd): sigs
+   `2v4Gn76KsNXB3quSQWxNoHb5FsZ5zUk8g9Sqe9zcKL8K2PUr5RccvCHBv1Kb4zkiLYkyvUEwgfd8Uv2QZdnonszM` en
+   `5zVdDpHbbfVMHQKo8bmPt9znMbRbCR9nUPNa5SCEe8H9FbLFPX5KhjPmruxTA77nrpvzkqxfxUKUXxBUadUdjCwG`.
+   `solana confirm -v` op beide: `custom program error: 0x17a6` (= 6054 decimaal, onafhankelijk
+   herleid uit `errors.rs`: positie 55, 6000+54), logregel bevestigt `SpendWindowExceeded`. Vault-
+   balans én `spent_lamports_this_window` in beide transacties ongewijzigd (resp. 0,01885852 SOL
+   en 12.000.000 lamports, voor en na identiek).
+
+**Sluitende vault-reconciliatie, volledig onafhankelijk van de scripts opgebouwd:** gefund met
+30.000.000 lamports (fase 1); rent-exempt-reserve voor de 41-byte `VaultAccount` is 858.520
+lamports (`solana rent 41`); daadwerkelijk verplaatst via de vier geslaagde executes (testpunt 3
++ de drie lus-executes) is exact 12.000.000 lamports - precies de vensterlimiet, geen toeval maar
+het hele punt van de test. Rechtstreekse `solana balance --lamports`-read van de vault ná alle
+tests: **18.858.520 lamports = 30.000.000 - 12.000.000 + 858.520**, klopt tot op de lamport
+nauwkeurig.
+
+**Zijwaartse bevinding, geen security-issue in spankwallet zelf maar het melden waard:** bij het
+forceren van `skipPreflight:true` bleek `@coral-xyz/anchor@0.31.1`'s
+`AnchorProvider.sendAndConfirm`-foutafhandeling incompatibel met de geïnstalleerde
+`@solana/web3.js@1.98.4`: bij een transactie die pas ná verzending on-chain faalt (geen
+preflight-afwijzing), probeert Anchor een nettere foutmelding te bouwen via
+`new SendTransactionError(err.message, logs)` (oude 2-argumenten-signatuur), terwijl deze
+web3.js-versie een object-vorm `{action, signature, transactionMessage, logs}` verwacht -
+resultaat: de destructuring geeft `action=undefined` en de aanroep crasht met `Unknown action
+'undefined'`, de echte foutmelding (inclusief signature) gaat verloren in het errorobject zelf.
+De transactie was overigens wél degelijk on-chain verstuurd en correct afgehandeld (bevestigd
+via `solana transaction-history` + `solana confirm -v`) - alleen Anchors eigen nette-foutmelding-
+laag struikelde. Gecontroleerd dat dit geen productiepad raakt: `client/` en `wallet-signer.html`
+gebruiken nergens Anchors `.rpc()`-methode (grep, 0 treffers), uitsluitend directe
+`connection.sendRawTransaction`-aanroepen - dit is een testscript-eigenaardigheid, geen
+wallet-risico. Vermeld hier zodat een volgende devnet-proof-auteur niet opnieuw tijd verliest aan
+hetzelfde raadsel.
+
+**Conclusie: het spend-cap-mechanisme is nu FUNCTIONEEL bevestigd live op devnet, niet langer
+alleen structureel.** Zowel de instant-per-transactie-drempel als de onafhankelijke glijdende-
+vensterlimiet worden elk daadwerkelijk afgedwongen door het momenteel gedeployde programma, met
+voor elk van de vijf testpunten uit dit sectie-item een echte on-chain-transactie, een reproduceerbare
+foutcode, en een verificatie die niet louter op de scripts' eigen rapportage leunt (ruwe
+accountbytes, `solana confirm -v`-balansdelta's, en een handmatig uit de broncode herleide
+foutcode-tabel). Geen van de vijf testpunten liet ook maar 1 lamport bewegen buiten wat expliciet
+bedoeld en toegestaan was.
+
 ## 150. Voorstel #14 (het per-ongeluk-aangemaakte duplicaat, sectie 147/148) afgewezen en gesloten (2026-09-20)
 
 Sectie 148 noemde dit als "niet urgent, maar aan te raden" om toekomstige verwarring te

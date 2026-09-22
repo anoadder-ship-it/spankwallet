@@ -273,4 +273,6 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
 
 ## Licentie en Security
 
+**Licentie:** Apache-2.0 — zie `LICENSE`.
+
 Zie SECURITY.md voor het verantwoord melden van kwetsbaarheden.

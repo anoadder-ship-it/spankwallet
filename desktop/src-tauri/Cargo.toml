@@ -7,6 +7,7 @@ name = "spankwallet-desktop"
 version = "0.1.0"
 description = "SpankWallet desktop-app (Tauri) - fase 0 van de browser->native-migratie, zie STATUS.md"
 authors = ["SpankWallet"]
+license = "Apache-2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

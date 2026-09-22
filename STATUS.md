@@ -14498,3 +14498,22 @@ moet worden — met name relevant zodra "malicious"-markeringen en
 transfer-blokkades standaard (niet opt-in) worden, ook al blijft het
 mechanisme technisch beperkt tot de eigenaar's eigen accounts/mint (punt 2
 hierboven).
+
+## 152. Licentie vastgesteld: Apache-2.0 (2026-09-22)
+
+Spankwallet had **geen** `LICENSE`-bestand en geen enkel SPDX/license-veld
+in de drie `Cargo.toml`'s (root, `programs/spankwallet`,
+`desktop/src-tauri`) of de drie `package.json`'s (root, `desktop`,
+`client`) — een reëel gat, gezien deze repo **publiek** is (bevestigd via
+`gh repo view`, audit-sessie 2026-09-22). Michel heeft vastgesteld:
+**Apache-2.0**, consistent met dezelfde beslissing in offline-bearer-protocol
+en active-defense (dezelfde avond).
+
+Toegevoegd: `LICENSE` (standaard Apache-2.0-tekst, copyright "2026 Michel");
+`license = "Apache-2.0"` als `[workspace.package]`-veld in het root-
+`Cargo.toml` (pure `[workspace]`-manifest, geen eigen `[package]`) en als
+expliciet veld in `programs/spankwallet/Cargo.toml` en
+`desktop/src-tauri/Cargo.toml`; `"license": "Apache-2.0"` in alle drie
+`package.json`'s; README.md's "Licentie en Security"-sectie kreeg een
+expliciete licentieregel (verwees voorheen alleen naar SECURITY.md, geen
+licentie-vermelding).

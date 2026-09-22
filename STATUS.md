@@ -14426,3 +14426,75 @@ sectie 146/147/148, `Proposal.fromAccountAddress`), bevestigd:** status **`Rejec
 `rejected: ['3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3', 'CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3']`,
 `approved: []`, `cancelled: []`. Voorstel #13 (het uitgevoerde voorstel, sectie 148) blijft
 ongewijzigd `Executed`. Geen verdere actie nodig - dit sluit het opruimpunt uit sectie 148 af.
+
+## 151. Voorbereidende notitie: active-defense standaard meebouwen in de wallet — nog GEEN besluit, nog GEEN code (2026-09-22)
+
+Michel wil active-defense (Poison Token + Malicious Addresses,
+`~/projects/active-defense`, apart repo) uiteindelijk **standaard**
+meebouwen in de wallet, niet als optionele add-on. Dit is een grote
+architecturale beslissing die een eigen ontwerpfase verdient — zelfde
+discipline als destijds sectie 99/115 voor het spend-cap-mechanisme, niet
+iets om terloops te beslissen. Deze sectie legt alleen de voorbereiding
+vast voor die toekomstige sessie; er is vanavond niets gebouwd of
+besloten.
+
+### 1. De centrale, nog te beantwoorden ontwerpvraag
+
+Twee routes, met heel verschillende impact:
+
+- **(A) Samenvoegen**: active-defense's instructies (`mark_malicious`,
+  `unmark_malicious`, `attach_transfer_hook`, `add_authorized_recipient`,
+  `poison_transfer_hook`) worden daadwerkelijk opgenomen in spankwallet's
+  eigen on-chain programma. **Grote impact**: raakt wat al live staat op
+  mainnet/devnet onder multisig-bestuur, vereist waarschijnlijk een
+  volledig nieuwe RC-verificatieronde zoals bij het spend-cap-mechanisme
+  (sectie 99 e.v.), en een programma-upgrade van het reeds-live
+  spankwallet-programma zelf.
+- **(B) Apart programma, standaard-gekoppeld**: active-defense blijft een
+  zelfstandig gedeployed programma (eigen program-ID, eigen upgrade-
+  authority — zie active-defense's eigen STATUS.md sectie 3 over waarom
+  dat daar nog kritiek is), en spankwallet's client/UI praat er **standaard**
+  mee (in plaats van optioneel/opt-in). **Kleinere impact**: geen wijziging
+  aan het al-live spankwallet-programma zelf, wel een UI/client-beslissing
+  (en een vraag over hoe "standaard" zich verhoudt tot active-defense's
+  eigen, nog niet multisig-bestuurde upgrade-authority).
+
+Deze vraag (A vs. B, en eventuele tussenvormen) is **niet beantwoord** —
+dat is precies het onderwerp van de toekomstige ontwerpsessie.
+
+### 2. Wat vanavond al feitelijk is vastgesteld over het mechanisme zelf
+
+(Volledige verificatie: onafhankelijke lezing van active-defense's eigen
+README.md/STATUS.md + broncode, niet op trust gebaseerd — zie de
+sessie-analyse van vanavond.)
+
+- **`mark_malicious`/`unmark_malicious`** muteren uitsluitend een PDA
+  geseed op de **eigen** spankwallet-PDA van de aanroeper
+  (`["malicious", wallet.key()]`). Het gemarkeerde adres wordt alleen als
+  instructie-data opgeslagen/verwijderd uit die eigen lijst — het account
+  van het gemarkeerde adres zelf wordt nergens gelezen of geschreven.
+- **`poison_transfer_hook`** heeft geen `mut` op `source_token_account`/
+  `destination_token_account` — het leest alleen of een
+  `AuthorizedRecipient`-PDA bestaat (seeds: `[mint, recipient]`, zelf een
+  programma-eigen PDA, niet het account van de ontvanger). Bestaat de PDA
+  niet, faalt de transfer met Anchor's eigen `AccountNotInitialized`, vóór
+  de handler-body draait.
+- **Conclusie: het mechanisme grijpt nooit in op een account dat niet van
+  de spankwallet-eigenaar zelf is.** Alle schrijfacties zijn PDA's die de
+  eigenaar zelf via zijn eigen passkey-actie aanmaakt/muteert. Het enige
+  effect op derden is indirect: een niet-geautoriseerde ontvanger kan geen
+  tokens van de door de eigenaar zelf aangemaakte poison-mint ontvangen —
+  een beperking op de eigenaar's eigen mint, geen actie tegen andermans
+  accounts of andere tokens.
+
+### 3. Ontbrekende juridische disclaimer
+
+Active-defense's eigen README.md en STATUS.md bevatten **geen enkele**
+juridische overweging of disclaimer (geverifieerd: geen treffer op
+"juridisch"/"legal"/"aansprakelijk"/"disclaimer"/"liability" in het hele
+repo). Onafhankelijk van welke route (A/B hierboven) uiteindelijk gekozen
+wordt, is dit een openstaand punt dat op een gegeven moment toegevoegd
+moet worden — met name relevant zodra "malicious"-markeringen en
+transfer-blokkades standaard (niet opt-in) worden, ook al blijft het
+mechanisme technisch beperkt tot de eigenaar's eigen accounts/mint (punt 2
+hierboven).

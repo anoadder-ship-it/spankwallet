@@ -14499,6 +14499,10 @@ transfer-blokkades standaard (niet opt-in) worden, ook al blijft het
 mechanisme technisch beperkt tot de eigenaar's eigen accounts/mint (punt 2
 hierboven).
 
+**Update (2026-09-22): opgelost.** Korte, feitelijke juridische disclaimer
+toegevoegd aan active-defense's README.md (commit `fb189ac`) en spankwallet
+kreeg zelf een algemene as-is/eigen-risico-disclaimer (commit `84c5e81`).
+
 ## 152. Licentie vastgesteld: Apache-2.0 (2026-09-22)
 
 Spankwallet had **geen** `LICENSE`-bestand en geen enkel SPDX/license-veld

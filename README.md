@@ -292,4 +292,10 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
 
 **Licentie:** Apache-2.0 — zie `LICENSE`.
 
+**Disclaimer:** deze software wordt geleverd "as is", zonder garantie (zie ook
+de Apache-2.0-licentie zelf). SpankWallet beheert echte waarde op Solana —
+gebruik op eigen risico. Dit is geen financieel advies, en er is geen garantie
+tegen bugs, verlies van toegang of andere risico's die inherent zijn aan
+zelfbeheer van crypto-assets.
+
 Zie SECURITY.md voor het verantwoord melden van kwetsbaarheden.

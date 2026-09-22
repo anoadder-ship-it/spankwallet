@@ -10,11 +10,11 @@ geupgraded via de nieuwe 2-of-3 Squads-multisig, met on-chain bewijs tot op de b
 geverifieerd (reproduceerbare build, geen aannames). De hele migratie-en-canary-saga
 (secties 41-57) is hiermee afgesloten.
 
-Document laatst bijgewerkt: 2026-09-03 (zie sectie 136 voor de recentste stand). De
+Document laatst bijgewerkt: 2026-09-22 (zie sectie 152 voor de recentste stand). De
 "Huidige staat"-samenvatting hieronder dekt zelf t/m ongeveer sectie 72 en is sindsdien
-niet meegewerkt met latere secties (58-136, o.a. de spend-limits-deploy en de
-threshold-change-client-ingang) - voor de actuele stand is het chronologische logboek
-leidend, niet deze samenvatting.
+niet meegewerkt met latere secties (58-152, o.a. de spend-limits-deploy, de
+threshold-change-client-ingang, en de licentie/security-audit van 2026-09-22) - voor de
+actuele stand is het chronologische logboek leidend, niet deze samenvatting.
 
 ---
 

@@ -92,6 +92,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | initiate_recovery                | Backup authority                     | Recovery starten                                                    |
 | cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren                                                   |
 | finalize_recovery                | Permissionless (na timelock)          | Recovery afronden: wist alle extra passkeys, maakt bestaande sessiesleutels ongeldig (epoch-verhoging, sluit ze niet) |
+| migrate_wallet_account            | Permissionless                       | WalletAccountOld (231/239/247 bytes) migreren naar WalletAccount (256 bytes), dubbele-migratie-beschermd |
 | add_session_key                  | Een van de al geldige passkeys        | Tijdelijke session key registreren (scope + slot-gebonden expiry)   |
 | remove_session_key               | Een van de al geldige passkeys        | Session key vroegtijdig intrekken                                    |
 | close_session                    | De session key zelf                   | Eigen sessie zelf sluiten, rent terug (enige zelfstandige actie)     |
@@ -105,7 +106,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 ```
 spankwallet/
 programs/spankwallet/       - Anchor-programma (Rust)
-  src/lib.rs                 - #[program]-entrypoints (28 instructies)
+  src/lib.rs                 - #[program]-entrypoints (29 instructies)
   src/state.rs                - WalletAccount, VaultAccount, RecoveryState, PolicyAccount,
                                  PasskeysAccount, SessionKeyAccount, PendingAction, SpendWindow
   src/instructions.rs          - alle instructielogica + gedeelde verificatiehelpers
@@ -123,12 +124,28 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (80 passing, 2 pending, 0 failing - zie STATUS.md sectie 78)
+tests/                        - Anchor-tests (114 passing, 42 pending, 0 failing - `npm test`, 2026-09-22)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
   recovery.ts                       - recovery-flow
+  transferToken.ts                   - transfer_token + B6 challenge-binding aan vault_token_account
+  hunt.ts                             - hunt (spam-token burnen + account sluiten)
+  actionNonce.ts                       - action_nonce-mechanica (C-1-fix, sectie 69)
+  replay_execute.ts                     - permanente regressietest tegen replay (C-1-fix)
+  pendingAction.ts                       - queued/timelock PendingAction-flow (withdrawal/token-transfer/advanced-action)
+  spendThreshold.ts                       - spend_threshold_lamports (drempel-mechanisme, sectie 127/128)
+  spendWindow.ts                           - window_total_cap_lamports (glijdende-window spend-cap, sectie 132/133)
+  thresholdChangePanel.ts                   - initiate/finalize_threshold_change + UI-panel pure-logica (sectie 135)
+  thresholdBanner.ts                         - drempel-statusbanner, pure-logica + DOM-effectkant (sectie 127-129)
+  migrateWalletAccount.ts                     - migrate_wallet_account
+  migrateWalletAccountValidator.ts             - migrate_wallet_account tegen een live validator
   sessionKeys.ts                     - session keys, alle 7 instructies
+  uint8ArrayByteFidelity.ts           - bytegetrouwheid WebAuthn/Web-Crypto-tekenpad (sectie 78)
+  writability_check.ts                 - audit: session-PDA isWritable in execute_via_session
+  verifyBinaryFresh.ts                  - build-versbewijs (geen stale binary, sectie 76/77)
+  verifyValidatorType.ts                 - structurele validator-type-detectie
+  m2_fix_verify.ts                        - M-2-fix-verificatie tegen de echte productieclient
   webauthnTestHelper.ts               - gedeelde testhelpers (o.a. slot-/tijd-advancers)
 desktop/                      - Tauri-desktop-migratie (fase 0, native, extensie-vrije runtime,
                                  zie desktop/README.md + STATUS.md sectie 72/74/75)

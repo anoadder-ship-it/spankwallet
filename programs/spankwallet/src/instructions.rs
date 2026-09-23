@@ -1688,6 +1688,7 @@ fn init_pending_action(
     action_commitment: [u8; 32],
     initiator_passkey: [u8; PASSKEY_PUBKEY_LEN],
     valid_passkey_count: u8,
+    initiator_session: Pubkey,
 ) {
     pending.wallet = wallet;
     pending.bump = bump;
@@ -1702,6 +1703,11 @@ fn init_pending_action(
     // bescherming), anders op false (finalize moet dan een AFWIJKENDE
     // passkey zien dan initiator_passkey).
     pending.confirmed = valid_passkey_count < 2;
+    // Sectie 153: Pubkey::default() = passkey-initiatie. Voor een sessie-
+    // initiatie overschrijft confirm_pending_action timelock_started_at later
+    // met het moment van de eerste passkey-bevestiging.
+    pending.initiator_session = initiator_session;
+    pending.timelock_started_at = initiated_at;
 }
 
 /// STATUS.md sectie 118/120: gedeelde epoch-/timelock-controle bij
@@ -1734,8 +1740,19 @@ fn check_pending_action_finalizable(
         pending.epoch == wallet_session_epoch,
         SpankWalletError::PendingActionStaleEpoch
     );
+    // Sectie 153: een sessie-geïnitieerde actie die nog door geen enkele
+    // passkey bevestigd is, is nooit finalizable - ongeacht `confirmed` en
+    // ongeacht hoeveel tijd er verstreken is. Dit is wat de 2-of-2-regel
+    // voor sessie-initiaties intact houdt: de sentinel is zelf geen passkey,
+    // dus zonder deze eis zou de afwijkende-passkey-controle hieronder bij
+    // een sessie-initiatie met één enkele passkey al voldaan zijn.
+    require!(
+        !(pending.initiator_session != Pubkey::default()
+            && pending.initiator_passkey == SESSION_INITIATOR_SENTINEL),
+        SpankWalletError::SessionInitiatedActionNeedsConfirmation
+    );
     let elapsed = now
-        .checked_sub(pending.initiated_at)
+        .checked_sub(pending.timelock_started_at)
         .ok_or(SpankWalletError::TimestampOverflow)?;
     require!(
         elapsed >= PENDING_ACTION_TIMELOCK_SECONDS,
@@ -1857,6 +1874,7 @@ pub fn initiate_withdrawal(
         action_commitment,
         initiator_passkey,
         valid_passkey_count,
+        Pubkey::default(),
     );
 
     Ok(())
@@ -2035,13 +2053,21 @@ pub struct CancelAction<'info> {
     /// geblokkeerd worden door recovery_state/disarmed (bewust GEEN van
     /// beide constraints op `wallet` hierboven, in tegenstelling tot
     /// initiate_withdrawal/finalize_withdrawal).
+    ///
+    /// CHECK: sectie 153 - bewust UncheckedAccount i.p.v.
+    /// Account<PendingAction>, zodat annuleren NIET afhangt van de
+    /// accountlayout: een PendingAction van een oudere (kortere) layout
+    /// deserialiseert niet meer tegen de huidige struct, en zou met een typed
+    /// account het singleton-slot permanent blokkeren. Seeds garanderen dat
+    /// dit EXACT de PendingAction van deze wallet is; cancel_action
+    /// controleert zelf owner + discriminator en sluit handmatig met exact
+    /// Anchor's close-semantiek (close_program_account hieronder).
     #[account(
         mut,
-        close = payer,
         seeds = [b"pending_action", wallet.key().as_ref()],
-        bump = pending_action.bump,
+        bump,
     )]
-    pub pending_action: Account<'info, PendingAction>,
+    pub pending_action: UncheckedAccount<'info>,
 
     /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
     /// read_passkeys_account), seeds/bump garanderen dat dit altijd EXACT
@@ -2087,7 +2113,46 @@ pub fn cancel_action(
     )?;
     consume_action_nonce(&mut ctx.accounts.wallet)?;
 
-    Ok(())
+    // Sectie 153: wat Anchor's typed Account<PendingAction> voorheen
+    // impliciet controleerde, hier expliciet - maar ZONDER de rest van de
+    // inhoud te deserialiseren: eigendom van dit programma + het
+    // PendingAction-discriminator volstaan om zeker te weten dat dit een
+    // (eventueel oudere-layout) PendingAction is.
+    let pending_info = ctx.accounts.pending_action.to_account_info();
+    require!(
+        pending_info.owner == &crate::ID,
+        SpankWalletError::NoPendingAction
+    );
+    {
+        let data = pending_info.try_borrow_data()?;
+        require!(
+            data.len() >= PendingAction::DISCRIMINATOR.len()
+                && &data[..PendingAction::DISCRIMINATOR.len()] == PendingAction::DISCRIMINATOR,
+            SpankWalletError::NoPendingAction
+        );
+    }
+
+    close_program_account(&pending_info, &ctx.accounts.payer.to_account_info())
+}
+
+/// Sectie 153: handmatige tegenhanger van Anchor's `close = ...`-constraint
+/// (anchor-lang 1.1.2, src/common.rs::close), in dezelfde volgorde:
+/// alle lamports naar `destination`, eigenaar terug naar het System Program,
+/// data-lengte naar 0. Daarbovenop worden de databytes eerst expliciet
+/// genuld, zodat er ook binnen dezelfde instructie nooit een geldig
+/// discriminator in het account overblijft. Na afloop is het account een
+/// leeg system-account zonder lamports: een revival-poging in dezelfde
+/// transactie (lamports terugsturen) levert hooguit een leeg, system-owned
+/// account op, nooit weer een PendingAction.
+fn close_program_account<'info>(
+    info: &AccountInfo<'info>,
+    destination: &AccountInfo<'info>,
+) -> Result<()> {
+    destination.add_lamports(info.lamports())?;
+    **info.lamports.borrow_mut() = 0;
+    info.try_borrow_mut_data()?.fill(0);
+    info.assign(&anchor_lang::system_program::ID);
+    info.resize(0).map_err(Into::into)
 }
 
 // spend-cap-mechanisme: PendingAction kind=TokenTransfer (initiate_token_transfer / finalize_token_transfer)
@@ -2231,6 +2296,7 @@ pub fn initiate_token_transfer(
         action_commitment,
         initiator_passkey,
         valid_passkey_count,
+        Pubkey::default(),
     );
 
     Ok(())
@@ -2593,6 +2659,7 @@ pub fn initiate_advanced_action<'info>(
         action_commitment,
         initiator_passkey,
         valid_passkey_count,
+        Pubkey::default(),
     );
 
     Ok(())
@@ -2747,6 +2814,275 @@ pub fn finalize_advanced_action<'info>(
     Ok(())
 }
 
+// Sessie-geïnitieerde AdvancedAction (initiate_advanced_action_via_session / confirm_pending_action)
+//
+// STATUS.md sectie 153, staande ontwerpregel: een _via_session-instructie
+// die toegang geeft tot waarde of bevoegdheid heeft óf een afdwingbare
+// per-sessie-cap, óf is wachtrij-only. Een CPI heeft geen generiek bedrag om
+// te begrenzen, dus is het sessie-pad voor execute_advanced wachtrij-only:
+//
+// 1. initiate_advanced_action_via_session - de sessiesleutel legt een CPI
+//    vast in dezelfde PendingAction-wachtrij (kind=AdvancedAction, dezelfde
+//    commitment als initiate_advanced_action). Geen passkey, geen CPI, en
+//    `wallet.action_nonce` blijft onaangeroerd (anders kon een sessie de
+//    lopende, ondertekende verdedigingsacties van de eigenaar - cancel_action,
+//    remove_session_key - ongeldig maken door de nonce op te hogen).
+// 2. confirm_pending_action - een passkey X bevestigt precies die
+//    commitment. Pas vanaf dat moment loopt de timelock.
+// 3. finalize_advanced_action - ongewijzigd, uitsluitend met passkey: na de
+//    timelock, en bij ≥2 geldige passkeys (bij initiate) door een passkey
+//    Y ≠ X. Zo ondertekenen, net als bij de passkey-route, twee
+//    verschillende passkeys elk exact deze commitment; een sessiesleutel
+//    telt nooit mee als een van de twee.
+//
+// Een sessie kan cancel_action NIET aanroepen (vereist een passkey): een
+// sessiesleutel kan zo nooit een wachtende actie van de eigenaar annuleren.
+
+#[derive(Accounts)]
+pub struct InitiateAdvancedActionViaSession<'info> {
+    /// Bewust NIET mut: dit pad raakt `action_nonce` nooit (zie hierboven).
+    #[account(
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        seeds = [b"vault", wallet.key().as_ref()],
+        bump = wallet.vault_bump,
+    )]
+    pub vault: Account<'info, VaultAccount>,
+
+    #[account(
+        init,
+        payer = payer,
+        space = PendingAction::LEN,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: bewust UncheckedAccount, zelfde BPF-stackreden en zelfde
+    /// tolerante lees-patroon als in InitiateAdvancedAction.
+    #[account(
+        seeds = [b"policy", wallet.key().as_ref()],
+        bump,
+    )]
+    pub policy: UncheckedAccount<'info>,
+
+    /// CHECK: het CPI-doelprogramma - moet op ZOWEL de sub-scope van de
+    /// sessie ALS de live policy staan EN executable zijn (hieronder, eager -
+    /// een gedoemde CPI wordt nooit gequeued).
+    pub cpi_program: UncheckedAccount<'info>,
+
+    /// CHECK: bewust UncheckedAccount (BPF-stacklimiet), zelfde patroon als
+    /// ExecuteAdvancedViaSession - seeds garanderen dat dit EXACT de sessie
+    /// van deze wallet + deze session_key is, de inhoud wordt verplicht
+    /// geladen via load_session_account.
+    #[account(
+        seeds = [b"session", wallet.key().as_ref(), session_key.key().as_ref()],
+        bump,
+    )]
+    pub session: UncheckedAccount<'info>,
+
+    pub session_key: Signer<'info>,
+
+    /// CHECK: multi-passkey-set, alleen gelezen voor count_valid_passkeys
+    /// (bepaalt of bij finalize een tweede, afwijkende passkey nodig is).
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    /// Betaalt de rent van de PendingAction - de initiërende partij draagt
+    /// die kosten zelf; cancel_action stuurt de rent naar wie annuleert.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn initiate_advanced_action_via_session<'info>(
+    ctx: Context<'info, InitiateAdvancedActionViaSession<'info>>,
+    cpi_instruction_data: Vec<u8>,
+) -> Result<()> {
+    let session = load_session_account(&ctx.accounts.session.to_account_info())?;
+
+    // Zelfde sessie-autorisatie als de andere _via_session-instructies, in
+    // dezelfde volgorde: expiry, epoch (recovery maakt elke sessie
+    // ongeldig), dan de instructie-vlag.
+    let current_slot = Clock::get()?.slot;
+    require!(
+        current_slot <= session.expiry_slot,
+        SpankWalletError::SessionExpired
+    );
+    require!(
+        session.epoch == ctx.accounts.wallet.session_epoch,
+        SpankWalletError::SessionRevokedByRecovery
+    );
+    require!(
+        session.can_execute_advanced,
+        SpankWalletError::SessionInstructionNotAllowed
+    );
+
+    let cpi_program_id = ctx.accounts.cpi_program.key();
+    require!(cpi_program_id != crate::ID, SpankWalletError::SelfCpiNotAllowed);
+    require!(
+        ctx.accounts.cpi_program.executable,
+        SpankWalletError::CpiTargetNotExecutable
+    );
+
+    // Ontwerppunt 2: BEIDE lijsten, live - de sub-scope van de sessie EN de
+    // wallet-brede PolicyAccount.
+    let session_allows = session.allowed_programs[..session.count as usize]
+        .iter()
+        .any(|p| *p == cpi_program_id);
+    require!(session_allows, SpankWalletError::SessionProgramNotAllowed);
+
+    let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
+    let policy_allows = policy
+        .as_ref()
+        .map(|p| p.allowed_programs[..p.count as usize].iter().any(|prog| *prog == cpi_program_id))
+        .unwrap_or(false);
+    require!(policy_allows, SpankWalletError::ProgramNotAllowed);
+
+    let vault_key = ctx.accounts.vault.key();
+    let (metadata_bytes, _account_metas, _account_infos) =
+        build_cpi_account_metadata(ctx.remaining_accounts, &vault_key);
+    let account_count = ctx.remaining_accounts.len() as u16;
+
+    // Exact dezelfde commitment (zelfde domein) als initiate_advanced_action:
+    // finalize_advanced_action hoeft daardoor niet te weten langs welke
+    // route de actie binnenkwam.
+    let wallet_key = ctx.accounts.wallet.key();
+    let action_commitment = compute_advanced_action_commitment(
+        &wallet_key,
+        &cpi_program_id,
+        account_count,
+        &metadata_bytes,
+        &cpi_instruction_data,
+    );
+    let valid_passkey_count = count_valid_passkeys(&ctx.accounts.passkeys.to_account_info());
+    let clock = Clock::get()?;
+
+    init_pending_action(
+        &mut ctx.accounts.pending_action,
+        wallet_key,
+        ctx.bumps.pending_action,
+        PENDING_ACTION_KIND_ADVANCED_ACTION,
+        clock.unix_timestamp,
+        ctx.accounts.wallet.session_epoch,
+        action_commitment,
+        SESSION_INITIATOR_SENTINEL,
+        valid_passkey_count,
+        ctx.accounts.session_key.key(),
+    );
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct ConfirmPendingAction<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump = pending_action.bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+/// Een passkey X bevestigt een door een sessie geïnitieerde actie. Legt X
+/// vast in `initiator_passkey` (vervangt de sentinel), zodat finalize bij een
+/// wallet met ≥2 passkeys een AFWIJKENDE passkey Y eist - dezelfde regel als
+/// bij de passkey-route. Kan maar één keer, en alleen voor een sessie-
+/// geïnitieerde actie.
+///
+/// STARTMOMENT VAN DE TIMELOCK (sectie 154, expliciete keuze): de 24u gaan
+/// pas lopen bij deze bevestiging, niet bij de sessie-initiatie. Het doel
+/// van de timelock is de eigenaar tijd te geven om een ongewenste actie op
+/// te merken en te annuleren vóór uitvoering. Het relevante moment daarvoor
+/// is de eerste handeling met passkey-bevoegdheid op DEZE actie - bij de
+/// passkey-route is dat initiate, hier is dat confirm. Zo is een door een
+/// passkey bevestigde actie altijd minstens de volle timelock zichtbaar als
+/// "bevestigd door passkey X" vóór hij kan worden uitgevoerd; confirm en
+/// finalize kunnen nooit in dezelfde transactie samenvallen. Consequentie:
+/// ook bij een wallet met één passkey is confirm verplicht (finalize daarna
+/// door dezelfde passkey mag, zoals bij de single-passkey-terugval van de
+/// passkey-route) - de eigenaar zet dan net als bij de passkey-route twee
+/// ceremonies, 24u uit elkaar.
+pub fn confirm_pending_action(
+    ctx: Context<ConfirmPendingAction>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let pending = &ctx.accounts.pending_action;
+    require!(
+        pending.initiator_session != Pubkey::default(),
+        SpankWalletError::PendingActionNotSessionInitiated
+    );
+    require!(
+        pending.initiator_passkey == SESSION_INITIATOR_SENTINEL,
+        SpankWalletError::PendingActionAlreadyConfirmed
+    );
+    require!(
+        pending.epoch == ctx.accounts.wallet.session_epoch,
+        SpankWalletError::PendingActionStaleEpoch
+    );
+
+    // Bindt aan de volledige commitment, niet alleen aan het PDA-adres -
+    // zelfde discipline als elke finalize_*-challenge (sectie 118's
+    // vervolgvraag): de handtekening legt vast WAT er bevestigd wordt.
+    let wallet_key = ctx.accounts.wallet.key();
+    let pending_action_key = pending.key();
+    let mut payload = Vec::with_capacity(8 + 32 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(pending_action_key.as_ref());
+    payload.extend_from_slice(&pending.action_commitment);
+
+    let expected_challenge =
+        build_expected_challenge(&wallet_key, b"confirm_pending_action", &payload);
+    let confirming_passkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    let clock = Clock::get()?;
+    let pending = &mut ctx.accounts.pending_action;
+    pending.initiator_passkey = confirming_passkey;
+    pending.timelock_started_at = clock.unix_timestamp;
+
+    Ok(())
+}
+
 // spend-cap-mechanisme: PendingAction kind=ThresholdChange (initiate_threshold_change / finalize_threshold_change)
 //
 // STATUS.md sectie 118 stap 4 / sectie 123 stap 5. Vierde en laatste van
@@ -2884,6 +3220,7 @@ pub fn initiate_threshold_change(
         action_commitment,
         initiator_passkey,
         valid_passkey_count,
+        Pubkey::default(),
     );
 
     Ok(())
@@ -4142,6 +4479,10 @@ pub fn transfer_token_via_session(ctx: Context<TransferTokenViaSession>, amount:
     Ok(())
 }
 
+/// Sinds STATUS.md sectie 153 alleen nog bewaard voor een stabiele IDL - de
+/// instructie zelf faalt onvoorwaardelijk (zie execute_advanced_via_session
+/// hieronder). De veldcommentaren beschrijven de controles van vóór die
+/// blokkade; die leven nu in initiate_advanced_action_via_session.
 #[derive(Accounts)]
 pub struct ExecuteAdvancedViaSession<'info> {
     #[account(
@@ -4200,96 +4541,18 @@ pub struct ExecuteAdvancedViaSession<'info> {
     pub session_key: Signer<'info>,
 }
 
+/// PERMANENT GEBLOKKEERD sinds STATUS.md sectie 153 (staande ontwerpregel
+/// voor _via_session): dit pad had geen wachtrij. Een CPI heeft geen
+/// generiek bedrag om per sessie te begrenzen, dus is het sessie-pad voor
+/// execute_advanced wachtrij-only: gebruik
+/// initiate_advanced_action_via_session. Het entrypoint en de Accounts-struct
+/// blijven bestaan (stabiele IDL, bestaande clients krijgen een duidelijke
+/// fout), maar er is geen CPI-code meer die per ongeluk weer bereikbaar kan
+/// worden - anders dan bij execute_advanced (sectie 131), waar de oude body
+/// onbereikbaar bleef staan.
 pub fn execute_advanced_via_session<'info>(
-    ctx: Context<'info, ExecuteAdvancedViaSession<'info>>,
-    cpi_instruction_data: Vec<u8>,
+    _ctx: Context<'info, ExecuteAdvancedViaSession<'info>>,
+    _cpi_instruction_data: Vec<u8>,
 ) -> Result<()> {
-    let session = load_session_account(&ctx.accounts.session.to_account_info())?;
-    let cpi_program_id = ctx.accounts.cpi_program.key();
-
-    require!(cpi_program_id != crate::ID, SpankWalletError::SelfCpiNotAllowed);
-    require!(
-        ctx.accounts.cpi_program.executable,
-        SpankWalletError::CpiTargetNotExecutable
-    );
-
-    let current_slot = Clock::get()?.slot;
-    require!(
-        current_slot <= session.expiry_slot,
-        SpankWalletError::SessionExpired
-    );
-    // B2 (STATUS.md sectie 76): dezelfde epoch-check als execute_via_session/
-    // transfer_token_via_session - hier expliciet apart genoemd omdat
-    // `session` hier handmatig via load_session_account wordt ingelezen
-    // i.p.v. door Anchors macro, precies het soort plek waar zo'n check per
-    // ongeluk overgeslagen wordt als hij niet los benoemd staat.
-    require!(
-        session.epoch == ctx.accounts.wallet.session_epoch,
-        SpankWalletError::SessionRevokedByRecovery
-    );
-    require!(
-        session.can_execute_advanced,
-        SpankWalletError::SessionInstructionNotAllowed
-    );
-
-    // Ontwerppunt 2: BEIDE lijsten opnieuw gecontroleerd bij elk gebruik, niet
-    // gecached sinds add_session_key - de sessie's eigen sub-scope EN de
-    // live, wallet-brede PolicyAccount moeten allebei het doelprogramma
-    // toestaan.
-    let session_allows = session.allowed_programs[..session.count as usize]
-        .iter()
-        .any(|p| *p == cpi_program_id);
-    require!(session_allows, SpankWalletError::SessionProgramNotAllowed);
-
-    // Tolerant: geen PolicyAccount = een lege allowlist, geen foutcase - de
-    // autorisatie-checks hierboven zijn nu altijd al gepasseerd voordat dit
-    // ooit bereikt wordt (zie de toelichting bij het policy-veld hierboven).
-    let policy = read_policy_account(&ctx.accounts.policy.to_account_info());
-    let policy_allows = policy
-        .as_ref()
-        .map(|p| {
-            p.allowed_programs[..p.count as usize]
-                .iter()
-                .any(|a| *a == cpi_program_id)
-        })
-        .unwrap_or(false);
-    require!(policy_allows, SpankWalletError::ProgramNotAllowed);
-
-    let vault_key = ctx.accounts.vault.key();
-
-    let mut account_metas = Vec::with_capacity(ctx.remaining_accounts.len());
-    let mut account_infos = Vec::with_capacity(ctx.remaining_accounts.len() + 1);
-
-    for account_info in ctx.remaining_accounts.iter() {
-        let is_vault = *account_info.key == vault_key;
-        let is_signer = is_vault || account_info.is_signer;
-        let is_writable = account_info.is_writable;
-
-        account_metas.push(AccountMeta {
-            pubkey: *account_info.key,
-            is_signer,
-            is_writable,
-        });
-        account_infos.push(account_info.clone());
-    }
-
-    account_infos.push(ctx.accounts.cpi_program.to_account_info());
-
-    let instruction = Instruction {
-        program_id: cpi_program_id,
-        accounts: account_metas,
-        data: cpi_instruction_data,
-    };
-
-    let wallet_key = ctx.accounts.wallet.key();
-    let seeds = &[
-        b"vault".as_ref(),
-        wallet_key.as_ref(),
-        &[ctx.accounts.vault.bump],
-    ];
-    let signer_seeds = &[&seeds[..]];
-
-    invoke_signed(&instruction, &account_infos, signer_seeds)?;
-
-    Ok(())
+    err!(SpankWalletError::SessionAdvancedMustUseQueue)
 }

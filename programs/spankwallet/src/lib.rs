@@ -174,6 +174,23 @@ pub mod spankwallet {
         )
     }
 
+    // STATUS.md sectie 153: het sessie-pad voor execute_advanced is
+    // wachtrij-only - zie instructions.rs voor de volledige toelichting.
+    pub fn initiate_advanced_action_via_session<'info>(
+        ctx: Context<'info, InitiateAdvancedActionViaSession<'info>>,
+        cpi_instruction_data: Vec<u8>,
+    ) -> Result<()> {
+        instructions::initiate_advanced_action_via_session(ctx, cpi_instruction_data)
+    }
+
+    pub fn confirm_pending_action(
+        ctx: Context<ConfirmPendingAction>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::confirm_pending_action(ctx, client_action_nonce, client_data_json)
+    }
+
     pub fn initiate_threshold_change(
         ctx: Context<InitiateThresholdChange>,
         new_spend_threshold_lamports: u64,

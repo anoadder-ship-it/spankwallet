@@ -512,13 +512,39 @@ pub struct PendingAction {
     /// bescherming i.p.v. voor altijd geblokkeerd te worden - zie sectie
     /// 115's aanvulling, punt B).
     pub confirmed: bool,
+
+    // --- Sessie-geïnitieerde acties (STATUS.md sectie 153) ---
+    // Bewust ACHTERAAN toegevoegd, nooit ertussenin: bestaande offsets
+    // (o.a. client/src/thresholdChange.ts) blijven geldig. Een account van
+    // de oude 124-byte-layout faalt fail-closed op deserialisatie (geen
+    // Option-velden in deze struct, zie de unittest onderaan) - cancel_action
+    // sluit zo'n account toch, want die leest de inhoud bewust niet.
+    /// Welke sessiesleutel deze actie initieerde, of `Pubkey::default()` als
+    /// een passkey initieerde. Het all-zero-adres kan nooit een echte
+    /// transactie-signer zijn, dus de standaardwaarde is ondubbelzinnig. Dit
+    /// is het signaal waarmee een client de eigenaar laat zien dat een
+    /// wachtende actie NIET van een eigen passkey-ceremonie komt.
+    pub initiator_session: Pubkey,
+    /// Moment vanaf waar de timelock telt. Bij een passkey-initiatie gelijk
+    /// aan `initiated_at`; bij een sessie-initiatie gezet door
+    /// `confirm_pending_action`, de eerste passkey-handeling op deze actie -
+    /// zie de toelichting daar voor waarom de timelock pas dan start.
+    /// `initiated_at` zelf blijft onveranderd (wanneer de actie verscheen).
+    pub timelock_started_at: i64,
 }
+
+/// Waarde van `PendingAction.initiator_passkey` zolang een sessie-
+/// geïnitieerde actie nog niet door een passkey bevestigd is. Kan nooit een
+/// geldige passkey zijn: elke geregistreerde passkey begint met 0x02/0x03
+/// (validate_passkey_prefix in instructions.rs), deze met 0x00.
+pub const SESSION_INITIATOR_SENTINEL: [u8; PASSKEY_PUBKEY_LEN] = [0u8; PASSKEY_PUBKEY_LEN];
 
 impl PendingAction {
     // discriminator (8) + wallet (32) + bump (1) + kind (1) + initiated_at (8)
     // + epoch (8) + action_commitment (32) + initiator_passkey (33) + confirmed (1)
-    // = 124, geverifieerd veld-voor-veld tegen STATUS.md sectie 115/meetstap 1
-    pub const LEN: usize = 8 + 32 + 1 + 1 + 8 + 8 + 32 + PASSKEY_PUBKEY_LEN + 1;
+    // = 124 (STATUS.md sectie 115/meetstap 1)
+    // + initiator_session (32) + timelock_started_at (8) = 164 (sectie 153)
+    pub const LEN: usize = 8 + 32 + 1 + 1 + 8 + 8 + 32 + PASSKEY_PUBKEY_LEN + 1 + 32 + 8;
 }
 
 /// STATUS.md sectie 115 (aanvulling, punt A): eigen satellite-PDA voor de
@@ -738,5 +764,56 @@ mod tests {
             result.is_err(),
             "een oude 421-byte SessionKeyAccount had schoon moeten falen (fail-closed) tegen de huidige 429-byte layout, niet stilzwijgend een giswaarde voor epoch moeten aannemen"
         );
+    }
+
+    fn sample_pending_action_for_layout_tests() -> PendingAction {
+        PendingAction {
+            wallet: Pubkey::default(),
+            bump: 255,
+            kind: 2,
+            initiated_at: 1,
+            epoch: 0,
+            action_commitment: [7u8; 32],
+            initiator_passkey: SESSION_INITIATOR_SENTINEL,
+            confirmed: false,
+            initiator_session: Pubkey::new_unique(),
+            timelock_started_at: 1,
+        }
+    }
+
+    /// STATUS.md sectie 153: LEN moet exact de Borsh-serialisatie dekken -
+    /// anders zou `init` met `space = PendingAction::LEN` te weinig (of
+    /// zinloos veel) ruimte toekennen.
+    #[test]
+    fn pending_action_len_matches_serialized_size() {
+        let pending = sample_pending_action_for_layout_tests();
+        let mut bytes = Vec::new();
+        pending.try_serialize(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), PendingAction::LEN);
+        assert_eq!(PendingAction::LEN, 164);
+    }
+
+    /// Een PendingAction van de oude 124-byte-layout moet SCHOON falen tegen
+    /// de huidige layout (geen giswaarde voor initiator_session/
+    /// timelock_started_at) - finalize op zo'n account faalt dus fail-closed;
+    /// cancel_action sluit het toch (leest de inhoud niet).
+    #[test]
+    fn old_124_byte_pending_action_fails_closed_against_current_layout() {
+        let pending = sample_pending_action_for_layout_tests();
+        let mut bytes = Vec::new();
+        pending.try_serialize(&mut bytes).unwrap();
+
+        let mut slice: &[u8] = &bytes[..124];
+        assert!(
+            PendingAction::try_deserialize(&mut slice).is_err(),
+            "een oude 124-byte PendingAction had schoon moeten falen tegen de huidige 164-byte layout"
+        );
+    }
+
+    /// De sentinel mag nooit met een echte passkey kunnen samenvallen: elke
+    /// geregistreerde passkey begint met 0x02 of 0x03.
+    #[test]
+    fn session_initiator_sentinel_is_never_a_valid_passkey_prefix() {
+        assert!(SESSION_INITIATOR_SENTINEL[0] != 0x02 && SESSION_INITIATOR_SENTINEL[0] != 0x03);
     }
 }

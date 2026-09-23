@@ -246,4 +246,28 @@ pub enum SpankWalletError {
     // `realloc`-constraint of een `constraint = ...`-attribuut kan).
     #[msg("Deze WalletAccount is al gemigreerd naar de huidige layout")]
     WalletAccountAlreadyMigrated,
+
+    // STATUS.md sectie 153 (staande ontwerpregel voor _via_session): een
+    // sessie mag een CPI alleen nog INITIËREN in de PendingAction-wachtrij,
+    // nooit direct uitvoeren. Zelfde vorm als AdvancedActionMustUseQueue.
+    #[msg("execute_advanced_via_session is permanent geblokkeerd - gebruik initiate_advanced_action_via_session (wachtrij)")]
+    SessionAdvancedMustUseQueue,
+
+    // Een door een sessie geïnitieerde actie moet eerst door een passkey
+    // bevestigd worden (confirm_pending_action) voordat de timelock loopt en
+    // finalize mogelijk is.
+    #[msg("Door een sessie geïnitieerde actie moet eerst met confirm_pending_action door een passkey bevestigd worden")]
+    SessionInitiatedActionNeedsConfirmation,
+
+    #[msg("confirm_pending_action geldt alleen voor een door een sessie geïnitieerde actie")]
+    PendingActionNotSessionInitiated,
+
+    #[msg("Deze door een sessie geïnitieerde actie is al door een passkey bevestigd")]
+    PendingActionAlreadyConfirmed,
+
+    // cancel_action leest pending_action bewust als UncheckedAccount (layout-
+    // onafhankelijk) - dit is de expliciete tegenhanger van Anchor's eigen
+    // AccountNotInitialized/AccountDiscriminatorMismatch voor dat pad.
+    #[msg("Er is geen openstaande PendingAction voor deze wallet")]
+    NoPendingAction,
 }

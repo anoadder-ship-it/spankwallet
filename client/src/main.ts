@@ -56,7 +56,7 @@ import {
   buildAddSessionKeyTransaction,
   buildRemoveSessionKeyTransaction,
   buildExecuteViaSessionTransaction,
-  buildExecuteAdvancedViaSessionTransaction,
+  buildInitiateAdvancedActionViaSessionTransaction,
   buildCloseExpiredSessionTransaction,
   EXECUTE_ADVANCED_SESSIONS_BLOCKED_MESSAGE,
 } from "./sessionKeys";
@@ -1428,7 +1428,8 @@ async function runStep18(): Promise<void> {
   }
   log("Stap 18: NEGATIEF scope-bewijs - deze sessie is ALLEEN gescoped voor execute");
   log("(stap 16), niet voor execute_advanced. Een poging tot");
-  log("execute_advanced_via_session moet geweigerd worden met");
+  log("initiate_advanced_action_via_session (het wachtrij-only sessie-pad, STATUS.md");
+  log("sectie 153) moet geweigerd worden met");
   log("SessionInstructionNotAllowed - en dat MOET de eerst gecontroleerde reden");
   log("zijn, zelfs als er nog geen PolicyAccount voor deze wallet bestaat (dat");
   log("kan zonder stap 8 te draaien): autorisatie hoort altijd voor te gaan op de");
@@ -1440,7 +1441,7 @@ async function runStep18(): Promise<void> {
   try {
     const policyPda = derivePolicyPda(lastPdas.walletPda);
 
-    const { transaction } = await buildExecuteAdvancedViaSessionTransaction(
+    const { transaction } = await buildInitiateAdvancedActionViaSessionTransaction(
       lastPdas.walletPda,
       lastPdas.vaultPda,
       policyPda,
@@ -1465,7 +1466,7 @@ async function runStep18(): Promise<void> {
     log("");
 
     if (!simResult.value.err) {
-      log("FOUT: execute_advanced_via_session had moeten falen (deze sessie mag dat");
+      log("FOUT: initiate_advanced_action_via_session had moeten falen (deze sessie mag dat");
       log("niet), maar de simulatie slaagde (onverwacht).");
       return;
     }

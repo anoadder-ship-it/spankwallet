@@ -21,6 +21,7 @@ import {
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 import { derivePolicyPda } from "./policy";
+import { derivePendingActionPda } from "./thresholdChange";
 
 // Session keys (STATUS.md): een LazorKit-geinspireerd, slot-gebonden
 // autorisatiemechanisme naast passkeys. Een sessiesleutel is een GEWONE
@@ -62,8 +63,8 @@ const EXECUTE_VIA_SESSION_DISCRIMINATOR = Uint8Array.from([
 const TRANSFER_TOKEN_VIA_SESSION_DISCRIMINATOR = Uint8Array.from([
   217, 28, 58, 34, 67, 161, 9, 163,
 ]);
-const EXECUTE_ADVANCED_VIA_SESSION_DISCRIMINATOR = Uint8Array.from([
-  149, 143, 107, 127, 142, 135, 245, 42,
+const INITIATE_ADVANCED_ACTION_VIA_SESSION_DISCRIMINATOR = Uint8Array.from([
+  60, 155, 88, 76, 134, 166, 61, 200,
 ]);
 
 function encodeVecPubkey(pubkeys: PublicKey[]): Uint8Array {
@@ -532,17 +533,24 @@ export interface SessionRemainingAccountSpec {
   isSigner: boolean;
 }
 
-export interface ExecuteAdvancedViaSessionResult {
+export interface InitiateAdvancedActionViaSessionResult {
   transaction: Transaction;
+  pendingActionPda: PublicKey;
 }
 
 /**
- * Bouwt EN ondertekent de execute_advanced_via_session-transactie. Geen
- * challenge-binding nodig (zie boven) - het CPI-doel wordt uitsluitend
- * on-chain gecontroleerd, tegen ZOWEL de sessie's eigen sub-scope ALS de
- * live PolicyAccount (geen cache).
+ * Bouwt EN ondertekent initiate_advanced_action_via_session (STATUS.md
+ * sectie 153): de sessiesleutel legt een CPI vast in de PendingAction-
+ * wachtrij - hij voert hem NIET uit. Uitvoeren vereist daarna altijd
+ * confirm_pending_action en finalize_advanced_action met een passkey. Het
+ * CPI-doel wordt on-chain gecontroleerd tegen ZOWEL de sub-scope van de
+ * sessie ALS de live PolicyAccount. De sessiesleutel betaalt hier ook de
+ * rent van de PendingAction (payer).
+ *
+ * execute_advanced_via_session (had geen wachtrij) is on-chain permanent
+ * geblokkeerd; daar bestaat bewust geen builder meer voor.
  */
-export async function buildExecuteAdvancedViaSessionTransaction(
+export async function buildInitiateAdvancedActionViaSessionTransaction(
   walletPda: PublicKey,
   vaultPda: PublicKey,
   policyPda: PublicKey,
@@ -551,21 +559,27 @@ export async function buildExecuteAdvancedViaSessionTransaction(
   cpiInstructionData: Uint8Array,
   connection: Connection,
   sessionKeypair: Keypair
-): Promise<ExecuteAdvancedViaSessionResult> {
+): Promise<InitiateAdvancedActionViaSessionResult> {
   const sessionPda = deriveSessionPda(walletPda, sessionKeypair.publicKey);
+  const pendingActionPda = derivePendingActionPda(walletPda);
 
   const data = concatBytes(
-    EXECUTE_ADVANCED_VIA_SESSION_DISCRIMINATOR,
+    INITIATE_ADVANCED_ACTION_VIA_SESSION_DISCRIMINATOR,
     encodeBorshVecU8(cpiInstructionData)
   );
 
+  // Volgorde = InitiateAdvancedActionViaSession in instructions.rs.
   const keys: AccountMeta[] = [
     { pubkey: walletPda, isSigner: false, isWritable: false },
-    { pubkey: vaultPda, isSigner: false, isWritable: true },
+    { pubkey: vaultPda, isSigner: false, isWritable: false },
+    { pubkey: pendingActionPda, isSigner: false, isWritable: true },
     { pubkey: policyPda, isSigner: false, isWritable: false },
     { pubkey: cpiProgramId, isSigner: false, isWritable: false },
     { pubkey: sessionPda, isSigner: false, isWritable: false },
     { pubkey: sessionKeypair.publicKey, isSigner: true, isWritable: false },
+    { pubkey: derivePasskeysPda(walletPda), isSigner: false, isWritable: false },
+    { pubkey: sessionKeypair.publicKey, isSigner: true, isWritable: true },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ...remainingAccounts.map((a) => ({
       pubkey: a.pubkey,
       isSigner: a.isSigner,
@@ -573,17 +587,17 @@ export async function buildExecuteAdvancedViaSessionTransaction(
     })),
   ];
 
-  const executeIx = new TransactionInstruction({
+  const initiateIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys,
     data: Buffer.from(data),
   });
 
-  const transaction = new Transaction().add(executeIx);
+  const transaction = new Transaction().add(initiateIx);
   transaction.feePayer = sessionKeypair.publicKey;
   const { blockhash } = await connection.getLatestBlockhash();
   transaction.recentBlockhash = blockhash;
   transaction.sign(sessionKeypair);
 
-  return { transaction };
+  return { transaction, pendingActionPda };
 }

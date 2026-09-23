@@ -45,7 +45,10 @@ export function thresholdChangePanelState(
   if (pending.kind !== PENDING_ACTION_KIND_THRESHOLD_CHANGE) {
     return { kind: "blocked-other", otherKind: pending.kind };
   }
-  const availableAtSeconds = Number(pending.initiatedAt) + PENDING_ACTION_TIMELOCK_SECONDS;
+  // STATUS.md sectie 153: de timelock telt vanaf timelock_started_at (voor
+  // een passkey-initiatie, zoals elke ThresholdChange, gelijk aan
+  // initiated_at).
+  const availableAtSeconds = Number(pending.timelockStartedAt) + PENDING_ACTION_TIMELOCK_SECONDS;
   if (nowUnixSeconds >= availableAtSeconds) {
     return { kind: "ready", confirmed: pending.confirmed };
   }

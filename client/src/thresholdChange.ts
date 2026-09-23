@@ -62,13 +62,17 @@ export function derivePendingActionPda(walletPda: PublicKey): PublicKey {
 
 // PendingAction-layout (state.rs): discriminator(8) + wallet(32) + bump(1)
 // + kind(1) + initiated_at(8) + epoch(8) + action_commitment(32) +
-// initiator_passkey(33) + confirmed(1) = 124 (PendingAction::LEN).
+// initiator_passkey(33) + confirmed(1) = 124, + initiator_session(32) +
+// timelock_started_at(8) = 164 (PendingAction::LEN, STATUS.md sectie 153).
 const OFFSET_KIND = 8 + 32 + 1;
 const OFFSET_INITIATED_AT = OFFSET_KIND + 1;
 const OFFSET_EPOCH = OFFSET_INITIATED_AT + 8;
 const OFFSET_ACTION_COMMITMENT = OFFSET_EPOCH + 8;
 const OFFSET_INITIATOR_PASSKEY = OFFSET_ACTION_COMMITMENT + 32;
 const OFFSET_CONFIRMED = OFFSET_INITIATOR_PASSKEY + 33;
+const OFFSET_INITIATOR_SESSION = OFFSET_CONFIRMED + 1;
+const OFFSET_TIMELOCK_STARTED_AT = OFFSET_INITIATOR_SESSION + 32;
+const PENDING_ACTION_LEN = OFFSET_TIMELOCK_STARTED_AT + 8;
 
 export interface ParsedPendingAction {
   kind: number;
@@ -77,6 +81,15 @@ export interface ParsedPendingAction {
   actionCommitment: Uint8Array;
   initiatorPasskey: Uint8Array;
   confirmed: boolean;
+  /**
+   * STATUS.md sectie 153: de sessiesleutel die deze actie initieerde, of
+   * `null` als een passkey initieerde. Een niet-null waarde is precies het
+   * signaal dat een wachtende actie NIET uit een eigen passkey-ceremonie
+   * komt - een UI moet dat altijd opvallend tonen.
+   */
+  initiatorSession: PublicKey | null;
+  /** Vanaf hier telt de timelock (bij een sessie-initiatie: het confirm-moment). */
+  timelockStartedAt: bigint;
 }
 
 /**
@@ -95,6 +108,18 @@ export async function readPendingAction(
     return null;
   }
   const data = accountInfo.data;
+  // Een account van de oude 124-byte-layout (van vóór sectie 153) kan het
+  // programma zelf niet meer finalizen, alleen annuleren - hier niet
+  // stilzwijgend als geldig doorgeven.
+  if (data.length < PENDING_ACTION_LEN) {
+    throw new Error(
+      "PendingAction " + pendingActionPda.toBase58() + " heeft een verouderde layout (" + data.length +
+        " bytes) - kan alleen nog geannuleerd worden (cancel_action)."
+    );
+  }
+  const initiatorSession = new PublicKey(
+    data.subarray(OFFSET_INITIATOR_SESSION, OFFSET_INITIATOR_SESSION + 32)
+  );
   return {
     kind: data[OFFSET_KIND],
     initiatedAt: data.readBigInt64LE(OFFSET_INITIATED_AT),
@@ -106,6 +131,8 @@ export async function readPendingAction(
       data.subarray(OFFSET_INITIATOR_PASSKEY, OFFSET_INITIATOR_PASSKEY + 33)
     ),
     confirmed: data[OFFSET_CONFIRMED] !== 0,
+    initiatorSession: initiatorSession.equals(PublicKey.default) ? null : initiatorSession,
+    timelockStartedAt: data.readBigInt64LE(OFFSET_TIMELOCK_STARTED_AT),
   };
 }
 

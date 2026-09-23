@@ -14521,3 +14521,21 @@ expliciet veld in `programs/spankwallet/Cargo.toml` en
 `package.json`'s; README.md's "Licentie en Security"-sectie kreeg een
 expliciete licentieregel (verwees voorheen alleen naar SECURITY.md, geen
 licentie-vermelding).
+
+## 153. Staande ontwerpregel: `_via_session`-instructies (2026-09-23)
+
+Vastgesteld door Michel, geldt voor elke bestaande en toekomstige
+`_via_session`-instructie:
+
+> Elke `_via_session`-instructie die toegang geeft tot waarde of bevoegdheid
+> heeft óf een afdwingbare per-sessie-cap (per transactie + totaal, atomisch
+> bijgehouden binnen dezelfde instructie), óf is wachtrij-only (een sessie mag
+> dan uitsluitend initiëren in de PendingAction-wachtrij; bevestigen,
+> finalizen en annuleren gebeurt uitsluitend met een passkey). Nooit instant
+> en ongelimiteerd. Een `_via_session`-pad raakt bovendien nooit
+> `wallet.action_nonce` - anders zou een sessiesleutel de lopende,
+> ondertekende verdedigingsacties van de eigenaar (intrekken, annuleren)
+> ongeldig kunnen maken.
+
+Elke nieuwe of gewijzigde `_via_session`-instructie wordt bij review
+expliciet aan deze regel getoetst.

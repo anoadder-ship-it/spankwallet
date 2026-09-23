@@ -3,7 +3,7 @@
 Non-custodial Solana wallet met **passkey-authenticatie** (WebAuthn / secp256r1) in plaats van seed phrases.
 
 - Passkey i.p.v. seed phrase, met optioneel meerdere gelijkwaardige passkeys per wallet
-- Tijdelijke, smal-gescopede **session keys** (LazorKit-geïnspireerd, slot-gebonden expiry) voor dApp/game-gebruik zonder herhaalde WebAuthn-prompts
+- Tijdelijke, gescopede **session keys** (LazorKit-geïnspireerd, slot-gebonden expiry) voor dApp/game-gebruik zonder herhaalde WebAuthn-prompts (zie de kanttekening onder de ontwerpprincipes)
 - Programma-allowlist: gecontroleerde CPI naar externe programma's, uitsluitend naar zelf goedgekeurde programma-ID's
 - Anti-spam: `hunt` burnt/sluit ongevraagde spam-tokens, teruggewonnen rent 50/50 gesplitst tussen de hunter en Solana's incinerator-adres (permanent uit omloop)
 - Recovery via offline Ed25519 backup-authority met 72u-timelock + owner-veto
@@ -76,7 +76,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | transfer_token                 | Passkey                              | SPL-token-transfer (getypeerd, munt-onafhankelijk)                  |
 | add_allowed_program             | Passkey                              | Programma-ID toevoegen aan de wallet-eigen allowlist                |
 | remove_allowed_program          | Passkey                              | Programma-ID verwijderen van de allowlist                           |
-| execute_advanced                | Passkey                              | CPI naar een programma dat op de eigen allowlist staat               |
+| execute_advanced                | Passkey                              | Permanent geblokkeerd voor directe aanroep - CPI loopt via initiate_/finalize_advanced_action |
 | hunt                            | Passkey                              | Spam-token burnen + account sluiten (50/50 rent)                    |
 | initiate_withdrawal              | Passkey                              | SOL-opname aankondigen (queued, timelock) - opent PendingAction (kind=SolWithdrawal) |
 | finalize_withdrawal              | Passkey                              | Aangekondigde SOL-opname afronden, ná de timelock                    |
@@ -99,7 +99,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | close_expired_session             | Permissionless (na expiry_slot)       | Verlopen sessie opruimen, rent naar de aanroeper                    |
 | execute_via_session               | De session key zelf                   | SOL-transfer via een tijdelijke, gescopede sessiesleutel             |
 | transfer_token_via_session         | De session key zelf                   | SPL-token-transfer via een tijdelijke, gescopede sessiesleutel       |
-| execute_advanced_via_session       | De session key zelf                   | CPI via sessiesleutel, dubbel gescoped (sessie-sub-scope + live allowlist) |
+| execute_advanced_via_session       | De session key zelf                   | CPI via sessiesleutel, gescoped op sessie-sub-scope + live allowlist; geen per-sessie bedraglimiet (zie ontwerpprincipes) |
 
 ## Structuur
 
@@ -259,11 +259,14 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
 - Multi-passkey is optioneel en zero-migratie: een wallet die nooit add_passkey aanroept
   gedraagt zich exact als voorheen. Lockout-bescherming verbiedt het verwijderen van de
   allerlaatste geldige sleutel.
-- Session keys zijn een lager-vertrouwde, tijdelijke autorisatielaag naast passkeys: gewone
-  Ed25519-Solana-signers (geen WebAuthn-ceremonie nodig per spend), altijd smal gescoped
-  (welke instructiesoorten, welke sub-allowlist), altijd slot-gebonden begrensd, en kunnen
-  zichzelf nooit verlengen of nieuwe bevoegdheid creëren - alleen aanmaken/intrekken via een
-  echte passkey.
+- Session keys zijn een tijdelijke autorisatielaag naast passkeys: gewone Ed25519-Solana-
+  signers (geen WebAuthn-ceremonie per actie), gescoped op instructiesoort (en voor
+  execute_advanced op een sub-allowlist), altijd slot-gebonden begrensd, en kunnen zichzelf
+  nooit verlengen of nieuwe bevoegdheid creëren - alleen aanmaken/intrekken via een echte
+  passkey. De per-sessie-maxima (lamports/tokens) gelden voor `execute_via_session` en
+  `transfer_token_via_session`. Voor sessies met execute_advanced-bevoegdheid bestaat geen
+  vergelijkbare bedraglimiet; de meegeleverde client maakt zulke sessies daarom niet aan,
+  en een on-chain aanpassing hiervoor is in voorbereiding.
 - Recovery heeft een 72u-timelock + owner-veto (cancel_recovery), en wist bij succes de
   volledige extra-passkey-set - geen stale, mogelijk-gecompromitteerde passkeys overleven
   een recovery. Bestaande sessiesleutels worden bij diezelfde finalize_recovery NIET
@@ -288,6 +291,14 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
 - Parallel: Tauri-desktop-migratie (native, extensie-vrije runtime - sluit de
   `chrome.webAuthenticationProxy`-dreigingsklasse structureel, zie STATUS.md sectie 72) -
   fase 0 in ontwikkeling, zie `desktop/README.md`
+
+## Gerelateerde projecten
+
+- **[OBP - OfflineBearer Protocol](https://github.com/anoadder-ship-it/offline-bearer-protocol)**:
+  een experimenteel protocol (alleen devnet) voor bearer-munten die je offline kunt ophalen,
+  offline kunt overdragen en later weer on-chain kunt inleveren. SpankWallet wordt de
+  host-wallet voor OBP. Die integratie is gepland maar **nog niet gebouwd**: SpankWallet bevat
+  vandaag geen OBP-code en communiceert niet met het OBP-programma.
 
 ## Licentie en Security
 

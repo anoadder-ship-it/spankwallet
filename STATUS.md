@@ -14539,3 +14539,57 @@ Vastgesteld door Michel, geldt voor elke bestaande en toekomstige
 
 Elke nieuwe of gewijzigde `_via_session`-instructie wordt bij review
 expliciet aan deze regel getoetst.
+
+## 154. Timelock-startmoment bij sessie-geïnitieerde acties, JS-decoderbevinding, planning (2026-09-23)
+
+### 1. Ontwerpkeuze: de timelock start bij `confirm_pending_action`
+
+Een door een sessiesleutel geïnitieerde actie in de PendingAction-wachtrij
+moet eerst door een passkey bevestigd worden (`confirm_pending_action`)
+voordat hij kan worden uitgevoerd. De 24u-timelock telt vanaf dát moment,
+niet vanaf de initiatie door de sessie. `initiated_at` blijft het moment
+waarop de actie verscheen; het startpunt van de timelock staat in een apart
+veld (`timelock_started_at`).
+
+**Onderbouwing.** De timelock bestaat om de eigenaar tijd te geven een
+ongewenste actie op te merken en te annuleren vóór uitvoering. Het moment
+dat daarvoor telt, is de eerste handeling met passkey-bevoegdheid op die
+specifieke actie: bij de passkey-route is dat de initiatie, bij de
+sessie-route de bevestiging. Door de timelock daar te laten starten is een
+door een passkey bevestigde actie altijd de volle timelock zichtbaar als
+"bevestigd" vóór uitvoering, en kunnen bevestigen en uitvoeren nooit in
+dezelfde transactie samenvallen.
+
+**Prijs.** Ook bij een wallet met één passkey is bevestigen verplicht: de
+eigenaar doorloopt voor een sessie-geïnitieerde actie twee ceremonies
+(bevestigen, en ná de timelock uitvoeren) - dezelfde twee ceremonies als bij
+de passkey-route (initiëren, uitvoeren). Dit wijkt bewust af van de eerdere
+ontwerpschets, waarin een wallet met één passkey direct na de timelock kon
+uitvoeren.
+
+### 2. Bevinding: de Anchor-JS-decoder leest te korte accounts stilzwijgend
+
+Empirisch vastgesteld tijdens het testen van een PendingAction in de oude
+124-byte-layout: `program.account.pendingAction.fetch` (Anchor-JS) geeft
+op een account dat korter is dan de huidige layout GEEN fout, maar leest de
+ontbrekende bytes stilzwijgend als nul (resp. een ingekorte pubkey). Het
+programma zelf weigert zo'n account wel (fail-closed,
+`AccountDidNotDeserialize`). Gevolg: scripts of tools die
+`program.account.pendingAction.fetch` gebruiken, kunnen bij een account in
+een oudere layout geloofwaardig ogende maar onjuiste waarden tonen.
+`client/src/thresholdChange.ts::readPendingAction` controleert daarom nu
+expliciet de accountlengte en weigert een oudere layout. Zelfde klasse als
+de Option-padding-bevinding uit sectie 85: een lezing die niet faalt is nog
+geen correcte lezing - voor elke layoutwijziging geldt dat ook
+client-/scriptzijdige lezers gecontroleerd moeten worden.
+
+### 3. Planning (vastgesteld door Michel)
+
+- De client-blokkade op het aanmaken van sessies met `can_execute_advanced`
+  (sectie 153) blijft staan tot er in de client een overzicht van wachtende
+  acties bestaat dat een door een sessiesleutel geïnitieerde actie opvallend
+  als hoog risico toont. Dat overzicht komt dus vóór het opheffen van de
+  blokkade.
+- Volgorde voor de programma-upgrade: eerst een onafhankelijke review van
+  de diff, daarna de RC-verificatie (zelfde discipline als bij het
+  spend-cap-mechanisme), daarna pas een upgradevoorstel.

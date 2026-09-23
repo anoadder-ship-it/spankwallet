@@ -58,6 +58,7 @@ import {
   buildExecuteViaSessionTransaction,
   buildExecuteAdvancedViaSessionTransaction,
   buildCloseExpiredSessionTransaction,
+  EXECUTE_ADVANCED_SESSIONS_BLOCKED_MESSAGE,
 } from "./sessionKeys";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
@@ -1237,6 +1238,11 @@ async function runStep16(): Promise<void> {
     if (sessionChoice === null) {
       log("Geweigerd in de bevestigingskaart - add_session_key NIET aangeroepen, geen");
       log("passkey-prompt.");
+      return;
+    }
+    if (sessionChoice === "blocked") {
+      log(EXECUTE_ADVANCED_SESSIONS_BLOCKED_MESSAGE);
+      log("add_session_key NIET aangeroepen, geen passkey-prompt.");
       return;
     }
     const expirySlot = sessionChoice.expirySlot;

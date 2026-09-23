@@ -68,10 +68,20 @@ export interface AddSessionKeyPreviewChoice {
  * hele nieuwe klasse UI - een scope-editor - zijn, buiten deze kaart se
  * scope). Wel altijd expliciet getoond, INCLUSIEF wat NIET is toegestaan -
  * geen understatement door iets stilzwijgend weg te laten.
+ *
+ * TIJDELIJK GEBLOKKEERD: canExecuteAdvanced=true geeft "blocked" terug,
+ * vóór er een RPC-call of kaart is - zie
+ * EXECUTE_ADVANCED_SESSIONS_BLOCKED_MESSAGE in sessionKeys.ts. De
+ * HOOG-risico-tak hieronder blijft staan voor wanneer de blokkade na de
+ * programma-upgrade opgeheven wordt.
  */
 export async function showAddSessionKeyPreview(
   params: AddSessionKeyPreviewParams
-): Promise<AddSessionKeyPreviewChoice | null> {
+): Promise<AddSessionKeyPreviewChoice | null | "blocked"> {
+  if (params.canExecuteAdvanced) {
+    return "blocked";
+  }
+
   const {
     connection,
     currentSlot,

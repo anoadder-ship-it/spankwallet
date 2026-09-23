@@ -124,7 +124,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (114 passing, 42 pending, 0 failing - `npm test`, 2026-09-22)
+tests/                        - Anchor-tests (117 passing, 42 pending, 0 failing - `npm test`, 2026-09-23)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -141,6 +141,7 @@ tests/                        - Anchor-tests (114 passing, 42 pending, 0 failing
   migrateWalletAccount.ts                     - migrate_wallet_account
   migrateWalletAccountValidator.ts             - migrate_wallet_account tegen een live validator
   sessionKeys.ts                     - session keys, alle 7 instructies
+  addSessionKeyBlock.ts               - tijdelijke client-blokkade op execute_advanced-sessies
   uint8ArrayByteFidelity.ts           - bytegetrouwheid WebAuthn/Web-Crypto-tekenpad (sectie 78)
   writability_check.ts                 - audit: session-PDA isWritable in execute_via_session
   verifyBinaryFresh.ts                  - build-versbewijs (geen stale binary, sectie 76/77)

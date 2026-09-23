@@ -32,6 +32,18 @@ import { derivePolicyPda } from "./policy";
 // transactie-ondertekening bindt de sessiesleutel al aan exact deze
 // instructie. Dat is het hele punt: geen WebAuthn-ceremonie per spend.
 
+/**
+ * Tijdelijke client-side blokkade (STATUS.md, staande ontwerpregel voor
+ * _via_session-instructies): sessies met can_execute_advanced worden door
+ * deze client NIET aangemaakt tot de programma-upgrade live staat die dat
+ * pad on-chain begrenst. Dit beschermt uitsluitend wie deze client gebruikt -
+ * het is geen on-chain garantie, alleen de upgrade sluit het pad echt.
+ * Afgedwongen op twee plekken: showAddSessionKeyPreview() (vóór de kaart) en
+ * buildAddSessionKeyTransaction() (vóór de passkey-ceremonie).
+ */
+export const EXECUTE_ADVANCED_SESSIONS_BLOCKED_MESSAGE =
+  "Sessies met execute_advanced-bevoegdheid zijn tijdelijk uitgeschakeld in deze client, tot de programma-upgrade live staat.";
+
 const ADD_SESSION_KEY_DISCRIMINATOR = Uint8Array.from([
   48, 71, 165, 97, 37, 22, 181, 59,
 ]);
@@ -189,6 +201,12 @@ export async function buildAddSessionKeyTransaction(
   credentialId: Uint8Array,
   rpId: string
 ): Promise<AddSessionKeyResult> {
+  // Tweede slot, onafhankelijk van de kaart: ook een aanroeper die
+  // showAddSessionKeyPreview() overslaat komt nooit bij de passkey-prompt.
+  if (canExecuteAdvanced) {
+    throw new Error(EXECUTE_ADVANCED_SESSIONS_BLOCKED_MESSAGE);
+  }
+
   const sessionPda = deriveSessionPda(walletPda, sessionKey);
   const policyPda = derivePolicyPda(walletPda);
 

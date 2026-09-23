@@ -512,6 +512,80 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       .rpc();
   }
 
+  // STATUS.md sectie 153: het sessie-pad voor execute_advanced is
+  // wachtrij-only - de sessiesleutel initieert alleen, ondertekent zelf als
+  // native Solana-signer (geen passkey, geen nonce).
+  function derivePendingActionPda(walletPda: PublicKey) {
+    const [pendingActionPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("pending_action"), walletPda.toBuffer()],
+      program.programId
+    );
+    return pendingActionPda;
+  }
+
+  async function callInitiateAdvancedActionViaSession(
+    sessionKeypair: Keypair,
+    walletPda: PublicKey,
+    vaultPda: PublicKey,
+    passkeysPda: PublicKey,
+    policyPda: PublicKey,
+    cpiProgramId: PublicKey,
+    remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[],
+    data: Buffer,
+    extraSigners: Keypair[] = []
+  ) {
+    return program.methods
+      .initiateAdvancedActionViaSession(data)
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        pendingAction: derivePendingActionPda(walletPda),
+        policy: policyPda,
+        cpiProgram: cpiProgramId,
+        session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+        sessionKey: sessionKeypair.publicKey,
+        passkeys: passkeysPda,
+        payer: provider.wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(remainingAccounts)
+      .signers([sessionKeypair, ...extraSigners])
+      .rpc();
+  }
+
+  async function expectErrorContaining(promise: Promise<unknown>, needle: string) {
+    let errString = "";
+    try {
+      await promise;
+    } catch (err) {
+      errString = String(err) + " " + JSON.stringify((err as any)?.logs ?? []);
+    }
+    assert.notEqual(errString, "", `had moeten falen met ${needle}, maar slaagde`);
+    assert.include(errString, needle, `verwachtte ${needle}, kreeg: ${errString}`);
+  }
+
+  // Zet een gefunde, nog-niet-toegewezen account + een System::Assign-
+  // instructie klaar - een CPI waarvan het effect (eigenaarswissel) direct
+  // on-chain controleerbaar is.
+  async function setupAssignTarget() {
+    const target = Keypair.generate();
+    const rentExemptMinimum = await provider.connection.getMinimumBalanceForRentExemption(0);
+    await provider.sendAndConfirm(
+      new anchor.web3.Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: provider.wallet.publicKey,
+          toPubkey: target.publicKey,
+          lamports: rentExemptMinimum,
+        })
+      )
+    );
+    const assignIx = SystemProgram.assign({
+      accountPubkey: target.publicKey,
+      programId: program.programId,
+    });
+    return { target, assignIx };
+  }
+
   function dummyNewOwnerPasskey(): number[] {
     const bytes = require("crypto").randomBytes(33);
     bytes[0] = 0x02;
@@ -936,21 +1010,16 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     );
   });
 
-  it("execute_advanced_via_session faalt met SessionInstructionNotAllowed, NIET met AccountNotInitialized, als er nog geen PolicyAccount bestaat (regressietest)", async () => {
-    // Gevonden tijdens live devnet-testen (STATUS.md): policy stond ooit als
-    // Account<PolicyAccount> (typed) - Anchor deserialiseert zo'n veld altijd
-    // in try_accounts(), VOORDAT de instructie-body draait, dus de
-    // autorisatie-check (can_execute_advanced) kwam nooit aan bod als
-    // PolicyAccount nog niet bestond: elke aanroep faalde met
-    // AccountNotInitialized, ongeacht sessie-scope. Fix: policy is nu
-    // UncheckedAccount, tolerant gelezen NA de autorisatie-checks. Dit test
-    // expliciet de FOUTCODE, niet enkel "er was een fout" - anders vangt
-    // geen enkele test een regressie van precies dit probleem.
+  // ===== STATUS.md sectie 153: het sessie-pad voor execute_advanced is wachtrij-only =====
+
+  it("[153] execute_advanced_via_session weigert ALTIJD met SessionAdvancedMustUseQueue - ook zonder PolicyAccount en ook voor een sessie zonder can_execute_advanced", async () => {
+    // Opvolger van de regressietest "SessionInstructionNotAllowed, NIET
+    // AccountNotInitialized": de blokkade is nu het eerste en enige wat de
+    // instructie doet, dus ook hier moet de foutcode exact deze zijn - niet
+    // AccountNotInitialized, niet een scope-fout.
     const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
-    // Bewust GEEN callAddAllowedProgram - policy bestaat nog niet.
     const sessionKeypair = Keypair.generate();
     const currentSlot = await provider.connection.getSlot();
-    // can_execute_advanced = false.
     await callAddSessionKey(
       passkey,
       walletPda,
@@ -963,9 +1032,8 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       false
     );
 
-    let errString = "";
-    try {
-      await program.methods
+    await expectErrorContaining(
+      program.methods
         .executeAdvancedViaSession(Buffer.from([]))
         .accounts({
           wallet: walletPda,
@@ -976,23 +1044,15 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
           sessionKey: sessionKeypair.publicKey,
         })
         .signers([sessionKeypair])
-        .rpc();
-    } catch (err) {
-      errString = String(err);
-    }
-    assert.include(
-      errString,
-      "SessionInstructionNotAllowed",
-      "verwachtte specifiek SessionInstructionNotAllowed, kreeg: " + errString
-    );
-    assert.notInclude(
-      errString,
-      "AccountNotInitialized",
-      "de autorisatie-check had moeten falen VOORDAT het ontbrekende PolicyAccount ooit relevant werd"
+        .rpc(),
+      "SessionAdvancedMustUseQueue"
     );
   });
 
-  it("execute_advanced_via_session voert een echte CPI uit (System Program: Assign) als de sessie correct gescoped is", async () => {
+  it("[153] ROOD-VÓÓR-GROEN: een correct gescopede sessie kan via execute_advanced_via_session GEEN CPI meer uitvoeren - doelaccount blijft onaangeroerd", async () => {
+    // Vóór sectie 153 had dit pad geen wachtrij (de vroegere test "voert
+    // een echte CPI uit"). Nu moet de aanroep falen, en het bewijs dat er
+    // niets is uitgevoerd is de ongewijzigde eigenaar van `target`.
     const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
     await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
 
@@ -1011,85 +1071,10 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
       [SystemProgram.programId]
     );
 
-    const target = Keypair.generate();
-    const rentExemptMinimum = await provider.connection.getMinimumBalanceForRentExemption(0);
-    await provider.sendAndConfirm(
-      new anchor.web3.Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: provider.wallet.publicKey,
-          toPubkey: target.publicKey,
-          lamports: rentExemptMinimum,
-        })
-      )
-    );
+    const { target, assignIx } = await setupAssignTarget();
 
-    const assignIx = SystemProgram.assign({
-      accountPubkey: target.publicKey,
-      programId: program.programId,
-    });
-
-    await program.methods
-      .executeAdvancedViaSession(assignIx.data)
-      .accounts({
-        wallet: walletPda,
-        vault: vaultPda,
-        policy: policyPda,
-        cpiProgram: SystemProgram.programId,
-        session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
-        sessionKey: sessionKeypair.publicKey,
-      })
-      .remainingAccounts([{ pubkey: target.publicKey, isWritable: true, isSigner: true }])
-      .signers([sessionKeypair, target])
-      .rpc();
-
-    const info = await provider.connection.getAccountInfo(target.publicKey);
-    assert.isNotNull(info);
-    assert.equal(info.owner.toBase58(), program.programId.toBase58());
-  });
-
-  it("execute_advanced_via_session faalt zodra het programma van de LIVE PolicyAccount verwijderd is, ook al staat het nog in de sessie's eigen sub-scope (ProgramNotAllowed, geen cache)", async () => {
-    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
-    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
-
-    const sessionKeypair = Keypair.generate();
-    const currentSlot = await provider.connection.getSlot();
-    await callAddSessionKey(
-      passkey,
-      walletPda,
-      passkeysPda,
-      policyPda,
-      sessionKeypair.publicKey,
-      currentSlot + 1000,
-      false,
-      false,
-      true,
-      [SystemProgram.programId]
-    );
-
-    // Eigenaar verwijdert System Program weer van de wallet-brede allowlist -
-    // de sessie's EIGEN sub-scope-lijst weet daar niets van (bevat het nog
-    // steeds), maar de live herverificatie moet dit toch tegenhouden.
-    await callRemoveAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
-
-    const target = Keypair.generate();
-    const rentExemptMinimum = await provider.connection.getMinimumBalanceForRentExemption(0);
-    await provider.sendAndConfirm(
-      new anchor.web3.Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: provider.wallet.publicKey,
-          toPubkey: target.publicKey,
-          lamports: rentExemptMinimum,
-        })
-      )
-    );
-    const assignIx = SystemProgram.assign({
-      accountPubkey: target.publicKey,
-      programId: program.programId,
-    });
-
-    let threw = false;
-    try {
-      await program.methods
+    await expectErrorContaining(
+      program.methods
         .executeAdvancedViaSession(assignIx.data)
         .accounts({
           wallet: walletPda,
@@ -1101,14 +1086,378 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
         })
         .remainingAccounts([{ pubkey: target.publicKey, isWritable: true, isSigner: true }])
         .signers([sessionKeypair, target])
-        .rpc();
-    } catch (err) {
-      threw = true;
-    }
-    assert.isTrue(
-      threw,
-      "execute_advanced_via_session had moeten falen nadat de live policy het programma niet meer toestaat"
+        .rpc(),
+      "SessionAdvancedMustUseQueue"
     );
+
+    const info = await provider.connection.getAccountInfo(target.publicKey);
+    assert.isNotNull(info);
+    assert.equal(
+      info!.owner.toBase58(),
+      SystemProgram.programId.toBase58(),
+      "target had System-owned moeten blijven: er mag geen CPI uitgevoerd zijn"
+    );
+  });
+
+  it("[153] initiate_advanced_action_via_session legt de CPI vast in de wachtrij: kind=2, initiator_session=sessiesleutel, sentinel als initiator_passkey, GEEN CPI, action_nonce ONGEWIJZIGD", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+
+    const { target, assignIx } = await setupAssignTarget();
+    const nonceBefore = await fetchActionNonce(provider.connection, walletPda);
+
+    await callInitiateAdvancedActionViaSession(
+      sessionKeypair,
+      walletPda,
+      vaultPda,
+      passkeysPda,
+      policyPda,
+      SystemProgram.programId,
+      [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+      assignIx.data,
+      [target]
+    );
+
+    const pending = await program.account.pendingAction.fetch(derivePendingActionPda(walletPda));
+    assert.equal(pending.kind, 2);
+    assert.equal(pending.initiatorSession.toBase58(), sessionKeypair.publicKey.toBase58());
+    assert.deepEqual(Array.from(pending.initiatorPasskey), new Array(33).fill(0), "initiator_passkey moet de sentinel zijn");
+    assert.equal(
+      pending.timelockStartedAt.toString(),
+      pending.initiatedAt.toString(),
+      "vóór confirm is timelock_started_at nog gelijk aan initiated_at (en finalize is dan sowieso geblokkeerd)"
+    );
+
+    const nonceAfter = await fetchActionNonce(provider.connection, walletPda);
+    assert.equal(nonceAfter, nonceBefore, "een _via_session-pad mag action_nonce nooit aanraken");
+
+    const info = await provider.connection.getAccountInfo(target.publicKey);
+    assert.equal(info!.owner.toBase58(), SystemProgram.programId.toBase58(), "initiate mag de CPI niet uitvoeren");
+  });
+
+  it("[153] initiate_advanced_action_via_session weigert een sessie zonder can_execute_advanced (SessionInstructionNotAllowed)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      true,
+      false,
+      false
+    );
+    const { target, assignIx } = await setupAssignTarget();
+    await expectErrorContaining(
+      callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      ),
+      "SessionInstructionNotAllowed"
+    );
+  });
+
+  it("[153] initiate_advanced_action_via_session weigert een programma buiten de sub-scope van de sessie (SessionProgramNotAllowed)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    await callAddAllowedProgram(passkey, walletPda, policyPda, TOKEN_PROGRAM_ID);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    // Sub-scope: alleen het Token-programma, niet System.
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      false,
+      true,
+      [TOKEN_PROGRAM_ID]
+    );
+    const { target, assignIx } = await setupAssignTarget();
+    await expectErrorContaining(
+      callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      ),
+      "SessionProgramNotAllowed"
+    );
+  });
+
+  it("[153] initiate_advanced_action_via_session faalt zodra het programma van de LIVE PolicyAccount verwijderd is, ook al staat het nog in de sub-scope (ProgramNotAllowed, geen cache)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+    await callRemoveAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const { target, assignIx } = await setupAssignTarget();
+    await expectErrorContaining(
+      callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      ),
+      "ProgramNotAllowed"
+    );
+  });
+
+  it("[153] initiate_advanced_action_via_session weigert een self-CPI naar SpankWallet zelf (SelfCpiNotAllowed)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+    await expectErrorContaining(
+      callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        program.programId,
+        [],
+        Buffer.from([])
+      ),
+      "SelfCpiNotAllowed"
+    );
+  });
+
+  it("[153] initiate_advanced_action_via_session weigert een verlopen sessie (SessionExpired)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    const expirySlot = currentSlot + 5;
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      expirySlot,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+    await advanceSlotPast(provider.connection, payerKeypair, expirySlot);
+    const { target, assignIx } = await setupAssignTarget();
+    await expectErrorContaining(
+      callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      ),
+      "SessionExpired"
+    );
+  });
+
+  it("[153] initiate_advanced_action_via_session weigert tijdens een lopende recovery (RecoveryAlreadyInProgress)", async () => {
+    const { passkey, backupAuthority, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+    await program.methods
+      .initiateRecovery(dummyNewOwnerPasskey())
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+    const { target, assignIx } = await setupAssignTarget();
+    await expectErrorContaining(
+      callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      ),
+      "RecoveryAlreadyInProgress"
+    );
+  });
+
+  it("[153] een tweede initiate via dezelfde sessie faalt zolang het singleton-slot bezet is", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+    const first = await setupAssignTarget();
+    await callInitiateAdvancedActionViaSession(
+      sessionKeypair,
+      walletPda,
+      vaultPda,
+      passkeysPda,
+      policyPda,
+      SystemProgram.programId,
+      [{ pubkey: first.target.publicKey, isWritable: true, isSigner: true }],
+      first.assignIx.data,
+      [first.target]
+    );
+    const second = await setupAssignTarget();
+    await expectErrorContaining(
+      callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        SystemProgram.programId,
+        [{ pubkey: second.target.publicKey, isWritable: true, isSigner: true }],
+        second.assignIx.data,
+        [second.target]
+      ),
+      "already in use"
+    );
+  });
+
+  it("[153] een sessiesleutel kan cancel_action niet aanroepen (vereist een passkey)", async () => {
+    const { passkey, walletPda, vaultPda, passkeysPda, policyPda } = await createWallet();
+    await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    const currentSlot = await provider.connection.getSlot();
+    await callAddSessionKey(
+      passkey,
+      walletPda,
+      passkeysPda,
+      policyPda,
+      sessionKeypair.publicKey,
+      currentSlot + 1000,
+      false,
+      false,
+      true,
+      [SystemProgram.programId]
+    );
+    const { target, assignIx } = await setupAssignTarget();
+    await callInitiateAdvancedActionViaSession(
+      sessionKeypair,
+      walletPda,
+      vaultPda,
+      passkeysPda,
+      policyPda,
+      SystemProgram.programId,
+      [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+      assignIx.data,
+      [target]
+    );
+
+    // De sessiesleutel als (enige) signer/payer, zonder passkey-precompile:
+    // de passkey-verificatie moet dit weigeren.
+    const sig = await provider.connection.requestAirdrop(sessionKeypair.publicKey, 100_000_000);
+    await provider.connection.confirmTransaction(sig, "confirmed");
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    await expectErrorContaining(
+      program.methods
+        .cancelAction(new BN(nonce.toString()), Buffer.from("{}"))
+        .accounts({
+          wallet: walletPda,
+          pendingAction: derivePendingActionPda(walletPda),
+          passkeys: passkeysPda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          payer: sessionKeypair.publicKey,
+        })
+        .signers([sessionKeypair])
+        .rpc(),
+      "InvalidPasskeySignature"
+    );
+    const stillThere = await provider.connection.getAccountInfo(derivePendingActionPda(walletPda));
+    assert.isNotNull(stillThere, "de PendingAction had moeten blijven bestaan");
   });
 
   it("transfer_token_via_session voert een echte SPL-transfer uit als can_transfer_token=true", async () => {
@@ -2078,13 +2427,12 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     assert.equal(sessionAfter.spentLamports.toNumber(), 1_000_000);
   });
 
-  // B2, punt 5 (expliciete aanvulling): execute_advanced_via_session leest
-  // `session` handmatig via load_session_account i.p.v. door Anchors macro -
-  // precies het soort plek waar een check per ongeluk overgeslagen wordt als
-  // hij niet apart getest wordt. Dit bewijst dat de epoch-check ook daar
-  // daadwerkelijk zit, niet alleen in de twee "makkelijke" varianten
-  // hierboven.
-  it("[B2] execute_advanced_via_session weigert ook met SessionRevokedByRecovery na een recovery", async () => {
+  // B2, punt 5 (expliciete aanvulling), sinds STATUS.md sectie 153 op de
+  // opvolger: initiate_advanced_action_via_session leest `session` handmatig
+  // via load_session_account i.p.v. door Anchors macro - precies het soort
+  // plek waar een check per ongeluk overgeslagen wordt als hij niet apart
+  // getest wordt. Dit bewijst dat de epoch-check ook daar daadwerkelijk zit.
+  it("[B2] initiate_advanced_action_via_session weigert met SessionRevokedByRecovery na een recovery", async () => {
     const timelockSeconds = 3;
     const { passkey, backupAuthority, walletPda, vaultPda, passkeysPda, policyPda } =
       await createWallet(timelockSeconds);
@@ -2144,31 +2492,29 @@ describe("spankwallet: session keys (add_session_key/remove_session_key/close_se
     let threw = false;
     let errorMessage = "";
     try {
-      await program.methods
-        .executeAdvancedViaSession(assignIx.data)
-        .accounts({
-          wallet: walletPda,
-          vault: vaultPda,
-          policy: policyPda,
-          cpiProgram: SystemProgram.programId,
-          session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
-          sessionKey: sessionKeypair.publicKey,
-        })
-        .remainingAccounts([{ pubkey: target.publicKey, isWritable: true, isSigner: true }])
-        .signers([sessionKeypair, target])
-        .rpc();
+      await callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        walletPda,
+        vaultPda,
+        passkeysPda,
+        policyPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      );
     } catch (err) {
       threw = true;
       errorMessage = err.toString();
     }
     assert.isTrue(
       threw,
-      "FIX GEVERIFIEERD: execute_advanced_via_session had ook moeten weigeren na een recovery"
+      "initiate_advanced_action_via_session had moeten weigeren na een recovery"
     );
     assert.include(
       errorMessage,
       "SessionRevokedByRecovery",
-      "de epoch-check in execute_advanced_via_session (handmatig ingelezen via load_session_account) had niet overgeslagen mogen worden"
+      "de epoch-check in initiate_advanced_action_via_session (handmatig ingelezen via load_session_account) had niet overgeslagen mogen worden"
     );
   });
 

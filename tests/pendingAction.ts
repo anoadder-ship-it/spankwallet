@@ -20,12 +20,15 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import {
+  AddressLookupTableProgram,
   PublicKey,
   Keypair,
   SystemProgram,
   SYSVAR_INSTRUCTIONS_PUBKEY,
   SYSVAR_RENT_PUBKEY,
   TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
 import { createHash } from "crypto";
 import { assert } from "chai";
@@ -38,6 +41,7 @@ import {
   buildSecp256r1Instruction,
   encodeOptionalI64,
   advanceOnChainClockPast,
+  advanceSlotPast,
   fetchActionNonce,
   nonceLeBytes,
   TestPasskey,
@@ -1670,6 +1674,263 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     return { target, assignIx };
   }
 
+
+  // ================= Sessie-geïnitieerde AdvancedAction (STATUS.md sectie 153) =================
+  //
+  // Zelfde per-bestand-onafhankelijkheidsconventie als hierboven: de
+  // add/remove_session_key-helpers zijn bewust gedupliceerd uit
+  // tests/sessionKeys.ts.
+
+  const MAX_U64 = new BN("18446744073709551615");
+
+  function deriveSessionPda(walletPda: PublicKey, sessionKey: PublicKey) {
+    const [sessionPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("session"), walletPda.toBuffer(), sessionKey.toBuffer()],
+      program.programId
+    );
+    return sessionPda;
+  }
+
+  /// Sessie met ALLEEN can_execute_advanced, sub-scope = [cpiProgramId].
+  async function callAddAdvancedSessionKey(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    passkeysPda: PublicKey,
+    policyPda: PublicKey,
+    sessionKey: PublicKey,
+    cpiProgramId: PublicKey
+  ) {
+    const expirySlot = (await provider.connection.getSlot()) + 100_000;
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const expirySlotBuf = Buffer.alloc(8);
+    expirySlotBuf.writeBigUInt64LE(BigInt(expirySlot), 0);
+    const countBuf = Buffer.alloc(4);
+    countBuf.writeUInt32LE(1, 0);
+    const zero = new BN(0);
+    const payload = Buffer.concat([
+      nonceLeBytes(nonce),
+      sessionKey.toBuffer(),
+      expirySlotBuf,
+      Buffer.from([0, 0, 1]),
+      countBuf,
+      cpiProgramId.toBuffer(),
+      MAX_U64.toArrayLike(Buffer, "le", 8),
+      MAX_U64.toArrayLike(Buffer, "le", 8),
+      PublicKey.default.toBuffer(),
+      zero.toArrayLike(Buffer, "le", 8),
+      zero.toArrayLike(Buffer, "le", 8),
+    ]);
+    const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "add_session_key", payload);
+    const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(signingPasskey, expectedChallenge);
+    const secp256r1Ix = buildSecp256r1Instruction(signingPasskey.compressedPublicKey, signedMessage, rawSignature);
+
+    return program.methods
+      .addSessionKey(
+        sessionKey,
+        new BN(expirySlot),
+        false,
+        false,
+        true,
+        [cpiProgramId],
+        MAX_U64,
+        MAX_U64,
+        PublicKey.default,
+        zero,
+        zero,
+        new BN(nonce.toString()),
+        clientDataJSON
+      )
+      .accounts({
+        wallet: walletPda,
+        session: deriveSessionPda(walletPda, sessionKey),
+        payer: provider.wallet.publicKey,
+        policy: policyPda,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      })
+      .preInstructions([secp256r1Ix])
+      .rpc();
+  }
+
+  /// Bouwt (maar verstuurt niet) een remove_session_key-transactie - apart
+  /// zodat een test kan bewijzen dat een VOORAF ondertekende verdedigings-
+  /// actie van de eigenaar geldig blijft, ook als de sessie ondertussen
+  /// iets doet (de sessie raakt action_nonce nooit).
+  async function buildRemoveSessionKeyTx(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    passkeysPda: PublicKey,
+    sessionKey: PublicKey
+  ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const payer = provider.wallet.publicKey;
+    const payload = Buffer.concat([nonceLeBytes(nonce), sessionKey.toBuffer(), payer.toBuffer()]);
+    const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "remove_session_key", payload);
+    const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(signingPasskey, expectedChallenge);
+    const secp256r1Ix = buildSecp256r1Instruction(signingPasskey.compressedPublicKey, signedMessage, rawSignature);
+    const removeIx = await program.methods
+      .removeSessionKey(sessionKey, new BN(nonce.toString()), clientDataJSON)
+      .accounts({
+        wallet: walletPda,
+        session: deriveSessionPda(walletPda, sessionKey),
+        payer,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .instruction();
+    return new anchor.web3.Transaction().add(secp256r1Ix, removeIx);
+  }
+
+  async function callInitiateAdvancedActionViaSession(
+    sessionKeypair: Keypair,
+    walletPda: PublicKey,
+    vaultPda: PublicKey,
+    pendingActionPda: PublicKey,
+    policyPda: PublicKey,
+    passkeysPda: PublicKey,
+    cpiProgramId: PublicKey,
+    remainingAccounts: RemainingAccountSpec[],
+    data: Buffer,
+    extraSigners: Keypair[] = []
+  ) {
+    return program.methods
+      .initiateAdvancedActionViaSession(data)
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        pendingAction: pendingActionPda,
+        policy: policyPda,
+        cpiProgram: cpiProgramId,
+        session: deriveSessionPda(walletPda, sessionKeypair.publicKey),
+        sessionKey: sessionKeypair.publicKey,
+        passkeys: passkeysPda,
+        payer: provider.wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        remainingAccounts.map((a) => ({ pubkey: a.pubkey, isWritable: a.isWritable, isSigner: a.isSigner }))
+      )
+      .signers([sessionKeypair, ...extraSigners])
+      .rpc();
+  }
+
+  async function buildConfirmPendingActionIxs(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey,
+    nonceOverride?: bigint,
+    // Alleen voor de revival-test: bouw de instructie met een vooraf
+    // vastgelegde commitment, zodat er client-side NIETS van het (dan
+    // gesloten) account gelezen hoeft te worden - de weigering moet
+    // on-chain gebeuren.
+    commitmentOverride?: Buffer
+  ) {
+    const nonce = nonceOverride ?? (await fetchActionNonce(provider.connection, walletPda));
+    const commitment =
+      commitmentOverride ??
+      Buffer.from((await program.account.pendingAction.fetch(pendingActionPda)).actionCommitment);
+    const payload = Buffer.concat([nonceLeBytes(nonce), pendingActionPda.toBuffer(), commitment]);
+    const expectedChallenge = buildExpectedChallenge(
+      program.programId,
+      walletPda,
+      "confirm_pending_action",
+      payload
+    );
+    const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(signingPasskey, expectedChallenge);
+    const secp256r1Ix = buildSecp256r1Instruction(signingPasskey.compressedPublicKey, signedMessage, rawSignature);
+    const confirmIx = await program.methods
+      .confirmPendingAction(new BN(nonce.toString()), clientDataJSON)
+      .accounts({
+        wallet: walletPda,
+        pendingAction: pendingActionPda,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .instruction();
+    return [secp256r1Ix, confirmIx];
+  }
+
+  async function callConfirmPendingAction(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey
+  ) {
+    const ixs = await buildConfirmPendingActionIxs(signingPasskey, walletPda, pendingActionPda, passkeysPda);
+    return provider.sendAndConfirm(new anchor.web3.Transaction().add(...ixs));
+  }
+
+  /// Wallet + System-programma op de allowlist + een advanced-sessie + een
+  /// door die sessie geïnitieerde Assign-CPI. Optioneel met een tweede
+  /// passkey (vóór de initiatie toegevoegd, dus confirmed=false).
+  async function setupSessionInitiatedAction(withSecondPasskey: boolean) {
+    const wallet = await createWallet();
+    let secondPasskey: TestPasskey | null = null;
+    if (withSecondPasskey) {
+      secondPasskey = generateTestPasskey();
+      await callAddPasskey(wallet.passkey, wallet.walletPda, wallet.passkeysPda, secondPasskey.compressedPublicKey);
+    }
+    await callAddAllowedProgram(wallet.passkey, wallet.walletPda, wallet.policyPda, SystemProgram.programId);
+    const sessionKeypair = Keypair.generate();
+    await callAddAdvancedSessionKey(
+      wallet.passkey,
+      wallet.walletPda,
+      wallet.passkeysPda,
+      wallet.policyPda,
+      sessionKeypair.publicKey,
+      SystemProgram.programId
+    );
+    const { target, assignIx } = await setupAssignCpiFixture();
+    const remainingAccounts: RemainingAccountSpec[] = [
+      { pubkey: target.publicKey, isWritable: true, isSigner: true },
+    ];
+    await callInitiateAdvancedActionViaSession(
+      sessionKeypair,
+      wallet.walletPda,
+      wallet.vaultPda,
+      wallet.pendingActionPda,
+      wallet.policyPda,
+      wallet.passkeysPda,
+      SystemProgram.programId,
+      remainingAccounts,
+      assignIx.data,
+      [target]
+    );
+    return { ...wallet, secondPasskey, sessionKeypair, target, assignIx, remainingAccounts };
+  }
+
+  async function finalizeSessionAction(
+    s: Awaited<ReturnType<typeof setupSessionInitiatedAction>>,
+    signingPasskey: TestPasskey
+  ) {
+    return callFinalizeAdvancedAction(
+      signingPasskey,
+      s.walletPda,
+      s.vaultPda,
+      s.pendingActionPda,
+      s.policyPda,
+      s.passkeysPda,
+      SystemProgram.programId,
+      s.remainingAccounts,
+      s.assignIx.data,
+      [s.target]
+    );
+  }
+
+  async function assertTargetUnassigned(target: Keypair) {
+    const info = await provider.connection.getAccountInfo(target.publicKey);
+    assert.equal(info!.owner.toBase58(), SystemProgram.programId.toBase58(), "er mocht nog geen CPI uitgevoerd zijn");
+  }
+
+  async function assertTargetAssigned(target: Keypair) {
+    const info = await provider.connection.getAccountInfo(target.publicKey);
+    assert.equal(info!.owner.toBase58(), program.programId.toBase58(), "de CPI had uitgevoerd moeten zijn");
+  }
+
+  const payerKeypair = () => (provider.wallet as anchor.Wallet).payer;
+
   describe("kind=2 AdvancedAction (initiate_advanced_action/finalize_advanced_action)", () => {
     it("1. happy path: echte CPI via System Program Assign, na queue + timelock", async () => {
       const { passkey, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } = await createWallet();
@@ -2197,6 +2458,635 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
   // ================= ThresholdChange (kind=3) dedicated tests =================
   // (helpers callInitiateThresholdChange/callFinalizeThresholdChange staan
   // hierboven al, nodig voor testpunt 7 van kind=0.)
+
+  describe("sessie-geïnitieerde AdvancedAction (initiate_advanced_action_via_session / confirm_pending_action) - STATUS.md sectie 153", () => {
+    it("finalize met een sessiesleutel is structureel onmogelijk: zonder passkey-precompile faalt finalize_advanced_action (InvalidPasskeySignature), en er bestaat geen _via_session-finalize", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      await callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda);
+      const pending = await program.account.pendingAction.fetch(s.pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+
+      const nonce = await fetchActionNonce(provider.connection, s.walletPda);
+      const sig = await provider.connection.requestAirdrop(s.sessionKeypair.publicKey, 100_000_000);
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      await expectAnchorError(
+        program.methods
+          .finalizeAdvancedAction(s.assignIx.data, new BN(nonce.toString()), Buffer.from("{}"))
+          .accounts({
+            wallet: s.walletPda,
+            vault: s.vaultPda,
+            pendingAction: s.pendingActionPda,
+            policy: s.policyPda,
+            cpiProgram: SystemProgram.programId,
+            passkeys: s.passkeysPda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+            closer: s.sessionKeypair.publicKey,
+          })
+          .remainingAccounts(s.remainingAccounts)
+          .signers([s.sessionKeypair, s.target])
+          .rpc(),
+        "InvalidPasskeySignature"
+      );
+      await assertTargetUnassigned(s.target);
+
+      const instructionNames = (program.idl.instructions as { name: string }[]).map((i) => i.name);
+      const sessionFinalizes = instructionNames.filter((n) => /finalize|confirm/i.test(n) && /session/i.test(n));
+      assert.deepEqual(sessionFinalizes, [], "er mag geen finalize/confirm-variant voor sessiesleutels bestaan");
+    });
+
+    it("single passkey: finalize vóór confirm faalt (SessionInitiatedActionNeedsConfirmation), OOK als de timelock gerekend vanaf initiatie al verstreken is; na confirm + timelock slaagt finalize door dezelfde passkey", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(s.pendingActionPda);
+      assert.isTrue(pendingAfterInitiate.confirmed, "1 passkey: confirmed=true (single-passkey-terugval)");
+
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+      await expectAnchorError(finalizeSessionAction(s, s.passkey), "SessionInitiatedActionNeedsConfirmation");
+      await assertTargetUnassigned(s.target);
+
+      await callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda);
+      const pendingAfterConfirm = await program.account.pendingAction.fetch(s.pendingActionPda);
+      assert.deepEqual(
+        Array.from(pendingAfterConfirm.initiatorPasskey),
+        Array.from(s.passkey.compressedPublicKey),
+        "confirm legt de bevestigende passkey vast in initiator_passkey"
+      );
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pendingAfterConfirm.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+      await finalizeSessionAction(s, s.passkey);
+      await assertTargetAssigned(s.target);
+      assert.isNull(await provider.connection.getAccountInfo(s.pendingActionPda));
+    });
+
+    it("TIMELOCK-STARTMOMENT: de timelock telt vanaf confirm_pending_action, niet vanaf de sessie-initiatie - initiated_at blijft ongewijzigd", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(s.pendingActionPda);
+
+      // Laat de volledige (test)timelock verstrijken gerekend vanaf initiatie.
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+      await callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda);
+      const pendingAfterConfirm = await program.account.pendingAction.fetch(s.pendingActionPda);
+
+      assert.equal(
+        pendingAfterConfirm.initiatedAt.toString(),
+        pendingAfterInitiate.initiatedAt.toString(),
+        "initiated_at moet het moment van verschijnen blijven"
+      );
+      assert.isAtLeast(
+        pendingAfterConfirm.timelockStartedAt.toNumber(),
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS,
+        "timelock_started_at moet het (latere) confirm-moment zijn"
+      );
+
+      // Direct na confirm: gerekend vanaf initiatie zou dit mogen, gerekend
+      // vanaf confirm niet - het programma moet weigeren.
+      await expectAnchorError(finalizeSessionAction(s, s.passkey), "PendingActionTimelockNotElapsed");
+      await assertTargetUnassigned(s.target);
+
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pendingAfterConfirm.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+      await finalizeSessionAction(s, s.passkey);
+      await assertTargetAssigned(s.target);
+    });
+
+    it("TIMELOCK-STARTMOMENT: confirm + finalize in ÉÉN transactie is onmogelijk, ook lang na de initiatie", async () => {
+      const s = await setupSessionInitiatedAction(true);
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(s.pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+
+      // Het scenario uit de ontwerpkeuze (sectie 154): een lang onbevestigd
+      // gebleven actie, daarna confirm (A) + finalize (B) in één transactie.
+      const nonce = await fetchActionNonce(provider.connection, s.walletPda);
+      const confirmIxs = await buildConfirmPendingActionIxs(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda, nonce);
+      const pending = await program.account.pendingAction.fetch(s.pendingActionPda);
+      const commitment = Buffer.from(pending.actionCommitment);
+      const finalizeNonce = nonce + 1n;
+      const payload = Buffer.concat([nonceLeBytes(finalizeNonce), s.pendingActionPda.toBuffer(), commitment]);
+      const expectedChallenge = buildExpectedChallenge(program.programId, s.walletPda, "finalize_advanced_action", payload);
+      const signed = signTestChallenge(s.secondPasskey!, expectedChallenge);
+      const finalizePrecompile = buildSecp256r1Instruction(
+        s.secondPasskey!.compressedPublicKey,
+        signed.signedMessage,
+        signed.rawSignature
+      );
+      const finalizeIx = await program.methods
+        .finalizeAdvancedAction(s.assignIx.data, new BN(finalizeNonce.toString()), signed.clientDataJSON)
+        .accounts({
+          wallet: s.walletPda,
+          vault: s.vaultPda,
+          pendingAction: s.pendingActionPda,
+          policy: s.policyPda,
+          cpiProgram: SystemProgram.programId,
+          passkeys: s.passkeysPda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          closer: provider.wallet.publicKey,
+        })
+        .remainingAccounts(s.remainingAccounts)
+        .instruction();
+
+      // Zonder Address Lookup Table is deze transactie te groot (>1232
+      // bytes). Een ALT is een gewoon beschikbaar middel, dus de test
+      // gebruikt er een: pas dan toetst hij de programmaregel zelf i.p.v.
+      // een toevallige transactiegrootte.
+      const payer = payerKeypair();
+      const recentSlot = await provider.connection.getSlot("finalized");
+      const [createAltIx, altAddress] = AddressLookupTableProgram.createLookupTable({
+        authority: payer.publicKey,
+        payer: payer.publicKey,
+        recentSlot,
+      });
+      const extendAltIx = AddressLookupTableProgram.extendLookupTable({
+        payer: payer.publicKey,
+        authority: payer.publicKey,
+        lookupTable: altAddress,
+        addresses: [
+          s.walletPda,
+          s.vaultPda,
+          s.pendingActionPda,
+          s.policyPda,
+          s.passkeysPda,
+          SYSVAR_INSTRUCTIONS_PUBKEY,
+          SystemProgram.programId,
+          new PublicKey("Secp256r1SigVerify1111111111111111111111111"),
+          program.programId,
+        ],
+      });
+      await provider.sendAndConfirm(new anchor.web3.Transaction().add(createAltIx, extendAltIx));
+      // Een ALT is pas bruikbaar vanaf de slot ná de laatste extend.
+      await advanceSlotPast(provider.connection, payer, (await provider.connection.getSlot()) + 1);
+      const alt = (await provider.connection.getAddressLookupTable(altAddress)).value!;
+
+      const { blockhash } = await provider.connection.getLatestBlockhash();
+      const message = new TransactionMessage({
+        payerKey: payer.publicKey,
+        recentBlockhash: blockhash,
+        instructions: [...confirmIxs, finalizePrecompile, finalizeIx],
+      }).compileToV0Message([alt]);
+      const vtx = new VersionedTransaction(message);
+      vtx.sign([payer, s.target]);
+
+      let errString = "";
+      try {
+        const sig = await provider.connection.sendTransaction(vtx);
+        await provider.connection.confirmTransaction(sig, "confirmed");
+      } catch (err: any) {
+        errString = String(err) + " " + String(err?.message ?? "") + " " + JSON.stringify(err?.logs ?? []);
+      }
+      assert.notInclude(errString, "too large", "met ALT hoort de transactie binnen de groottegrens te passen");
+      assert.include(errString, "PendingActionTimelockNotElapsed", "verwachtte PendingActionTimelockNotElapsed, kreeg: " + errString);
+      await assertTargetUnassigned(s.target);
+    });
+
+    it("2-VAN-2 (≥2 passkeys): finalize vóór confirm faalt; confirm(A) + finalize(A) faalt (SecondPasskeyMustDifferFromInitiator); confirm(A) + finalize(B) slaagt", async () => {
+      const s = await setupSessionInitiatedAction(true);
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(s.pendingActionPda);
+      assert.isFalse(pendingAfterInitiate.confirmed, "2 passkeys bij initiatie: confirmed=false");
+
+      await expectAnchorError(finalizeSessionAction(s, s.passkey), "SessionInitiatedActionNeedsConfirmation");
+
+      await callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda);
+      const pendingAfterConfirm = await program.account.pendingAction.fetch(s.pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pendingAfterConfirm.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+
+      await expectAnchorError(finalizeSessionAction(s, s.passkey), "SecondPasskeyMustDifferFromInitiator");
+      await assertTargetUnassigned(s.target);
+
+      await finalizeSessionAction(s, s.secondPasskey!);
+      await assertTargetAssigned(s.target);
+    });
+
+    it("REGRESSIE (2-van-2 bij sessie-initiatie): met ≥2 passkeys volstaat één passkey nooit om een sessie-geïnitieerde actie uit te voeren", async () => {
+      // Wallet met twee passkeys; alleen passkey A wordt gebruikt (voor de
+      // sessie, de confirm en de finalize-poging).
+      const s = await setupSessionInitiatedAction(true);
+      // Eerst: de volledige timelock gerekend vanaf de initiatie verstrijkt,
+      // daarna finalize met A zonder confirm - moet op de confirm-eis
+      // stranden, niet op de timelock.
+      const pendingAfterInitiate = await program.account.pendingAction.fetch(s.pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pendingAfterInitiate.initiatedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+      await expectAnchorError(finalizeSessionAction(s, s.passkey), "SessionInitiatedActionNeedsConfirmation");
+      await assertTargetUnassigned(s.target);
+
+      // En ook de route via een eigen confirm met A strandt: finalize moet
+      // dan van een ANDERE passkey komen.
+      await callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda);
+      const pending = await program.account.pendingAction.fetch(s.pendingActionPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS
+      );
+      await expectAnchorError(finalizeSessionAction(s, s.passkey), "SecondPasskeyMustDifferFromInitiator");
+      await assertTargetUnassigned(s.target);
+    });
+
+    it("confirm_pending_action: alleen voor een sessie-geïnitieerde actie (PendingActionNotSessionInitiated), en maar één keer (PendingActionAlreadyConfirmed)", async () => {
+      // Passkey-geïnitieerde actie: confirm is daar niet van toepassing.
+      const { passkey, walletPda, vaultPda, policyPda, passkeysPda, pendingActionPda } = await createWallet();
+      await callAddAllowedProgram(passkey, walletPda, policyPda, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      await callInitiateAdvancedAction(
+        passkey,
+        walletPda,
+        vaultPda,
+        pendingActionPda,
+        policyPda,
+        passkeysPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      );
+      const passkeyInitiated = await program.account.pendingAction.fetch(pendingActionPda);
+      assert.equal(passkeyInitiated.initiatorSession.toBase58(), PublicKey.default.toBase58());
+      await expectAnchorError(
+        callConfirmPendingAction(passkey, walletPda, pendingActionPda, passkeysPda),
+        "PendingActionNotSessionInitiated"
+      );
+
+      const s = await setupSessionInitiatedAction(true);
+      await callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda);
+      await expectAnchorError(
+        callConfirmPendingAction(s.secondPasskey!, s.walletPda, s.pendingActionPda, s.passkeysPda),
+        "PendingActionAlreadyConfirmed"
+      );
+    });
+
+    it("confirm_pending_action na een voltooide recovery faalt met PendingActionStaleEpoch", async () => {
+      const wallet = await createWallet(3);
+      await callAddAllowedProgram(wallet.passkey, wallet.walletPda, wallet.policyPda, SystemProgram.programId);
+      const sessionKeypair = Keypair.generate();
+      await callAddAdvancedSessionKey(
+        wallet.passkey,
+        wallet.walletPda,
+        wallet.passkeysPda,
+        wallet.policyPda,
+        sessionKeypair.publicKey,
+        SystemProgram.programId
+      );
+      const { target, assignIx } = await setupAssignCpiFixture();
+      await callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        wallet.walletPda,
+        wallet.vaultPda,
+        wallet.pendingActionPda,
+        wallet.policyPda,
+        wallet.passkeysPda,
+        SystemProgram.programId,
+        [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+        assignIx.data,
+        [target]
+      );
+
+      const newOwner = generateTestPasskey();
+      await callInitiateRecovery(wallet.backupAuthority, wallet.walletPda, Array.from(newOwner.compressedPublicKey));
+      const afterInitiate = await program.account.walletAccount.fetch(wallet.walletPda);
+      await advanceOnChainClockPast(
+        provider.connection,
+        payerKeypair(),
+        afterInitiate.recoveryState!.initiatedAt.toNumber() + 3
+      );
+      await callFinalizeRecovery(wallet.walletPda, wallet.passkeysPda);
+
+      await expectAnchorError(
+        callConfirmPendingAction(newOwner, wallet.walletPda, wallet.pendingActionPda, wallet.passkeysPda),
+        "PendingActionStaleEpoch"
+      );
+    });
+
+    it("BEZET SLOT: de eigenaar maakt het altijd vrij (remove_session_key, dan cancel_action); de sessie kan daarna niet opnieuw initiëren; een VOORAF ondertekende remove_session_key blijft geldig ondanks sessie-activiteit (nonce onaangeroerd)", async () => {
+      const wallet = await createWallet();
+      await callAddAllowedProgram(wallet.passkey, wallet.walletPda, wallet.policyPda, SystemProgram.programId);
+      const sessionKeypair = Keypair.generate();
+      await callAddAdvancedSessionKey(
+        wallet.passkey,
+        wallet.walletPda,
+        wallet.passkeysPda,
+        wallet.policyPda,
+        sessionKeypair.publicKey,
+        SystemProgram.programId
+      );
+
+      // De eigenaar ondertekent de intrekking NU (nonce n)...
+      const removeTx = await buildRemoveSessionKeyTx(
+        wallet.passkey,
+        wallet.walletPda,
+        wallet.passkeysPda,
+        sessionKeypair.publicKey
+      );
+
+      // ...de sessie bezet ondertussen de wachtrij...
+      const first = await setupAssignCpiFixture();
+      await callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        wallet.walletPda,
+        wallet.vaultPda,
+        wallet.pendingActionPda,
+        wallet.policyPda,
+        wallet.passkeysPda,
+        SystemProgram.programId,
+        [{ pubkey: first.target.publicKey, isWritable: true, isSigner: true }],
+        first.assignIx.data,
+        [first.target]
+      );
+
+      // ...en de vooraf ondertekende intrekking gaat nog steeds door.
+      await provider.sendAndConfirm(removeTx);
+      assert.isNull(
+        await provider.connection.getAccountInfo(deriveSessionPda(wallet.walletPda, sessionKeypair.publicKey)),
+        "sessie had ingetrokken moeten zijn"
+      );
+
+      const payerBalanceBefore = await provider.connection.getBalance(provider.wallet.publicKey);
+      await callCancelAction(wallet.passkey, wallet.walletPda, wallet.pendingActionPda, wallet.passkeysPda);
+      assert.isNull(await provider.connection.getAccountInfo(wallet.pendingActionPda), "slot had vrij moeten zijn");
+      const payerBalanceAfter = await provider.connection.getBalance(provider.wallet.publicKey);
+      assert.isAbove(payerBalanceAfter, payerBalanceBefore, "de rent van de sessie-initiatie gaat naar de eigenaar die annuleert");
+
+      const second = await setupAssignCpiFixture();
+      let threw = false;
+      try {
+        await callInitiateAdvancedActionViaSession(
+          sessionKeypair,
+          wallet.walletPda,
+          wallet.vaultPda,
+          wallet.pendingActionPda,
+          wallet.policyPda,
+          wallet.passkeysPda,
+          SystemProgram.programId,
+          [{ pubkey: second.target.publicKey, isWritable: true, isSigner: true }],
+          second.assignIx.data,
+          [second.target]
+        );
+      } catch {
+        threw = true;
+      }
+      assert.isTrue(threw, "een ingetrokken sessie mag niet opnieuw kunnen initiëren");
+      assert.isNull(await provider.connection.getAccountInfo(wallet.pendingActionPda));
+    });
+
+    it("BEZET SLOT tijdens een lopende recovery: cancel_action werkt, en de sessie kan dan niet opnieuw initiëren", async () => {
+      const wallet = await createWallet();
+      await callAddAllowedProgram(wallet.passkey, wallet.walletPda, wallet.policyPda, SystemProgram.programId);
+      const sessionKeypair = Keypair.generate();
+      await callAddAdvancedSessionKey(
+        wallet.passkey,
+        wallet.walletPda,
+        wallet.passkeysPda,
+        wallet.policyPda,
+        sessionKeypair.publicKey,
+        SystemProgram.programId
+      );
+      const first = await setupAssignCpiFixture();
+      await callInitiateAdvancedActionViaSession(
+        sessionKeypair,
+        wallet.walletPda,
+        wallet.vaultPda,
+        wallet.pendingActionPda,
+        wallet.policyPda,
+        wallet.passkeysPda,
+        SystemProgram.programId,
+        [{ pubkey: first.target.publicKey, isWritable: true, isSigner: true }],
+        first.assignIx.data,
+        [first.target]
+      );
+      await callInitiateRecovery(wallet.backupAuthority, wallet.walletPda, dummyNewOwnerPasskey());
+
+      await callCancelAction(wallet.passkey, wallet.walletPda, wallet.pendingActionPda, wallet.passkeysPda);
+      assert.isNull(await provider.connection.getAccountInfo(wallet.pendingActionPda));
+
+      const second = await setupAssignCpiFixture();
+      await expectAnchorError(
+        callInitiateAdvancedActionViaSession(
+          sessionKeypair,
+          wallet.walletPda,
+          wallet.vaultPda,
+          wallet.pendingActionPda,
+          wallet.policyPda,
+          wallet.passkeysPda,
+          SystemProgram.programId,
+          [{ pubkey: second.target.publicKey, isWritable: true, isSigner: true }],
+          second.assignIx.data,
+          [second.target]
+        ),
+        "RecoveryAlreadyInProgress"
+      );
+    });
+  });
+
+  describe("cancel_action: handmatige close met Anchor's close-semantiek (STATUS.md sectie 153)", () => {
+    async function buildCancelActionIxs(
+      signingPasskey: TestPasskey,
+      walletPda: PublicKey,
+      pendingActionPda: PublicKey,
+      passkeysPda: PublicKey,
+      nonce: bigint,
+      rentReceiver: PublicKey = provider.wallet.publicKey
+    ) {
+      const payload = Buffer.concat([nonceLeBytes(nonce), pendingActionPda.toBuffer()]);
+      const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "cancel_action", payload);
+      const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(signingPasskey, expectedChallenge);
+      const secp256r1Ix = buildSecp256r1Instruction(signingPasskey.compressedPublicKey, signedMessage, rawSignature);
+      const cancelIx = await program.methods
+        .cancelAction(new BN(nonce.toString()), clientDataJSON)
+        .accounts({
+          wallet: walletPda,
+          pendingAction: pendingActionPda,
+          passkeys: passkeysPda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          payer: rentReceiver,
+        })
+        .instruction();
+      return [secp256r1Ix, cancelIx];
+    }
+
+    it("na cancel_action: account weg (0 lamports), rent EXACT en volledig naar de payer van cancel_action", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      // Alles op dezelfde commitment als de provider zelf bevestigt
+      // ("processed"): gemengde commitments gaven hier eerder schijnbare
+      // afwijkingen (stale reads), geen echte.
+      const pendingLamports = (await provider.connection.getAccountInfo(s.pendingActionPda, "processed"))!.lamports;
+      // Aparte, verse rent-ontvanger (niet de fee-payer), zodat de
+      // saldowijziging exact de teruggegeven rent is - geen fee-rekensom.
+      const rentReceiver = Keypair.generate();
+      const nonce = await fetchActionNonce(provider.connection, s.walletPda);
+      const ixs = await buildCancelActionIxs(
+        s.passkey,
+        s.walletPda,
+        s.pendingActionPda,
+        s.passkeysPda,
+        nonce,
+        rentReceiver.publicKey
+      );
+      await provider.sendAndConfirm(new anchor.web3.Transaction().add(...ixs), [rentReceiver]);
+      const received = await provider.connection.getBalance(rentReceiver.publicKey, "processed");
+      assert.equal(received, pendingLamports, "de payer van cancel_action ontvangt exact alle lamports van de PendingAction");
+      assert.isNull(await provider.connection.getAccountInfo(s.pendingActionPda, "processed"));
+    });
+
+    it("REVIVAL in dezelfde transactie (lamports terugsturen na cancel): het account komt terug als leeg System-account, NIET als PendingAction - finalize/confirm werken er niet op, en het slot is gewoon opnieuw bruikbaar", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      const rent = await provider.connection.getMinimumBalanceForRentExemption(164);
+      const commitmentBeforeCancel = Buffer.from(
+        (await program.account.pendingAction.fetch(s.pendingActionPda)).actionCommitment
+      );
+      const nonce = await fetchActionNonce(provider.connection, s.walletPda);
+      const cancelIxs = await buildCancelActionIxs(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda, nonce);
+      const revive = SystemProgram.transfer({
+        fromPubkey: provider.wallet.publicKey,
+        toPubkey: s.pendingActionPda,
+        lamports: rent,
+      });
+      await provider.sendAndConfirm(new anchor.web3.Transaction().add(...cancelIxs, revive));
+
+      const revived = await provider.connection.getAccountInfo(s.pendingActionPda);
+      assert.isNotNull(revived, "het account bestaat weer (lamports teruggestuurd)");
+      assert.equal(revived!.owner.toBase58(), SystemProgram.programId.toBase58(), "eigenaar moet het System Program zijn");
+      assert.equal(revived!.data.length, 0, "data moet leeg zijn");
+      let fetchFailed = false;
+      try {
+        await program.account.pendingAction.fetch(s.pendingActionPda);
+      } catch {
+        fetchFailed = true;
+      }
+      assert.isTrue(fetchFailed, "het gerevivede account mag niet als PendingAction deserialiseren");
+
+      // Beide gebouwd met de vooraf vastgelegde commitment - de weigering
+      // moet van het programma komen (typed Account<PendingAction> op een
+      // System-owned account), niet van een client-side fetch.
+      const nonceAfterCancel = await fetchActionNonce(provider.connection, s.walletPda);
+      const confirmIxs = await buildConfirmPendingActionIxs(
+        s.passkey,
+        s.walletPda,
+        s.pendingActionPda,
+        s.passkeysPda,
+        nonceAfterCancel,
+        commitmentBeforeCancel
+      );
+      await expectAnchorError(
+        provider.sendAndConfirm(new anchor.web3.Transaction().add(...confirmIxs)),
+        "AccountOwnedByWrongProgram"
+      );
+
+      const finalizePayload = Buffer.concat([
+        nonceLeBytes(nonceAfterCancel),
+        s.pendingActionPda.toBuffer(),
+        commitmentBeforeCancel,
+      ]);
+      const finalizeSigned = signTestChallenge(
+        s.passkey,
+        buildExpectedChallenge(program.programId, s.walletPda, "finalize_advanced_action", finalizePayload)
+      );
+      const finalizeIx = await program.methods
+        .finalizeAdvancedAction(s.assignIx.data, new BN(nonceAfterCancel.toString()), finalizeSigned.clientDataJSON)
+        .accounts({
+          wallet: s.walletPda,
+          vault: s.vaultPda,
+          pendingAction: s.pendingActionPda,
+          policy: s.policyPda,
+          cpiProgram: SystemProgram.programId,
+          passkeys: s.passkeysPda,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          closer: provider.wallet.publicKey,
+        })
+        .remainingAccounts(s.remainingAccounts)
+        .instruction();
+      await expectAnchorError(
+        provider.sendAndConfirm(
+          new anchor.web3.Transaction().add(
+            buildSecp256r1Instruction(
+              s.passkey.compressedPublicKey,
+              finalizeSigned.signedMessage,
+              finalizeSigned.rawSignature
+            ),
+            finalizeIx
+          ),
+          [s.target]
+        ),
+        "AccountOwnedByWrongProgram"
+      );
+      await assertTargetUnassigned(s.target);
+
+      // Het slot is gewoon opnieuw bruikbaar (init op een voorgefinancierd
+      // system-account): geen permanente blokkade door de revival.
+      const again = await setupAssignCpiFixture();
+      await callInitiateAdvancedActionViaSession(
+        s.sessionKeypair,
+        s.walletPda,
+        s.vaultPda,
+        s.pendingActionPda,
+        s.policyPda,
+        s.passkeysPda,
+        SystemProgram.programId,
+        [{ pubkey: again.target.publicKey, isWritable: true, isSigner: true }],
+        again.assignIx.data,
+        [again.target]
+      );
+      const fresh = await program.account.pendingAction.fetch(s.pendingActionPda);
+      assert.deepEqual(Array.from(fresh.initiatorPasskey), new Array(33).fill(0), "een verse, onbevestigde actie - geen overgebleven oude staat");
+    });
+
+    it("REVIVAL-poging binnen dezelfde transactie én hergebruik als PendingAction faalt atomisch: cancel + lamports terug + confirm op hetzelfde account in één tx wordt volledig teruggedraaid", async () => {
+      const s = await setupSessionInitiatedAction(true);
+      const rent = await provider.connection.getMinimumBalanceForRentExemption(164);
+      const nonce = await fetchActionNonce(provider.connection, s.walletPda);
+      const pendingBefore = await provider.connection.getAccountInfo(s.pendingActionPda);
+
+      const cancelIxs = await buildCancelActionIxs(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda, nonce);
+      const revive = SystemProgram.transfer({
+        fromPubkey: provider.wallet.publicKey,
+        toPubkey: s.pendingActionPda,
+        lamports: rent,
+      });
+      const confirmIxs = await buildConfirmPendingActionIxs(
+        s.secondPasskey!,
+        s.walletPda,
+        s.pendingActionPda,
+        s.passkeysPda,
+        nonce + 1n
+      );
+
+      await expectAnchorError(
+        provider.sendAndConfirm(new anchor.web3.Transaction().add(...cancelIxs, revive, ...confirmIxs)),
+        "AccountOwnedByWrongProgram"
+      );
+
+      // Atomisch teruggedraaid: de oorspronkelijke PendingAction is er nog,
+      // byte-voor-byte onveranderd, en nog steeds onbevestigd.
+      const pendingAfter = await provider.connection.getAccountInfo(s.pendingActionPda);
+      assert.isTrue(Buffer.from(pendingAfter!.data).equals(Buffer.from(pendingBefore!.data)));
+      assert.equal(pendingAfter!.owner.toBase58(), program.programId.toBase58());
+    });
+  });
 
   describe("kind=3 ThresholdChange (initiate_threshold_change/finalize_threshold_change)", () => {
     it("1. happy path: beide velden toegepast, SpendWindow voor het eerst aangemaakt", async () => {

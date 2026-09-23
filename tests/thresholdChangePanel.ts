@@ -27,6 +27,10 @@ function samplePending(overrides: Partial<ParsedPendingAction>): ParsedPendingAc
     actionCommitment: new Uint8Array(32),
     initiatorPasskey: new Uint8Array(33),
     confirmed: true,
+    initiatorSession: null,
+    // Passkey-initiatie: timelock_started_at == initiated_at (STATUS.md
+    // sectie 153) - tenzij een test hem expliciet anders zet.
+    timelockStartedAt: overrides.timelockStartedAt ?? overrides.initiatedAt ?? 0n,
     ...overrides,
   };
 }

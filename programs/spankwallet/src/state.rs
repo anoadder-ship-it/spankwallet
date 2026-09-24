@@ -99,9 +99,14 @@ pub struct WalletAccount {
     /// STATUS.md sectie 115 (spend-cap-ontwerpdocument): instant-limiet in
     /// lamports voor de directe paden (execute/hunt - transfer_token en
     /// execute_advanced gaan altijd via de PendingAction-wachtrij, zie
-    /// sectie 115 punt 2e). `0` = veiligste stand ("alles moet queuen"),
-    /// de default voor elk bestaand account na deze upgrade (fail-safe,
-    /// zelfde precedent als action_nonce/session_epoch hierboven). Bewust
+    /// sectie 115 punt 2e).
+    ///
+    /// GECORRIGEERD: `0` betekent "geen drempel ingesteld", NIET "alles moet
+    /// queuen" (zoals hier eerder stond). Bij `0` zijn execute/hunt niet door
+    /// een drempel of een SpendWindow begrensd - zie de sentinel-toelichting
+    /// in instructions.rs::execute (sectie 127/128, Route 2). Pas een waarde
+    /// `> 0` activeert de per-transactielimiet en de SpendWindow. `0` is de
+    /// default voor elk bestaand account na de sectie-115-upgrade. Bewust
     /// VLAK, geen `Option` - dit programma heeft al één gedocumenteerde
     /// Option-tijdbom (deposit_authority, sectie 85), geen tweede
     /// toegevoegd. Wijzigen kan alleen via `initiate_threshold_change`/
@@ -111,31 +116,20 @@ pub struct WalletAccount {
     /// ondermijnen.
     pub spend_threshold_lamports: u64,
 
-    /// STATUS.md sectie 115/126: GERESERVEERDE noodstop-vlag, mechanisme
-    /// NOG NIET GEBOUWD - dit veld heeft vandaag geen functionele
-    /// betekenis. `false` altijd, want er bestaat geen enkel schrijfpad:
-    /// `disarm_wallet_via_backup_authority`/`disarm_wallet_via_passkey`/
-    /// `rearm_wallet` (de instructies die dit veld ooit zouden moeten
-    /// zetten/terugzetten) bestaan niet in lib.rs. Van de instructies die
-    /// dit veld ZOUDEN moeten blokkeren, doen dat vandaag alleen de vier
-    /// `initiate_*`-varianten op `PendingAction` (geverifieerd:
-    /// `!wallet.disarmed`-constraint staat er daadwerkelijk op) -
-    /// `execute`/`transfer_token`/`execute_advanced`/`hunt` hebben GEEN
-    /// van alle de constraint, ongeacht wat een eerdere versie van deze
-    /// comment beweerde. Zie STATUS.md sectie 126 voor de volledige
-    /// bevinding (zelfde foutklasse als H-2: documentatie die een
-    /// beveiliging belooft die niet bestaat) - deze comment is de
-    /// correctie erop, geen gedragswijziging.
-    ///
-    /// Ontwerpintentie voor als het mechanisme ooit wél gebouwd wordt,
-    /// vastgelegd zodat die niet verloren gaat: primair gezet via
-    /// `disarm_wallet_via_backup_authority` (NIET via een WebAuthn-
-    /// ceremonie - zie sectie 115 punt 2c voor waarom dat de kern van dit
-    /// mechanisme is tegen het ceremonie-kapingsdreigingsmodel uit sectie
-    /// 72), secundair via `disarm_wallet_via_passkey`. `cancel_action`/
-    /// `cancel_recovery` moeten dan bewust GEEN `!disarmed`-constraint
-    /// dragen (een verdedigende actie mag nooit geblokkeerd worden door
-    /// de staat waar hij tegen beschermt) - vandaag al zo, blijft zo.
+    /// Noodstop-vlag (STATUS.md sectie 115/126, mechanisme gebouwd in de
+    /// noodstop-upgrade). `true` = bevroren. Zetten: freeze_via_passkey
+    /// (elke geldige passkey) of freeze_via_backup_authority, direct.
+    /// Terugzetten: unfreeze_via_backup_authority (direct) of
+    /// initiate_unfreeze/finalize_unfreeze (wachtrij, 24u, 2-of-2 bij ≥2
+    /// passkeys). Zolang `true`: alle waardepaden (execute, hunt,
+    /// *_via_session, alle initiate_*/confirm/finalize_* behalve de
+    /// unfreeze-soort) en alle directe bevoegdheidswijzigingen (add_passkey,
+    /// remove_passkey, add_session_key, add_allowed_program) weigeren met
+    /// WalletDisarmed. cancel_action/cancel_recovery en de andere
+    /// versmallende acties dragen bewust GEEN `!disarmed`-constraint: een
+    /// verdedigende actie mag nooit geblokkeerd worden door de staat waar
+    /// hij tegen beschermt. Zie instructions.rs (blok "Noodstop") voor de
+    /// volledige toelichting.
     pub disarmed: bool,
 }
 

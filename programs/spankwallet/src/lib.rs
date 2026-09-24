@@ -191,6 +191,40 @@ pub mod spankwallet {
         instructions::confirm_pending_action(ctx, client_action_nonce, client_data_json)
     }
 
+    // Noodstop - zie instructions.rs (freeze_via_passkey) voor de
+    // volledige toelichting.
+    pub fn freeze_via_passkey(
+        ctx: Context<FreezeViaPasskey>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::freeze_via_passkey(ctx, client_action_nonce, client_data_json)
+    }
+
+    pub fn freeze_via_backup_authority(ctx: Context<FreezeViaBackupAuthority>) -> Result<()> {
+        instructions::freeze_via_backup_authority(ctx)
+    }
+
+    pub fn unfreeze_via_backup_authority(ctx: Context<UnfreezeViaBackupAuthority>) -> Result<()> {
+        instructions::unfreeze_via_backup_authority(ctx)
+    }
+
+    pub fn initiate_unfreeze(
+        ctx: Context<InitiateUnfreeze>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::initiate_unfreeze(ctx, client_action_nonce, client_data_json)
+    }
+
+    pub fn finalize_unfreeze(
+        ctx: Context<FinalizeUnfreeze>,
+        client_action_nonce: u64,
+        client_data_json: Vec<u8>,
+    ) -> Result<()> {
+        instructions::finalize_unfreeze(ctx, client_action_nonce, client_data_json)
+    }
+
     pub fn initiate_threshold_change(
         ctx: Context<InitiateThresholdChange>,
         new_spend_threshold_lamports: u64,

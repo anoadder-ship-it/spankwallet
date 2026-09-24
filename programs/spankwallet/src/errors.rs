@@ -162,7 +162,7 @@ pub enum SpankWalletError {
     #[msg("De opgegeven waarden komen niet overeen met wat oorspronkelijk voor deze pending action geautoriseerd is")]
     PendingActionCommitmentMismatch,
 
-    #[msg("Deze wallet staat in noodstop (disarmed) - roep eerst rearm_wallet aan")]
+    #[msg("Deze wallet is bevroren (noodstop) - ontdooi eerst via de backup authority of via initiate_unfreeze/finalize_unfreeze")]
     WalletDisarmed,
 
     #[msg("Dit bedrag zou de cumulatieve bestedingslimiet van het huidige glijdende venster overschrijden - gebruik initiate_withdrawal in plaats daarvan")]
@@ -270,4 +270,8 @@ pub enum SpankWalletError {
     // AccountNotInitialized/AccountDiscriminatorMismatch voor dat pad.
     #[msg("Er is geen openstaande PendingAction voor deze wallet")]
     NoPendingAction,
+
+    // Noodstop: ontdooien kan alleen als de wallet bevroren is.
+    #[msg("Deze wallet is niet bevroren")]
+    WalletNotDisarmed,
 }

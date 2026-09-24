@@ -663,7 +663,9 @@ pub struct Execute<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -971,7 +973,9 @@ pub struct AddAllowedProgram<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -1323,7 +1327,9 @@ pub struct Hunt<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
     #[account(
@@ -1545,6 +1551,8 @@ const PENDING_ACTION_KIND_SOL_WITHDRAWAL: u8 = 0;
 const PENDING_ACTION_KIND_TOKEN_TRANSFER: u8 = 1;
 const PENDING_ACTION_KIND_ADVANCED_ACTION: u8 = 2;
 const PENDING_ACTION_KIND_THRESHOLD_CHANGE: u8 = 3;
+// Noodstop: ontdooien via de wachtrij (initiate_unfreeze/finalize_unfreeze).
+const PENDING_ACTION_KIND_UNFREEZE: u8 = 4;
 
 /// Sectie 115 punt 5: vaste programmaconstante voor een eerste versie,
 /// niet per-wallet instelbaar - zelfde bewuste vereenvoudiging als
@@ -3083,6 +3091,319 @@ pub fn confirm_pending_action(
     Ok(())
 }
 
+// Noodstop (freeze_via_passkey / freeze_via_backup_authority /
+// unfreeze_via_backup_authority / initiate_unfreeze / finalize_unfreeze)
+//
+// Gebruikt het bestaande veld `WalletAccount.disarmed` (geen layoutwijziging).
+// Bevriezen stopt snel de schade, ontdooien geeft bevoegdheid terug en is
+// daarom minstens zo streng als wat daarna uitgegeven kan worden:
+//
+// - Bevriezen: direct, door elke geldige passkey of door de backup
+//   authority. Nooit door een sessiesleutel. Idempotent.
+// - Ontdooien: direct door de backup authority, of door passkeys via de
+//   PendingAction-wachtrij (kind=Unfreeze, 24u timelock, 2-of-2 als er bij
+//   de initiatie twee of meer geldige passkeys waren).
+//
+// Tijdens een bevriezing zijn alle waardepaden en alle directe
+// bevoegdheidsuitbreidingen geblokkeerd (`!wallet.disarmed` op
+// execute/hunt/_via_session/add_passkey/remove_passkey/add_session_key/
+// add_allowed_program en op alle initiate_*/confirm/finalize_*). Wat alleen
+// versmalt blijft werken: cancel_action, remove_session_key,
+// remove_allowed_program, close_session/close_expired_session en de
+// recovery-instructies. Een voltooide recovery laat de wallet bevroren;
+// ontdooien blijft een expliciete stap.
+//
+// Ontdooien geeft de wallet terug in de staat van het bevriezen, niet
+// ruimer: een wachtende actie waarvan de timelock tijdens de bevriezing
+// verstreek, mag na het ontdooien niet direct uitvoerbaar zijn. Bij de
+// wachtrij-route is het slot vanzelf leeg (het ontdooien is zelf de
+// wachtende actie); unfreeze_via_backup_authority sluit een eventuele
+// wachtende actie mee.
+//
+// Replay: alle vijf verhogen wallet.action_nonce. Voor de passkey-routes is
+// dat het gewone C-1-patroon; voor de backup-routes (native Ed25519-signer,
+// zelf al beschermd door blockhash + duplicaatdetectie) maakt het bovendien
+// elke nog openstaande, niet-ingediende passkey-handtekening ongeldig - ook
+// een eerder ondertekende maar niet ingediende bevries-handtekening.
+
+#[derive(Accounts)]
+pub struct FreezeViaPasskey<'info> {
+    /// Bewust GEEN recovery_state- of disarmed-constraint: bevriezen is een
+    /// verdediging en mag nooit geblokkeerd worden door de staat waartegen
+    /// het beschermt (idempotent als de wallet al bevroren is).
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+}
+
+pub fn freeze_via_passkey(
+    ctx: Context<FreezeViaPasskey>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let payload = current_nonce.to_le_bytes();
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"freeze", &payload);
+    verify_passkey_signature_multi(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    ctx.accounts.wallet.disarmed = true;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct FreezeViaBackupAuthority<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(address = wallet.backup_authority @ SpankWalletError::InvalidBackupAuthoritySignature)]
+    pub backup_authority: Signer<'info>,
+}
+
+pub fn freeze_via_backup_authority(ctx: Context<FreezeViaBackupAuthority>) -> Result<()> {
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+    ctx.accounts.wallet.disarmed = true;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct UnfreezeViaBackupAuthority<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.disarmed @ SpankWalletError::WalletNotDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    /// CHECK: het singleton-PDA van de wachtrij; mag leeg zijn. Bestaat er
+    /// een PendingAction (eigenaar = dit programma + discriminator), dan
+    /// wordt die gesloten met dezelfde close-semantiek als cancel_action -
+    /// layout-onafhankelijk, zelfde controles.
+    #[account(
+        mut,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump,
+    )]
+    pub pending_action: UncheckedAccount<'info>,
+
+    /// Ontvangt de rent van een eventueel gesloten PendingAction.
+    #[account(
+        mut,
+        address = wallet.backup_authority @ SpankWalletError::InvalidBackupAuthoritySignature
+    )]
+    pub backup_authority: Signer<'info>,
+}
+
+pub fn unfreeze_via_backup_authority(ctx: Context<UnfreezeViaBackupAuthority>) -> Result<()> {
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    let pending_info = ctx.accounts.pending_action.to_account_info();
+    if pending_info.owner == &crate::ID {
+        let is_pending_action = {
+            let data = pending_info.try_borrow_data()?;
+            data.len() >= PendingAction::DISCRIMINATOR.len()
+                && &data[..PendingAction::DISCRIMINATOR.len()] == PendingAction::DISCRIMINATOR
+        };
+        require!(is_pending_action, SpankWalletError::NoPendingAction);
+        close_program_account(&pending_info, &ctx.accounts.backup_authority.to_account_info())?;
+    }
+
+    ctx.accounts.wallet.disarmed = false;
+    Ok(())
+}
+
+fn compute_unfreeze_commitment(wallet: &Pubkey) -> [u8; 32] {
+    let digest = hashv(&[wallet.as_ref(), b"pending_unfreeze"]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_ref());
+    out
+}
+
+#[derive(Accounts)]
+pub struct InitiateUnfreeze<'info> {
+    /// Enige initiate_* die juist een BEVROREN wallet eist - de expliciete
+    /// uitzondering op de `!wallet.disarmed`-constraint van de andere vier.
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = wallet.disarmed @ SpankWalletError::WalletNotDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        init,
+        payer = payer,
+        space = PendingAction::LEN,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+pub fn initiate_unfreeze(
+    ctx: Context<InitiateUnfreeze>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let payload = current_nonce.to_le_bytes();
+    let expected_challenge =
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"initiate_unfreeze", &payload);
+    let initiator_passkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    let valid_passkey_count = count_valid_passkeys(&ctx.accounts.passkeys.to_account_info());
+    let wallet_key = ctx.accounts.wallet.key();
+    let epoch = ctx.accounts.wallet.session_epoch;
+    let clock = Clock::get()?;
+
+    init_pending_action(
+        &mut ctx.accounts.pending_action,
+        wallet_key,
+        ctx.bumps.pending_action,
+        PENDING_ACTION_KIND_UNFREEZE,
+        clock.unix_timestamp,
+        epoch,
+        compute_unfreeze_commitment(&wallet_key),
+        initiator_passkey,
+        valid_passkey_count,
+        Pubkey::default(),
+    );
+
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct FinalizeUnfreeze<'info> {
+    #[account(
+        mut,
+        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
+        bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        constraint = wallet.disarmed @ SpankWalletError::WalletNotDisarmed,
+    )]
+    pub wallet: Account<'info, WalletAccount>,
+
+    #[account(
+        mut,
+        close = closer,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump = pending_action.bump,
+    )]
+    pub pending_action: Account<'info, PendingAction>,
+
+    /// CHECK: multi-passkey-set - zelfde patroon als overal elders.
+    #[account(
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
+
+    #[account(address = IX_SYSVAR_ID)]
+    /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub closer: Signer<'info>,
+}
+
+pub fn finalize_unfreeze(
+    ctx: Context<FinalizeUnfreeze>,
+    client_action_nonce: u64,
+    client_data_json: Vec<u8>,
+) -> Result<()> {
+    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+
+    let clock = Clock::get()?;
+    check_pending_action_finalizable(
+        &ctx.accounts.pending_action,
+        ctx.accounts.wallet.session_epoch,
+        clock.unix_timestamp,
+    )?;
+
+    // Domein-gescheiden commitment: een PendingAction van een ander kind kan
+    // hier structureel nooit matchen.
+    let wallet_key = ctx.accounts.wallet.key();
+    let commitment = compute_unfreeze_commitment(&wallet_key);
+    require!(
+        commitment == ctx.accounts.pending_action.action_commitment,
+        SpankWalletError::PendingActionCommitmentMismatch
+    );
+
+    let pending_action_key = ctx.accounts.pending_action.key();
+    let mut payload = Vec::with_capacity(8 + 32 + 32);
+    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    payload.extend_from_slice(pending_action_key.as_ref());
+    payload.extend_from_slice(&commitment);
+
+    let expected_challenge =
+        build_expected_challenge(&wallet_key, b"finalize_unfreeze", &payload);
+    let actual_pubkey = verify_passkey_signature_multi_get_pubkey(
+        &ctx.accounts.instructions_sysvar.to_account_info(),
+        &ctx.accounts.wallet.owner_passkey,
+        &ctx.accounts.passkeys.to_account_info(),
+        &expected_challenge,
+        &client_data_json,
+    )?;
+    check_pending_action_second_signer(&ctx.accounts.pending_action, &actual_pubkey)?;
+    consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    ctx.accounts.wallet.disarmed = false;
+    Ok(())
+}
+
 // spend-cap-mechanisme: PendingAction kind=ThresholdChange (initiate_threshold_change / finalize_threshold_change)
 //
 // STATUS.md sectie 118 stap 4 / sectie 123 stap 5. Vierde en laatste van
@@ -3399,7 +3720,9 @@ pub struct AddPasskey<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -3489,7 +3812,9 @@ pub struct RemovePasskey<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -3914,7 +4239,9 @@ pub struct AddSessionKey<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -4255,7 +4582,9 @@ pub struct ExecuteViaSession<'info> {
     #[account(
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -4357,7 +4686,9 @@ pub struct TransferTokenViaSession<'info> {
     #[account(
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop: geblokkeerd zolang de wallet bevroren is (zie freeze_via_passkey).
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 

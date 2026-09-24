@@ -14593,3 +14593,80 @@ client-/scriptzijdige lezers gecontroleerd moeten worden.
 - Volgorde voor de programma-upgrade: eerst een onafhankelijke review van
   de diff, daarna de RC-verificatie (zelfde discipline als bij het
   spend-cap-mechanisme), daarna pas een upgradevoorstel.
+
+## 156. Aantekening voor de volgende ontwerpronde: Alpenglow en tijd in slots (2026-09-24)
+
+Alleen een notitie, geen codewijziging.
+
+**Wat er verandert.** Solana's consensusupgrade Alpenglow staat sinds 2026-09-23 op het
+publieke testnet. Devnet en mainnet-beta volgen later; de officiële pagina noemt voor
+beide "Q3 2026", maar er is nog geen datum aangekondigd. Votor vervangt TowerBFT. Het
+rekenmodel, de transacties en het accountmodel blijven gelijk. De finaliteit gaat van
+~12,8 s naar ~150 ms. De slottijd wordt los daarvan in stappen verlaagd van 400 naar
+200 ms. Die verlaging loopt via SIMD-0525 al vóór Alpenglow; de bronnen spreken elkaar
+tegen over de precieze stappen en data. Daarom altijd live meten en nooit aannemen
+(zie §103).
+
+**Wat dat hier raakt (read-only geïnventariseerd):**
+- **Sessieduur, in slots.** `MAX_SESSION_DURATION_SLOTS = 1_512_000` (`state.rs:445`) en
+  `expiry_slot` op de sessiesleutel. Die grens blijft correct als slotaantal, maar de
+  werkelijke duur krimpt mee: bij 400 ms is het ~7 dagen, bij 200 ms ~3,5 dagen. Ook de
+  client heeft hier een fallback in slots: `FALLBACK_SLOT_MS_ESTIMATE = 400` in
+  `client/src/slotDuration.ts`. `estimateSlotMs()` meet wel live, maar de fallback en
+  alle "~N dagen"-teksten in de UI moeten herzien worden.
+- **Timelocks, spend-window en recovery-slot staan al in `unix_timestamp` en niet in
+  slots** (`timelock_started_at`, `apply_spend_window`, `window_started_at`). Hun duur
+  in werkelijke tijd blijft dus behouden. **Wel een nieuw aandachtspunt:** volgens de
+  officiële Alpenglow-pagina zet voortaan de leider zelf de tijdstempel van zijn blok,
+  "binnen een marge die afhangt van de verstreken slottijd sinds de parent", en niet
+  langer de stake-gewogen mediaan van de votes. Vóór een devnet-migratie nagaan hoe
+  groot die marge is, en of één leider een 72u-timelock of 24u-window merkbaar kan
+  verschuiven.
+
+**Te doen vóór een devnet-migratie (volgende ontwerpronde):** kiezen of de sessieduur
+in slots blijft (met een herberekende grens) of naar `unix_timestamp` gaat, na de
+controle op de leider-tijdstempel hierboven. Daarna UI- en doc-teksten en de fallback
+bijwerken. Hetzelfde punt staat voor OBP in de OBP-STATUS.md (§19, dispute-window).
+
+Bronnen: https://solana.com/upgrades/alpenglow ·
+https://en.cryptonomist.ch/2026/09/23/solana-finality-upgrade/ ·
+https://coinpaprika.com/news/solana-chases-150-millisecond-finality/
+
+## 157. Buiten spankwallet: oude OBP-devnet-programma's gesloten (2026-09-24)
+
+Ter vastlegging, omdat hiervoor de gedeelde fee-payer `G1qg` (`~/.config/solana/id.json`)
+is gebruikt. Spankwallet en active-defense zijn niet geraakt. Een kruiscontrole op het
+werkende bestand en de volledige git-geschiedenis van beide repo's vond geen enkele
+verwijzing naar de OBP-programma's, -mints of -houders; alleen G1qg zelf komt voor.
+
+Spoor A, na akkoord van Michel: de vijf oude OBP-programma's op devnet zijn gesloten met
+`solana program close`. Vóór elk commando is de authority gecontroleerd, en daarna het log.
+
+| Programma | Close-signature | Teruggewonnen (SOL) |
+|---|---|---|
+| `8M5ruFEhFfenHSkjsUcf2FaZFKKKamJEHWRCSfttNHi6` | `2SyTwmpw4qxqfwHoonDVJjw8nxNuWJrLKvJd8KnMUTBrcH7yerySYRtN9FS97XbQrDxh5cqEqvB8teYddm91NuiY` | 2,73318732 |
+| `9D2fU2g13Y55uvk6kLiHRknxd6rzu84nsHy6gnjTLqzt` | `2gXh5a52kEZZkj8eMBHAJ1PKkENu2nZtshj7ZUNaKYUvLDZnCoKVgbE5Axabs7f2o8SQFHSNJGxfdDJop6BW9viv` | 3,15726572 |
+| `6YLEj7ywUALhoUS5uNFkdp8docvyoEgYQ2ZoqF1GfgVF` | `5fNdnrbGTfat5DbynV6W3wSxBm2B26EvTUc17WE54zXTMzrPM6AE7m8Zc5iztymsszxmGFw9L6o4XJ8vjUkDBQSx` | 2,73318732 |
+| `5oUPUTuSdU3bWLtVTdcisu1BtgwNt29jH4fVTnfH2XiM` | `3kUksPMAdUuFX1nRCuGfPtDTMT6QFpMnDoZDF8Rs9871nPWwbWKHvtfQFdYKXr89wBS5mnqMxnc7RNQG65gzbHqe` | 3,17957708 |
+| `9sbzeTmpkAjEHkN9j4PoKcoZrf6ALhzfip28sZPtfdbN` | `26QZez1i2uDwDvre2TPuc4yVPPLCA3NtZXGP7C5HPzZDwDcmAgqmuJXweiH8ZnR3dpgWMpEP3LcsfgsrKo4Z8uQ5` | 2,54169164 |
+
+Totaal 14,34490908 SOL naar G1qg; het saldo sluit tot op de lamport, min 0,00004 SOL
+aan fees. Op deze adressen is geen enkele instructie van die builds meer aan te roepen,
+ook `pq_write_data` niet.
+
+**Blijvend vast (loader-semantiek, geen actie mogelijk):** de rest-rent op de
+programma-accounts zelf (4 × 0,00083312 SOL, plus 14,001038612 SOL die per vergissing
+naar `5oUPUTu…` was gestuurd), 0,67 SOL in accounts die van de programma's waren, en de
+vault-tokens. `Close` maakt alleen de ProgramData leeg. Geen enkele loader-instructie
+haalt lamports van een programma-account, en accounts van een gesloten programma kan
+niemand meer debiteren. Alles is devnet.
+
+**Bijvangst voor active-defense:** buffer `3zLEuPV7GvS4zhjYm3PnLPYqGnVkmUisQhE1HeNh3N1s`
+(1,47377304 SOL, authority G1qg), die §137 als "restant van iets anders" noteerde, bevat
+de active-defense-code van 2026-08-24 (`CreatePoisonToken`, `MarkMalicious`). Die buffer
+kan het canonieke `FzeAZm…` niet upgraden, want de authority verschilt. Hij is bewust
+níet in spoor A meegenomen; sluiten is een aparte beslissing.
+
+Vervolg (OBP): de mint-authorities intrekken (spoor C) en de herbouw volgens het
+niet-publieke herstelplan (buiten de repo). De details staan niet in deze repo en niet
+in de OBP-repo.

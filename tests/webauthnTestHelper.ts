@@ -144,7 +144,12 @@ export function signTestChallenge(
   passkey: TestPasskey,
   expectedChallenge: Buffer,
   authenticatorFlags: number = AUTHENTICATOR_FLAGS_UP_UV,
-  webauthnType: string = "webauthn.get"
+  webauthnType: string = "webauthn.get",
+  // Optioneel: extra clientDataJSON-velden, om de lengte van een echte
+  // browser na te bootsen (Chrome voegt o.a. "other_keys_can_be_added_here"
+  // toe) - nodig voor realistische transactiegroottemetingen. Standaard
+  // leeg: bestaande tests ongewijzigd.
+  extraClientDataFields: Record<string, unknown> = {}
 ): SignedTestChallenge {
   const challengeB64url = base64url(expectedChallenge);
   const clientData = {
@@ -152,6 +157,7 @@ export function signTestChallenge(
     challenge: challengeB64url,
     origin: "https://spankwallet-tests.local",
     crossOrigin: false,
+    ...extraClientDataFields,
   };
   const clientDataJSON = Buffer.from(JSON.stringify(clientData), "utf-8");
   const clientDataHash = createHash("sha256").update(clientDataJSON).digest();

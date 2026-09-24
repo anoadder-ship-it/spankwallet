@@ -43,6 +43,7 @@ import {
   advanceOnChainClockPast,
   advanceSlotPast,
   fetchActionNonce,
+  actionNonceOffset,
   nonceLeBytes,
   TestPasskey,
 } from "./webauthnTestHelper";
@@ -3700,6 +3701,1055 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       // bijdrage al), niet dat hunt zijn eigen, losse teller heeft.
       const spendWindow = await program.account.spendWindow.fetch(spendWindowPda);
       assert.equal(spendWindow.spentLamportsThisWindow.toString(), executeAmount.toString());
+    });
+  });
+
+  // ================= Noodstop (freeze/unfreeze) =================
+  //
+  // Zelfde per-bestand-onafhankelijkheidsconventie als hierboven. Bewust in
+  // deze suite (fast timelock): ontdooien via de wachtrij vraagt de
+  // verkorte testtimelock, en de blokkade-tests hergebruiken de helpers
+  // voor alle vier de wachtrijsoorten.
+
+  // Chrome voegt dit veld toe aan clientDataJSON; gebruikt voor een
+  // realistische transactiegroottemeting.
+  // Ruim boven het rent-minimum van een nieuw ontvangeraccount: zonder
+  // bevriezing zou elke SOL-uitgave hieronder echt slagen, zodat een
+  // WalletDisarmed-weigering niet toevallig samenvalt met een rent-fout.
+  const NOODSTOP_SPEND = new BN(anchor.web3.LAMPORTS_PER_SOL / 100);
+
+  const CHROME_LIKE_CLIENT_DATA_EXTRA = {
+    other_keys_can_be_added_here:
+      "do not compare clientDataJSON against a template. See https://goo.gl/yabPex",
+  };
+
+  async function passkeyIxs(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    domain: string,
+    payloadAfterNonce: Buffer,
+    nonce: bigint,
+    extraClientData: Record<string, unknown> = {}
+  ) {
+    const payload = Buffer.concat([nonceLeBytes(nonce), payloadAfterNonce]);
+    const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, domain, payload);
+    const signed = signTestChallenge(signingPasskey, expectedChallenge, undefined, undefined, extraClientData);
+    const secp256r1Ix = buildSecp256r1Instruction(
+      signingPasskey.compressedPublicKey,
+      signed.signedMessage,
+      signed.rawSignature
+    );
+    return { secp256r1Ix, clientDataJSON: signed.clientDataJSON };
+  }
+
+  async function buildFreezeViaPasskeyIxs(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    passkeysPda: PublicKey,
+    nonceOverride?: bigint
+  ) {
+    const nonce = nonceOverride ?? (await fetchActionNonce(provider.connection, walletPda));
+    const { secp256r1Ix, clientDataJSON } = await passkeyIxs(signingPasskey, walletPda, "freeze", Buffer.alloc(0), nonce);
+    const freezeIx = await program.methods
+      .freezeViaPasskey(new BN(nonce.toString()), clientDataJSON)
+      .accounts({ wallet: walletPda, passkeys: passkeysPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .instruction();
+    return [secp256r1Ix, freezeIx];
+  }
+
+  async function callFreezeViaPasskey(signingPasskey: TestPasskey, walletPda: PublicKey, passkeysPda: PublicKey) {
+    const ixs = await buildFreezeViaPasskeyIxs(signingPasskey, walletPda, passkeysPda);
+    return provider.sendAndConfirm(new anchor.web3.Transaction().add(...ixs));
+  }
+
+  async function callFreezeViaBackup(backupAuthority: Keypair, walletPda: PublicKey) {
+    return program.methods
+      .freezeViaBackupAuthority()
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+  }
+
+  async function buildUnfreezeViaBackupIx(backupAuthority: Keypair, walletPda: PublicKey, pendingActionPda: PublicKey) {
+    return program.methods
+      .unfreezeViaBackupAuthority()
+      .accounts({ wallet: walletPda, pendingAction: pendingActionPda, backupAuthority: backupAuthority.publicKey })
+      .instruction();
+  }
+
+  async function callUnfreezeViaBackup(backupAuthority: Keypair, walletPda: PublicKey, pendingActionPda: PublicKey) {
+    const ix = await buildUnfreezeViaBackupIx(backupAuthority, walletPda, pendingActionPda);
+    return provider.sendAndConfirm(new anchor.web3.Transaction().add(ix), [backupAuthority]);
+  }
+
+  async function callInitiateUnfreeze(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey
+  ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const { secp256r1Ix, clientDataJSON } = await passkeyIxs(
+      signingPasskey,
+      walletPda,
+      "initiate_unfreeze",
+      Buffer.alloc(0),
+      nonce
+    );
+    return program.methods
+      .initiateUnfreeze(new BN(nonce.toString()), clientDataJSON)
+      .accounts({
+        wallet: walletPda,
+        pendingAction: pendingActionPda,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        payer: provider.wallet.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .preInstructions([secp256r1Ix])
+      .rpc();
+  }
+
+  async function buildFinalizeUnfreezeIxs(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey,
+    nonce: bigint,
+    extraClientData: Record<string, unknown> = {}
+  ) {
+    const pending = await program.account.pendingAction.fetch(pendingActionPda);
+    const commitment = Buffer.from(pending.actionCommitment);
+    const { secp256r1Ix, clientDataJSON } = await passkeyIxs(
+      signingPasskey,
+      walletPda,
+      "finalize_unfreeze",
+      Buffer.concat([pendingActionPda.toBuffer(), commitment]),
+      nonce,
+      extraClientData
+    );
+    const finalizeIx = await program.methods
+      .finalizeUnfreeze(new BN(nonce.toString()), clientDataJSON)
+      .accounts({
+        wallet: walletPda,
+        pendingAction: pendingActionPda,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        closer: provider.wallet.publicKey,
+      })
+      .instruction();
+    return [secp256r1Ix, finalizeIx];
+  }
+
+  async function callFinalizeUnfreeze(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey
+  ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const ixs = await buildFinalizeUnfreezeIxs(signingPasskey, walletPda, pendingActionPda, passkeysPda, nonce);
+    return provider.sendAndConfirm(new anchor.web3.Transaction().add(...ixs));
+  }
+
+  async function buildRemovePasskeyIxs(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    passkeysPda: PublicKey,
+    targetPasskey: Buffer,
+    nonce: bigint,
+    extraClientData: Record<string, unknown> = {}
+  ) {
+    const { secp256r1Ix, clientDataJSON } = await passkeyIxs(
+      signingPasskey,
+      walletPda,
+      "remove_passkey",
+      targetPasskey,
+      nonce,
+      extraClientData
+    );
+    const removeIx = await program.methods
+      .removePasskey(Array.from(targetPasskey), new BN(nonce.toString()), clientDataJSON)
+      .accounts({ wallet: walletPda, passkeys: passkeysPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .instruction();
+    return [secp256r1Ix, removeIx];
+  }
+
+  async function callRemovePasskey(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    passkeysPda: PublicKey,
+    targetPasskey: Buffer
+  ) {
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const ixs = await buildRemovePasskeyIxs(signingPasskey, walletPda, passkeysPda, targetPasskey, nonce);
+    return provider.sendAndConfirm(new anchor.web3.Transaction().add(...ixs));
+  }
+
+  /// Sessie met can_execute en/of can_transfer_token (ruime caps), voor de
+  /// _via_session-blokkadetests.
+  async function callAddSpendSessionKey(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    passkeysPda: PublicKey,
+    policyPda: PublicKey,
+    sessionKey: PublicKey,
+    opts: { canExecute: boolean; tokenMint?: PublicKey; expirySlots?: number }
+  ) {
+    const canTransferToken = opts.tokenMint !== undefined;
+    const tokenMint = opts.tokenMint ?? PublicKey.default;
+    const expirySlot = (await provider.connection.getSlot()) + (opts.expirySlots ?? 100_000);
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const expirySlotBuf = Buffer.alloc(8);
+    expirySlotBuf.writeBigUInt64LE(BigInt(expirySlot), 0);
+    const countBuf = Buffer.alloc(4);
+    const zero = new BN(0);
+    const tokenCap = canTransferToken ? MAX_U64 : zero;
+    const payloadAfterNonce = Buffer.concat([
+      sessionKey.toBuffer(),
+      expirySlotBuf,
+      Buffer.from([opts.canExecute ? 1 : 0, canTransferToken ? 1 : 0, 0]),
+      countBuf,
+      MAX_U64.toArrayLike(Buffer, "le", 8),
+      MAX_U64.toArrayLike(Buffer, "le", 8),
+      tokenMint.toBuffer(),
+      tokenCap.toArrayLike(Buffer, "le", 8),
+      tokenCap.toArrayLike(Buffer, "le", 8),
+    ]);
+    const { secp256r1Ix, clientDataJSON } = await passkeyIxs(
+      signingPasskey,
+      walletPda,
+      "add_session_key",
+      payloadAfterNonce,
+      nonce
+    );
+    return program.methods
+      .addSessionKey(
+        sessionKey,
+        new BN(expirySlot),
+        opts.canExecute,
+        canTransferToken,
+        false,
+        [],
+        MAX_U64,
+        MAX_U64,
+        tokenMint,
+        tokenCap,
+        tokenCap,
+        new BN(nonce.toString()),
+        clientDataJSON
+      )
+      .accounts({
+        wallet: walletPda,
+        session: deriveSessionPda(walletPda, sessionKey),
+        payer: provider.wallet.publicKey,
+        policy: policyPda,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      })
+      .preInstructions([secp256r1Ix])
+      .rpc();
+  }
+
+  async function callCancelRecovery(signingPasskey: TestPasskey, walletPda: PublicKey, passkeysPda: PublicKey) {
+    const wallet = await program.account.walletAccount.fetch(walletPda);
+    const recovery = wallet.recoveryState!;
+    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const initiatedAt = Buffer.alloc(8);
+    initiatedAt.writeBigInt64LE(BigInt(recovery.initiatedAt.toString()), 0);
+    const { secp256r1Ix, clientDataJSON } = await passkeyIxs(
+      signingPasskey,
+      walletPda,
+      "cancel_recovery",
+      Buffer.concat([initiatedAt, Buffer.from(recovery.newOwnerPasskey)]),
+      nonce
+    );
+    return program.methods
+      .cancelRecovery(new BN(nonce.toString()), clientDataJSON)
+      .accounts({ wallet: walletPda, passkeys: passkeysPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .preInstructions([secp256r1Ix])
+      .rpc();
+  }
+
+  type AccountSnapshot = Map<string, string>;
+
+  /// Volledige toestand (lamports, eigenaar, ruwe data) van de gegeven
+  /// accounts - bewijs dat een geweigerde aanroep aantoonbaar niets
+  /// veranderde. Op "processed", dezelfde commitment als de provider.
+  async function snapshot(addresses: PublicKey[]): Promise<AccountSnapshot> {
+    const out: AccountSnapshot = new Map();
+    for (const a of addresses) {
+      const info = await provider.connection.getAccountInfo(a, "processed");
+      out.set(
+        a.toBase58(),
+        info === null ? "null" : `${info.lamports}|${info.owner.toBase58()}|${Buffer.from(info.data).toString("base64")}`
+      );
+    }
+    return out;
+  }
+
+  function assertSnapshotsEqual(before: AccountSnapshot, after: AccountSnapshot, label: string) {
+    for (const [k, v] of before) {
+      assert.equal(after.get(k), v, `${label}: account ${k} is veranderd`);
+    }
+  }
+
+  async function expectBlockedAndUnchanged(promise: Promise<unknown>, watched: PublicKey[], label: string) {
+    const before = await snapshot(watched);
+    await expectAnchorError(promise, "WalletDisarmed");
+    assertSnapshotsEqual(before, await snapshot(watched), label);
+  }
+
+  describe("Noodstop: bevriezen blokkeert alle waardepaden en directe bevoegdheidsuitbreidingen", () => {
+    // Elke test: bevries, roep de instructie aan met een verder geldige
+    // handtekening, verwacht WalletDisarmed, en bewijs dat de relevante
+    // accounts byte voor byte onveranderd zijn.
+
+    it("execute", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const recipient = Keypair.generate().publicKey;
+      await expectBlockedAndUnchanged(
+        callExecute(w.passkey, w.walletPda, w.vaultPda, w.passkeysPda, recipient, NOODSTOP_SPEND),
+        [w.walletPda, w.vaultPda, recipient],
+        "execute"
+      );
+    });
+
+    it("hunt", async () => {
+      const w = await createWallet();
+      const { mint, tokenAccount } = await setupSpamTokenAccount(w.vaultPda, 5);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callHunt(w.passkey, w.walletPda, w.vaultPda, w.passkeysPda, tokenAccount.publicKey, mint.publicKey, provider.wallet.publicKey),
+        [w.walletPda, w.vaultPda, tokenAccount.publicKey, mint.publicKey],
+        "hunt"
+      );
+    });
+
+    it("execute_via_session", async () => {
+      const w = await createWallet();
+      const session = Keypair.generate();
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, { canExecute: true });
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const recipient = Keypair.generate().publicKey;
+      const sessionPda = deriveSessionPda(w.walletPda, session.publicKey);
+      await expectBlockedAndUnchanged(
+        program.methods
+          .executeViaSession(NOODSTOP_SPEND)
+          .accounts({ wallet: w.walletPda, vault: w.vaultPda, recipient, session: sessionPda, sessionKey: session.publicKey })
+          .signers([session])
+          .rpc(),
+        [w.walletPda, w.vaultPda, sessionPda, recipient],
+        "execute_via_session"
+      );
+    });
+
+    it("transfer_token_via_session", async () => {
+      const w = await createWallet();
+      const recipientOwner = Keypair.generate().publicKey;
+      const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(w.vaultPda, recipientOwner, 1000);
+      const session = Keypair.generate();
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, {
+        canExecute: false,
+        tokenMint: mint.publicKey,
+      });
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const sessionPda = deriveSessionPda(w.walletPda, session.publicKey);
+      await expectBlockedAndUnchanged(
+        program.methods
+          .transferTokenViaSession(new BN(10))
+          .accounts({
+            wallet: w.walletPda,
+            vault: w.vaultPda,
+            vaultTokenAccount: vaultTokenAccount.publicKey,
+            recipientTokenAccount: recipientTokenAccount.publicKey,
+            tokenMint: mint.publicKey,
+            session: sessionPda,
+            sessionKey: session.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([session])
+          .rpc(),
+        [w.walletPda, vaultTokenAccount.publicKey, recipientTokenAccount.publicKey, sessionPda],
+        "transfer_token_via_session"
+      );
+    });
+
+    it("initiate_withdrawal", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callInitiateWithdrawal(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, Keypair.generate().publicKey, NOODSTOP_SPEND),
+        [w.walletPda, w.pendingActionPda],
+        "initiate_withdrawal"
+      );
+    });
+
+    it("initiate_token_transfer", async () => {
+      const w = await createWallet();
+      const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(w.vaultPda, Keypair.generate().publicKey, 1000);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callInitiateTokenTransfer(
+          w.passkey,
+          w.walletPda,
+          w.pendingActionPda,
+          w.passkeysPda,
+          recipientTokenAccount.publicKey,
+          mint.publicKey,
+          new BN(10),
+          vaultTokenAccount.publicKey
+        ),
+        [w.walletPda, w.pendingActionPda],
+        "initiate_token_transfer"
+      );
+    });
+
+    it("initiate_advanced_action", async () => {
+      const w = await createWallet();
+      await callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callInitiateAdvancedAction(
+          w.passkey,
+          w.walletPda,
+          w.vaultPda,
+          w.pendingActionPda,
+          w.policyPda,
+          w.passkeysPda,
+          SystemProgram.programId,
+          [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+          assignIx.data,
+          [target]
+        ),
+        [w.walletPda, w.pendingActionPda, target.publicKey],
+        "initiate_advanced_action"
+      );
+    });
+
+    it("initiate_threshold_change", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callInitiateThresholdChange(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, new BN(1000), new BN(10000)),
+        [w.walletPda, w.pendingActionPda],
+        "initiate_threshold_change"
+      );
+    });
+
+    it("initiate_advanced_action_via_session", async () => {
+      const w = await createWallet();
+      await callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      const session = Keypair.generate();
+      await callAddAdvancedSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callInitiateAdvancedActionViaSession(
+          session,
+          w.walletPda,
+          w.vaultPda,
+          w.pendingActionPda,
+          w.policyPda,
+          w.passkeysPda,
+          SystemProgram.programId,
+          [{ pubkey: target.publicKey, isWritable: true, isSigner: true }],
+          assignIx.data,
+          [target]
+        ),
+        [w.walletPda, w.pendingActionPda, target.publicKey],
+        "initiate_advanced_action_via_session"
+      );
+    });
+
+    it("confirm_pending_action", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      await callFreezeViaPasskey(s.passkey, s.walletPda, s.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda),
+        [s.walletPda, s.pendingActionPda],
+        "confirm_pending_action"
+      );
+    });
+
+    it("finalize_withdrawal (ook na verstreken timelock)", async () => {
+      const w = await createWallet();
+      const recipient = Keypair.generate().publicKey;
+      await callInitiateWithdrawal(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, recipient, NOODSTOP_SPEND);
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callFinalizeWithdrawal(w.passkey, w.walletPda, w.vaultPda, w.pendingActionPda, w.passkeysPda, recipient, NOODSTOP_SPEND),
+        [w.walletPda, w.vaultPda, w.pendingActionPda, recipient],
+        "finalize_withdrawal"
+      );
+    });
+
+    it("finalize_token_transfer (ook na verstreken timelock)", async () => {
+      const w = await createWallet();
+      const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(w.vaultPda, Keypair.generate().publicKey, 1000);
+      await callInitiateTokenTransfer(
+        w.passkey,
+        w.walletPda,
+        w.pendingActionPda,
+        w.passkeysPda,
+        recipientTokenAccount.publicKey,
+        mint.publicKey,
+        new BN(10),
+        vaultTokenAccount.publicKey
+      );
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callFinalizeTokenTransfer(
+          w.passkey,
+          w.walletPda,
+          w.vaultPda,
+          w.pendingActionPda,
+          w.passkeysPda,
+          vaultTokenAccount.publicKey,
+          recipientTokenAccount.publicKey,
+          mint.publicKey,
+          new BN(10)
+        ),
+        [w.walletPda, w.pendingActionPda, vaultTokenAccount.publicKey, recipientTokenAccount.publicKey],
+        "finalize_token_transfer"
+      );
+    });
+
+    it("finalize_advanced_action (ook na verstreken timelock)", async () => {
+      const w = await createWallet();
+      await callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      const { target, assignIx } = await setupAssignCpiFixture();
+      const remaining: RemainingAccountSpec[] = [{ pubkey: target.publicKey, isWritable: true, isSigner: true }];
+      await callInitiateAdvancedAction(
+        w.passkey,
+        w.walletPda,
+        w.vaultPda,
+        w.pendingActionPda,
+        w.policyPda,
+        w.passkeysPda,
+        SystemProgram.programId,
+        remaining,
+        assignIx.data,
+        [target]
+      );
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callFinalizeAdvancedAction(
+          w.passkey,
+          w.walletPda,
+          w.vaultPda,
+          w.pendingActionPda,
+          w.policyPda,
+          w.passkeysPda,
+          SystemProgram.programId,
+          remaining,
+          assignIx.data,
+          [target]
+        ),
+        [w.walletPda, w.pendingActionPda, target.publicKey],
+        "finalize_advanced_action"
+      );
+    });
+
+    it("finalize_threshold_change (ook na verstreken timelock)", async () => {
+      const w = await createWallet();
+      await callInitiateThresholdChange(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, new BN(1000), new BN(10000));
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callFinalizeThresholdChange(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, w.spendWindowPda, new BN(1000), new BN(10000)),
+        [w.walletPda, w.pendingActionPda, w.spendWindowPda],
+        "finalize_threshold_change"
+      );
+    });
+
+    it("add_passkey", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, generateTestPasskey().compressedPublicKey),
+        [w.walletPda, w.passkeysPda],
+        "add_passkey"
+      );
+    });
+
+    it("remove_passkey", async () => {
+      const w = await createWallet();
+      const second = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callRemovePasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey),
+        [w.walletPda, w.passkeysPda],
+        "remove_passkey"
+      );
+    });
+
+    it("add_session_key", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const session = Keypair.generate();
+      await expectBlockedAndUnchanged(
+        callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, { canExecute: true }),
+        [w.walletPda, deriveSessionPda(w.walletPda, session.publicKey)],
+        "add_session_key"
+      );
+    });
+
+    it("add_allowed_program", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectBlockedAndUnchanged(
+        callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId),
+        [w.walletPda, w.policyPda],
+        "add_allowed_program"
+      );
+    });
+  });
+
+  describe("Noodstop: wat tijdens een bevriezing WEL blijft werken (versmallend of defensief)", () => {
+    it("freeze is idempotent (opnieuw bevriezen slaagt, blijft bevroren)", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await callFreezeViaBackup(w.backupAuthority, w.walletPda);
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+    });
+
+    it("cancel_action sluit een wachtende actie", async () => {
+      const w = await createWallet();
+      await callInitiateWithdrawal(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, Keypair.generate().publicKey, NOODSTOP_SPEND);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await callCancelAction(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      assert.isNull(await provider.connection.getAccountInfo(w.pendingActionPda));
+    });
+
+    it("remove_session_key, close_session en close_expired_session", async () => {
+      const w = await createWallet();
+      const a = Keypair.generate();
+      const b = Keypair.generate();
+      const c = Keypair.generate();
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, a.publicKey, { canExecute: true });
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, b.publicKey, { canExecute: true });
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, c.publicKey, { canExecute: true, expirySlots: 3 });
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+
+      await provider.sendAndConfirm(await buildRemoveSessionKeyTx(w.passkey, w.walletPda, w.passkeysPda, a.publicKey));
+      assert.isNull(await provider.connection.getAccountInfo(deriveSessionPda(w.walletPda, a.publicKey)));
+
+      await program.methods
+        .closeSession()
+        .accounts({ wallet: w.walletPda, session: deriveSessionPda(w.walletPda, b.publicKey), sessionKey: b.publicKey })
+        .signers([b])
+        .rpc();
+      assert.isNull(await provider.connection.getAccountInfo(deriveSessionPda(w.walletPda, b.publicKey)));
+
+      const cSession = await program.account.sessionKeyAccount.fetch(deriveSessionPda(w.walletPda, c.publicKey));
+      await advanceSlotPast(provider.connection, payerKeypair(), cSession.expirySlot.toNumber());
+      await program.methods
+        .closeExpiredSession(c.publicKey)
+        .accounts({ wallet: w.walletPda, session: deriveSessionPda(w.walletPda, c.publicKey), closer: provider.wallet.publicKey })
+        .rpc();
+      assert.isNull(await provider.connection.getAccountInfo(deriveSessionPda(w.walletPda, c.publicKey)));
+    });
+
+    it("remove_allowed_program", async () => {
+      const w = await createWallet();
+      await callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await callRemoveAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      const policy = await program.account.policyAccount.fetch(w.policyPda);
+      assert.equal(policy.count, 0);
+    });
+
+    it("migrate_wallet_account wordt niet door de noodstop geblokkeerd (faalt alleen op 'al gemigreerd')", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await expectAnchorError(
+        program.methods
+          .migrateWalletAccount()
+          .accounts({ wallet: w.walletPda, payer: provider.wallet.publicKey, systemProgram: SystemProgram.programId })
+          .rpc(),
+        "WalletAccountAlreadyMigrated"
+      );
+    });
+
+    it("recovery: initiate, cancel en finalize werken; na finalize_recovery blijft de wallet BEVROREN", async () => {
+      const w = await createWallet(3);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+
+      await callInitiateRecovery(w.backupAuthority, w.walletPda, dummyNewOwnerPasskey());
+      await callCancelRecovery(w.passkey, w.walletPda, w.passkeysPda);
+      assert.isNull((await program.account.walletAccount.fetch(w.walletPda)).recoveryState);
+
+      await callInitiateRecovery(w.backupAuthority, w.walletPda, dummyNewOwnerPasskey());
+      const afterInitiate = await program.account.walletAccount.fetch(w.walletPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), afterInitiate.recoveryState!.initiatedAt.toNumber() + 3);
+      await callFinalizeRecovery(w.walletPda, w.passkeysPda);
+      const after = await program.account.walletAccount.fetch(w.walletPda);
+      assert.isNull(after.recoveryState);
+      assert.isTrue(after.disarmed, "een voltooide recovery mag de wallet niet impliciet ontdooien");
+    });
+  });
+
+  describe("Noodstop: bevriezen en ontdooien", () => {
+    it("bevriezen door passkey en door backup authority slaagt; een sessiesleutel kan niet bevriezen", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+
+      await callFreezeViaBackup(w.backupAuthority, w.walletPda);
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+
+      // Een sessiesleutel als "backup authority" wordt geweigerd, en zonder
+      // passkey-precompile faalt de passkey-route.
+      const session = Keypair.generate();
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, { canExecute: true });
+      await expectAnchorError(
+        program.methods
+          .freezeViaBackupAuthority()
+          .accounts({ wallet: w.walletPda, backupAuthority: session.publicKey })
+          .signers([session])
+          .rpc(),
+        "InvalidBackupAuthoritySignature"
+      );
+      const nonce = await fetchActionNonce(provider.connection, w.walletPda);
+      await expectAnchorError(
+        program.methods
+          .freezeViaPasskey(new BN(nonce.toString()), Buffer.from("{}"))
+          .accounts({ wallet: w.walletPda, passkeys: w.passkeysPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+          .rpc(),
+        "InvalidPasskeySignature"
+      );
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+    });
+
+    it("ontdooien via backup authority: direct, en sluit een wachtende actie mee (rent naar de backup authority)", async () => {
+      const w = await createWallet();
+      const recipient = Keypair.generate().publicKey;
+      await callInitiateWithdrawal(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, recipient, NOODSTOP_SPEND);
+      const pendingLamports = (await provider.connection.getAccountInfo(w.pendingActionPda, "processed"))!.lamports;
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const backupBefore = await provider.connection.getBalance(w.backupAuthority.publicKey, "processed");
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      assert.isNull(await provider.connection.getAccountInfo(w.pendingActionPda, "processed"), "de wachtende actie had mee gesloten moeten zijn");
+      assert.equal(await provider.connection.getBalance(w.backupAuthority.publicKey, "processed"), backupBefore + pendingLamports);
+    });
+
+    it("ontdooien kan alleen als de wallet bevroren is (WalletNotDisarmed)", async () => {
+      const w = await createWallet();
+      await expectAnchorError(callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda), "WalletNotDisarmed");
+      await expectAnchorError(callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda), "WalletNotDisarmed");
+    });
+
+    it("de nonce stijgt bij alle vijf de noodstop-instructies", async () => {
+      // Op "processed" (commitment van de provider), niet via
+      // fetchActionNonce ("confirmed"): die kan direct na een bevestigde
+      // transactie nog de vorige waarde tonen, en hier telt elke stap.
+      const nonceProcessed = async (walletPda: PublicKey) => {
+        const info = await provider.connection.getAccountInfo(walletPda, "processed");
+        return info!.data.readBigUInt64LE(actionNonceOffset(info!.data));
+      };
+      const w = await createWallet();
+      const n0 = await nonceProcessed(w.walletPda);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const n1 = await nonceProcessed(w.walletPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      const n2 = await nonceProcessed(w.walletPda);
+      await callFreezeViaBackup(w.backupAuthority, w.walletPda);
+      const n3 = await nonceProcessed(w.walletPda);
+      await callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const n4 = await nonceProcessed(w.walletPda);
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await callFinalizeUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const n5 = await nonceProcessed(w.walletPda);
+      assert.deepEqual([n1 - n0, n2 - n1, n3 - n2, n4 - n3, n5 - n4], [1n, 1n, 1n, 1n, 1n]);
+    });
+
+    it("REPLAY (a): dezelfde bevries-instructies na ontdooien opnieuw indienen faalt, de wallet blijft ontdooid", async () => {
+      const w = await createWallet();
+      const freezeIxs = await buildFreezeViaPasskeyIxs(w.passkey, w.walletPda, w.passkeysPda);
+      await provider.sendAndConfirm(new anchor.web3.Transaction().add(...freezeIxs));
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await expectAnchorError(provider.sendAndConfirm(new anchor.web3.Transaction().add(...freezeIxs)), "StaleActionNonce");
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+    });
+
+    it("REPLAY (b): een eerder ondertekende, NIET ingediende bevries-handtekening faalt na bevriezen + ontdooien via backup", async () => {
+      const w = await createWallet();
+      const unsubmitted = await buildFreezeViaPasskeyIxs(w.passkey, w.walletPda, w.passkeysPda);
+      await callFreezeViaBackup(w.backupAuthority, w.walletPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await expectAnchorError(provider.sendAndConfirm(new anchor.web3.Transaction().add(...unsubmitted)), "StaleActionNonce");
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+    });
+
+    it("REPLAY (c): exact dezelfde ondertekende backup-ontdooitransactie opnieuw indienen na opnieuw bevriezen wordt geweigerd", async () => {
+      const w = await createWallet();
+      await callFreezeViaBackup(w.backupAuthority, w.walletPda);
+      const ix = await buildUnfreezeViaBackupIx(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      const tx = new anchor.web3.Transaction().add(ix);
+      tx.feePayer = provider.wallet.publicKey;
+      tx.recentBlockhash = (await provider.connection.getLatestBlockhash()).blockhash;
+      tx.partialSign(w.backupAuthority);
+      const signed = await provider.wallet.signTransaction(tx);
+      const raw = signed.serialize();
+      const sig = await provider.connection.sendRawTransaction(raw);
+      await provider.connection.confirmTransaction(sig, "confirmed");
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      let errString = "";
+      try {
+        const sig2 = await provider.connection.sendRawTransaction(raw);
+        await provider.connection.confirmTransaction(sig2, "confirmed");
+      } catch (err) {
+        errString = String(err);
+      }
+      assert.match(errString, /already been processed|AlreadyProcessed|Blockhash not found/i, "verwachtte een runtime-weigering, kreeg: " + errString);
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed, "de wallet moet bevroren blijven");
+    });
+
+    it("STAAT NA ONTDOOIEN = STAAT BIJ BEVRIEZEN: na een reeks geweigerde pogingen is alles byte voor byte gelijk (behalve action_nonce)", async () => {
+      const w = await createWallet();
+      const second = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey);
+      await callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      const session = Keypair.generate();
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, { canExecute: true });
+      const sessionPda = deriveSessionPda(w.walletPda, session.publicKey);
+
+      // WalletAccount ruw, met alleen de 8 bytes van action_nonce gemaskeerd.
+      const walletRawMasked = async () => {
+        const info = (await provider.connection.getAccountInfo(w.walletPda, "processed"))!;
+        const data = Buffer.from(info.data);
+        data.fill(0, actionNonceOffset(data), actionNonceOffset(data) + 8);
+        return `${info.lamports}|${info.owner.toBase58()}|${data.toString("base64")}`;
+      };
+      const walletBefore = await walletRawMasked();
+      const rawBefore = await snapshot([w.vaultPda, w.passkeysPda, w.policyPda, sessionPda, w.pendingActionPda]);
+
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      // Sequentieel (thunks): elke poging haalt de actuele nonce op en is
+      // op zichzelf geldig ondertekend.
+      const attempts: Array<() => Promise<unknown>> = [
+        () => callExecute(w.passkey, w.walletPda, w.vaultPda, w.passkeysPda, Keypair.generate().publicKey, NOODSTOP_SPEND),
+        () => callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, generateTestPasskey().compressedPublicKey),
+        () => callRemovePasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey),
+        () => callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, TOKEN_PROGRAM_ID),
+        () => callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, Keypair.generate().publicKey, { canExecute: true }),
+        () => program.methods
+          .executeViaSession(NOODSTOP_SPEND)
+          .accounts({ wallet: w.walletPda, vault: w.vaultPda, recipient: Keypair.generate().publicKey, session: sessionPda, sessionKey: session.publicKey })
+          .signers([session])
+          .rpc(),
+        () => callInitiateWithdrawal(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, Keypair.generate().publicKey, NOODSTOP_SPEND),
+      ];
+      for (const attempt of attempts) {
+        await expectAnchorError(attempt(), "WalletDisarmed");
+      }
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+
+      assert.equal(await walletRawMasked(), walletBefore, "WalletAccount moet (op action_nonce na) byte voor byte identiek zijn");
+      assertSnapshotsEqual(rawBefore, await snapshot([w.vaultPda, w.passkeysPda, w.policyPda, sessionPda, w.pendingActionPda]), "staat na ontdooien");
+    });
+
+    it("ATOMISCH (backup-route): ontdooien + remove_passkey in één transactie, met realistische (Chrome-lengte) clientDataJSON, binnen 1232 bytes zonder ALT", async () => {
+      const w = await createWallet();
+      const toRemove = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, toRemove.compressedPublicKey);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+
+      const nonceAfterUnfreeze = (await fetchActionNonce(provider.connection, w.walletPda)) + 1n;
+      const unfreezeIx = await buildUnfreezeViaBackupIx(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      const removeIxs = await buildRemovePasskeyIxs(
+        w.passkey,
+        w.walletPda,
+        w.passkeysPda,
+        toRemove.compressedPublicKey,
+        nonceAfterUnfreeze,
+        CHROME_LIKE_CLIENT_DATA_EXTRA
+      );
+      const tx = new anchor.web3.Transaction().add(unfreezeIx, ...removeIxs);
+      tx.feePayer = provider.wallet.publicKey;
+      tx.recentBlockhash = (await provider.connection.getLatestBlockhash()).blockhash;
+      tx.partialSign(w.backupAuthority);
+      const signed = await provider.wallet.signTransaction(tx);
+      const size = signed.serialize().length;
+      // eslint-disable-next-line no-console
+      console.log(`      [maat] ontdooien(backup) + remove_passkey: ${size} bytes (limiet 1232)`);
+      assert.isAtMost(size, 1232);
+      const sig = await provider.connection.sendRawTransaction(signed.serialize());
+      await provider.connection.confirmTransaction(sig, "confirmed");
+
+      const wallet = await program.account.walletAccount.fetch(w.walletPda);
+      assert.isFalse(wallet.disarmed);
+      const passkeys = await program.account.passkeysAccount.fetch(w.passkeysPda);
+      assert.equal(passkeys.count, 0, "de te verwijderen passkey moet in dezelfde transactie verwijderd zijn");
+    });
+  });
+
+  describe("Noodstop: ontdooien via de wachtrij", () => {
+    it("initiate_unfreeze werkt ondanks bevriezing; finalize faalt vóór de timelock en slaagt erna (één passkey)", async () => {
+      const w = await createWallet();
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      assert.equal(pending.kind, 4);
+      await expectAnchorError(callFinalizeUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda), "PendingActionTimelockNotElapsed");
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await callFinalizeUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      assert.isNull(await provider.connection.getAccountInfo(w.pendingActionPda));
+    });
+
+    it("2-VAN-2: bij twee passkeys faalt finalize door dezelfde passkey (SecondPasskeyMustDifferFromInitiator), slaagt door de andere", async () => {
+      const w = await createWallet();
+      const second = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      assert.isFalse(pending.confirmed);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await expectAnchorError(callFinalizeUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda), "SecondPasskeyMustDifferFromInitiator");
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      await callFinalizeUnfreeze(second, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+    });
+
+    it("een actie waarvan de timelock tijdens de bevriezing verstreek, kan na ontdooien niet direct uitgevoerd worden", async () => {
+      const w = await createWallet();
+      const recipient = Keypair.generate().publicKey;
+      await callInitiateWithdrawal(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda, recipient, NOODSTOP_SPEND);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const withdrawal = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), withdrawal.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+
+      // Wachtrij-route: het slot is bezet, dus ontdooien via de wachtrij
+      // kan pas na annuleren - de gerijpte opname verdwijnt daarmee.
+      let threw = false;
+      try {
+        await callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      } catch {
+        threw = true;
+      }
+      assert.isTrue(threw, "initiate_unfreeze mag het bezette slot niet overschrijven");
+      await callCancelAction(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      await callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const unfreeze = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), unfreeze.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await callFinalizeUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      assert.isNull(await provider.connection.getAccountInfo(recipient), "de gerijpte opname mag nooit uitgevoerd zijn");
+      assert.isNull(await provider.connection.getAccountInfo(w.pendingActionPda));
+    });
+
+    it("ATOMISCH (wachtrij-route, ≥3 passkeys): finalize_unfreeze + remove_passkey in één transactie, realistische clientDataJSON - grootte gemeten, zo nodig met ALT", async () => {
+      const w = await createWallet();
+      const b = generateTestPasskey();
+      const toRemove = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, b.compressedPublicKey);
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, toRemove.compressedPublicKey);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      await callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+
+      const nonce = await fetchActionNonce(provider.connection, w.walletPda);
+      const finalizeIxs = await buildFinalizeUnfreezeIxs(b, w.walletPda, w.pendingActionPda, w.passkeysPda, nonce, CHROME_LIKE_CLIENT_DATA_EXTRA);
+      const removeIxs = await buildRemovePasskeyIxs(
+        b,
+        w.walletPda,
+        w.passkeysPda,
+        toRemove.compressedPublicKey,
+        nonce + 1n,
+        CHROME_LIKE_CLIENT_DATA_EXTRA
+      );
+      const payer = payerKeypair();
+      const { blockhash } = await provider.connection.getLatestBlockhash();
+      const legacyMsg = new TransactionMessage({
+        payerKey: payer.publicKey,
+        recentBlockhash: blockhash,
+        instructions: [...finalizeIxs, ...removeIxs],
+      }).compileToLegacyMessage();
+      const legacyTx = new VersionedTransaction(legacyMsg);
+      legacyTx.sign([payer]);
+      const legacySize = legacyTx.serialize().length;
+      // eslint-disable-next-line no-console
+      console.log(`      [maat] finalize_unfreeze + remove_passkey (legacy): ${legacySize} bytes (limiet 1232)`);
+
+      let vtx = legacyTx;
+      if (legacySize > 1232) {
+        const recentSlot = await provider.connection.getSlot("finalized");
+        const [createAltIx, altAddress] = AddressLookupTableProgram.createLookupTable({
+          authority: payer.publicKey,
+          payer: payer.publicKey,
+          recentSlot,
+        });
+        const extendAltIx = AddressLookupTableProgram.extendLookupTable({
+          payer: payer.publicKey,
+          authority: payer.publicKey,
+          lookupTable: altAddress,
+          addresses: [
+            w.walletPda,
+            w.pendingActionPda,
+            w.passkeysPda,
+            SYSVAR_INSTRUCTIONS_PUBKEY,
+            new PublicKey("Secp256r1SigVerify1111111111111111111111111"),
+            program.programId,
+          ],
+        });
+        await provider.sendAndConfirm(new anchor.web3.Transaction().add(createAltIx, extendAltIx));
+        await advanceSlotPast(provider.connection, payer, (await provider.connection.getSlot()) + 1);
+        const alt = (await provider.connection.getAddressLookupTable(altAddress)).value!;
+        const v0 = new TransactionMessage({
+          payerKey: payer.publicKey,
+          recentBlockhash: (await provider.connection.getLatestBlockhash()).blockhash,
+          instructions: [...finalizeIxs, ...removeIxs],
+        }).compileToV0Message([alt]);
+        vtx = new VersionedTransaction(v0);
+        vtx.sign([payer]);
+        // eslint-disable-next-line no-console
+        console.log(`      [maat] idem met ALT: ${vtx.serialize().length} bytes`);
+      }
+      assert.isAtMost(vtx.serialize().length, 1232);
+      const sig = await provider.connection.sendTransaction(vtx);
+      await provider.connection.confirmTransaction(sig, "confirmed");
+
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      const passkeys = await program.account.passkeysAccount.fetch(w.passkeysPda);
+      assert.equal(passkeys.count, 1, "alleen B mag overblijven naast de owner-passkey");
+      assert.isTrue(Buffer.from(passkeys.additionalPasskeys[0]).equals(b.compressedPublicKey));
+    });
+
+    it("ontdooien via de wachtrij vereist medewerking van beide passkeys (2-van-2): finalize door de initiator faalt, de wallet blijft bevroren en er gaat niets uit", async () => {
+      const w = await createWallet();
+      const second = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const vaultBefore = await provider.connection.getBalance(w.vaultPda, "processed");
+
+      await callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda);
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), pending.timelockStartedAt.toNumber() + FAST_TIMELOCK_SECONDS);
+      await expectAnchorError(callFinalizeUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda), "SecondPasskeyMustDifferFromInitiator");
+
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      assert.equal(await provider.connection.getBalance(w.vaultPda, "processed"), vaultBefore, "er mag niets uitgaan");
     });
   });
 

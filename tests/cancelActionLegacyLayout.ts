@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { Connection, Keypair, PublicKey, SYSVAR_INSTRUCTIONS_PUBKEY } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, SYSVAR_INSTRUCTIONS_PUBKEY, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { assert } from "chai";
 import { createHash } from "crypto";
 import * as fs from "fs";
@@ -28,7 +28,7 @@ import {
  * vrijmaken. Zonder deze eigenschap zou één zo'n achtergebleven account de
  * wachtrij van een wallet permanent blokkeren.
  *
- * Zelfde techniek als tests/migrateWalletAccount.ts: een eigen validator met
+ * Zelfde techniek als de (in sectie 155 verwijderde) migratietest: een eigen validator met
  * account-genesis (`--account`), omdat het programma zelf nooit meer een
  * 124-byte PendingAction aanmaakt. De fixtures worden hier synthetisch en
  * per run vers opgebouwd (verse test-passkey als owner_passkey), niet
@@ -194,18 +194,32 @@ describe("spankwallet: cancel_action sluit ook een PendingAction in de OUDE 124-
     const expectedChallenge = buildExpectedChallenge(PROGRAM_ID, walletPda, "confirm_pending_action", payload);
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(owner, expectedChallenge);
     const secp256r1Ix = buildSecp256r1Instruction(owner.compressedPublicKey, signedMessage, rawSignature);
+    // Met de hand opgebouwd, niet via program.methods: de seeds van het
+    // sessie-account (sectie 155) hangen af van pending_action.initiator_session,
+    // en de Anchor-JS-resolver zou die uit dit te korte account lezen. Het
+    // sessie-adres doet hier niet ter zake - de weigering moet al op de
+    // deserialisatie van pending_action vallen.
+    const clientDataLen = Buffer.alloc(4);
+    clientDataLen.writeUInt32LE(clientDataJSON.length, 0);
+    const confirmIx = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [
+        { pubkey: walletPda, isSigner: false, isWritable: true },
+        { pubkey: pendingActionPda, isSigner: false, isWritable: true },
+        { pubkey: passkeysPda, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: PublicKey.findProgramAddressSync([Buffer.from("session"), walletPda.toBuffer(), PublicKey.default.toBuffer()], PROGRAM_ID)[0], isSigner: false, isWritable: false },
+      ],
+      data: Buffer.concat([
+        createHash("sha256").update("global:confirm_pending_action").digest().subarray(0, 8),
+        nonceLeBytes(ACTION_NONCE),
+        clientDataLen,
+        Buffer.from(clientDataJSON),
+      ]),
+    });
     let errString = "";
     try {
-      await program.methods
-        .confirmPendingAction(new BN(ACTION_NONCE.toString()), clientDataJSON)
-        .accounts({
-          wallet: walletPda,
-          pendingAction: pendingActionPda,
-          passkeys: passkeysPda,
-          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-        })
-        .preInstructions([secp256r1Ix])
-        .rpc();
+      await program.provider.sendAndConfirm!(new Transaction().add(secp256r1Ix, confirmIx));
     } catch (err) {
       errString = String(err);
     }

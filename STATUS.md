@@ -14594,6 +14594,113 @@ client-/scriptzijdige lezers gecontroleerd moeten worden.
   de diff, daarna de RC-verificatie (zelfde discipline als bij het
   spend-cap-mechanisme), daarna pas een upgradevoorstel.
 
+## 155. Reparatieronde upgrade 1 na de onafhankelijke review (2026-09-24)
+
+De onafhankelijke review van upgrade 1 (commits na e8d9a14) vond geen kritieke of
+hoge bevindingen, wel één latent gat en enkele restrisico's. Deze ronde repareert ze.
+Alle programmawijzigingen zijn rood vóór groen gebouwd (tests met prefix `[155]` in
+`tests/pendingAction.ts`, eerst falend tegen het ongewijzigde programma, om de
+bedoelde reden).
+
+### 1. `migrate_wallet_account` verwijderd
+
+**Bevinding:** de permissionless migratie zette `disarmed` onvoorwaardelijk op `false`.
+Een niet-gemigreerde (231/239/247-byte) wallet leest fail-open als `WalletAccount`
+(sectie 85), kan dus bevroren worden, en iedereen kon hem daarna via de migratie
+ontdooien.
+
+**Telling (read-only, 2026-09-24):** `getProgramAccounts` op devnet met het
+WalletAccount-discriminator: 19 accounts, alle 19 exact 256 bytes. Mainnet:
+`getAccountInfo` op het programma-ID geeft `null` (niet gedeployd). `init_wallet`
+maakt altijd 256 bytes aan.
+
+**Besluit:** verwijderd - instructie, `MigrateWalletAccount`, `WalletAccountOld`, de
+adres-uitzondering, `tests/migrateWalletAccount.ts` met zijn drie fixtures,
+`scripts/migrateAllWalletAccounts.ts` en `scripts/watchUpgradeAndMigrateCriticalWallets.ts`.
+Er valt niets meer te migreren, en een permissionless instructie die de wallet-staat
+herschrijft is dan alleen nog aanvalsoppervlak. De foutcode `WalletAccountAlreadyMigrated`
+blijft staan (foutcodes groeien alleen achteraan). `tests/migrateWalletAccountValidator.ts`
+blijft: `cancelActionLegacyLayout.ts` gebruikt die validator-helper. Een toekomstige
+layoutwijziging krijgt een eigen, nieuw ontworpen migratie.
+
+### 2. Ontsnappingsroute via de backup authority
+
+**Bevinding:** tijdens een bevriezing kon een passkey-houder de nonce vrij verhogen
+(idempotente `freeze_via_passkey`), en daarmee elke vooraf ondertekende passkey-actie
+van de eigenaar ongeldig maken - ook de bundel "ontdooien via backup + remove_passkey".
+
+**Besluit (Michel):**
+- `unfreeze_via_backup_authority(passkeys_to_remove: Vec<[u8; 33]>)` verwijdert de
+  opgegeven passkeys in dezelfde instructie, zonder passkey-handtekening: de backup
+  authority is de asymmetrische scheidsrechter. Zelfde logica als `remove_passkey`
+  (gedeelde helper): lockout-bescherming per verwijdering, alles-of-niets.
+- Wordt er minstens één passkey verwijderd, dan stijgt `wallet.session_epoch`: alle
+  sessies worden ongeldig, ook die van de eigenaar - dezelfde regel als bij recovery.
+  Reden: we weten niet welke passkey welke sessie heeft aangemaakt.
+- `freeze_via_passkey` op een al bevroren wallet weigert (`WalletAlreadyDisarmed`).
+  `freeze_via_backup_authority` blijft idempotent.
+
+**Kanttekening:** de weigering bij dubbel bevriezen haalt alleen de goedkoopste
+nonce-ophoging weg. Een passkey-houder kan de nonce tijdens een bevriezing nog steeds
+verhogen (bijv. `initiate_unfreeze` + `cancel_action`). De echte bescherming is dat de
+backup-route geen nonce van de eigenaar nodig heeft; de test "[155] ontsnappen" gebruikt
+precies die lus.
+
+### 3. `confirm_pending_action` controleert de initiërende sessie
+
+`confirm_pending_action` krijgt het sessie-account van `initiator_session` mee (seeds)
+en weigert als dat account niet (meer) bestaat, geen `can_execute_advanced` heeft, of
+bij een andere epoch hoort (`InitiatingSessionRevoked`), en als de sessie verlopen is
+(`SessionExpired`).
+
+**Waarom ook verlopen sessies:** een verlopen sessie kan iedereen sluiten met
+`close_expired_session`, en daarna is "verlopen" on-chain niet meer te onderscheiden van
+"ingetrokken". Verlopen sessies toestaan zou dus betekenen dat een willekeurige derde
+bepaalt of een confirm slaagt. Inhoudelijk is het venster waarin de eigenaar bevoegdheid
+delegeerde voorbij; wie de actie toch wil, gebruikt de passkey-route.
+
+**Restpunt, bewust niet dichtgebouwd:** wordt een sessie verwijderd en met dezelfde
+sleutel én `can_execute_advanced` opnieuw toegevoegd, dan is een oude actie van die
+sleutel weer bevestigbaar. Dat vereist een passkey (add_session_key); de test dekt de
+variant zonder `can_execute_advanced`.
+
+### 4. Verdediging in de diepte
+
+`TransferToken`, `ExecuteAdvanced` en `ExecuteAdvancedViaSession` dragen nu ook de
+`!wallet.disarmed`-constraint, naast hun onvoorwaardelijke weigering in de body.
+
+### 5./6. Commentaar en README
+
+Vier verouderde commentaarplekken gecorrigeerd (state.rs: `kind`-lijst, sub-scope,
+`initiator_passkey`; instructions.rs: "alle vier kinds"). README: instructietabel
+bijgewerkt voor upgrade 1, en een neutrale beschrijving van de rol van de backup
+authority (direct ontdooien, passkeys verwijderen) en hoe die sleutel bewaard moet
+worden.
+
+### 7. Harde voorwaarde vóór het opheffen van de client-blokkade op `can_execute_advanced`
+
+Aanvulling op sectie 154 punt 3. De blokkade op het aanmaken van sessies met
+`can_execute_advanced` mag pas worden opgeheven als het overzicht van wachtende acties
+aantoonbaar aan het volgende voldoet:
+
+- **Geen blinde bevestiging.** `confirm_pending_action` ondertekent alleen de hash
+  `action_commitment`; `PendingAction` bewaart de inhoud van de CPI niet. De client moet
+  programma-ID, elke account met schrijf-/signer-vlag en de volledige instructiedata
+  terughalen uit de initiërende transactie, de commitment zelf narekenen
+  (`pending_advanced_action`-domein), en alleen bij een exacte match de inhoud tonen en
+  bevestigen toestaan. Geen match of niet gevonden: niet bevestigen, wel annuleren
+  aanbieden.
+- **Initiatie via een tussenprogramma.** `initiate_advanced_action_via_session` kan ook
+  via een CPI worden aangeroepen. De instructie staat dan niet tussen de top-level
+  instructies van de transactie, maar als inner instruction
+  (`meta.innerInstructions`). De client moet beide vormen doorzoeken; een client die
+  alleen top-level instructies leest, vindt de inhoud niet en mag dan niet terugvallen op
+  blind bevestigen.
+- Een door een sessie geïnitieerde actie wordt opvallend als hoog risico getoond, met
+  de initiërende sessiesleutel (sectie 154).
+- Beide punten zijn bewezen met een test, waaronder een initiatie via een
+  tussenprogramma.
+
 ## 156. Aantekening voor de volgende ontwerpronde: Alpenglow en tijd in slots (2026-09-24)
 
 Alleen een notitie, geen codewijziging.

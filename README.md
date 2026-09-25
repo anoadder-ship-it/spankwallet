@@ -92,21 +92,27 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | initiate_recovery                | Backup authority                     | Recovery starten                                                    |
 | cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren                                                   |
 | finalize_recovery                | Permissionless (na timelock)          | Recovery afronden: wist alle extra passkeys, maakt bestaande sessiesleutels ongeldig (epoch-verhoging, sluit ze niet) |
-| migrate_wallet_account            | Permissionless                       | WalletAccountOld (231/239/247 bytes) migreren naar WalletAccount (256 bytes), dubbele-migratie-beschermd |
 | add_session_key                  | Een van de al geldige passkeys        | Tijdelijke session key registreren (scope + slot-gebonden expiry)   |
 | remove_session_key               | Een van de al geldige passkeys        | Session key vroegtijdig intrekken                                    |
 | close_session                    | De session key zelf                   | Eigen sessie zelf sluiten, rent terug (enige zelfstandige actie)     |
 | close_expired_session             | Permissionless (na expiry_slot)       | Verlopen sessie opruimen, rent naar de aanroeper                    |
 | execute_via_session               | De session key zelf                   | SOL-transfer via een tijdelijke, gescopede sessiesleutel             |
 | transfer_token_via_session         | De session key zelf                   | SPL-token-transfer via een tijdelijke, gescopede sessiesleutel       |
-| execute_advanced_via_session       | De session key zelf                   | CPI via sessiesleutel, gescoped op sessie-sub-scope + live allowlist; geen per-sessie bedraglimiet (zie ontwerpprincipes) |
+| execute_advanced_via_session       | De session key zelf                   | Permanent geblokkeerd - een sessie kan een CPI alleen initiëren in de wachtrij |
+| initiate_advanced_action_via_session | De session key zelf                 | CPI aankondigen in de PendingAction-wachtrij (kind=AdvancedAction); geen CPI, geen nonce |
+| confirm_pending_action            | Passkey                               | Een door een sessie geïnitieerde actie bevestigen; de timelock start hier. Weigert als de initiërende sessie ingetrokken of verlopen is |
+| freeze_via_passkey                | Passkey                               | Wallet bevriezen (noodstop); weigert als de wallet al bevroren is  |
+| freeze_via_backup_authority       | Backup authority                      | Wallet bevriezen (noodstop), idempotent                              |
+| unfreeze_via_backup_authority     | Backup authority                      | Direct ontdooien; kan in dezelfde instructie passkeys verwijderen (zie Veiligheidsprincipes) |
+| initiate_unfreeze                 | Passkey                               | Ontdooien aankondigen (queued, timelock) - opent PendingAction (kind=Unfreeze) |
+| finalize_unfreeze                 | Passkey                               | Aangekondigd ontdooien afronden, ná de timelock (2-van-2 bij ≥2 passkeys) |
 
 ## Structuur
 
 ```
 spankwallet/
 programs/spankwallet/       - Anchor-programma (Rust)
-  src/lib.rs                 - #[program]-entrypoints (29 instructies)
+  src/lib.rs                 - #[program]-entrypoints (35 instructies)
   src/state.rs                - WalletAccount, VaultAccount, RecoveryState, PolicyAccount,
                                  PasskeysAccount, SessionKeyAccount, PendingAction, SpendWindow
   src/instructions.rs          - alle instructielogica + gedeelde verificatiehelpers
@@ -138,8 +144,8 @@ tests/                        - Anchor-tests (117 passing, 42 pending, 0 failing
   spendWindow.ts                           - window_total_cap_lamports (glijdende-window spend-cap, sectie 132/133)
   thresholdChangePanel.ts                   - initiate/finalize_threshold_change + UI-panel pure-logica (sectie 135)
   thresholdBanner.ts                         - drempel-statusbanner, pure-logica + DOM-effectkant (sectie 127-129)
-  migrateWalletAccount.ts                     - migrate_wallet_account
-  migrateWalletAccountValidator.ts             - migrate_wallet_account tegen een live validator
+  migrateWalletAccountValidator.ts             - eigen test-validator met vooraf geplaatste accounts (gebruikt door cancelActionLegacyLayout.ts)
+  cancelActionLegacyLayout.ts                   - cancel_action op een PendingAction in de oude 124-byte-layout
   sessionKeys.ts                     - session keys, alle 7 instructies
   addSessionKeyBlock.ts               - tijdelijke client-blokkade op execute_advanced-sessies
   uint8ArrayByteFidelity.ts           - bytegetrouwheid WebAuthn/Web-Crypto-tekenpad (sectie 78)
@@ -264,9 +270,24 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
   execute_advanced op een sub-allowlist), altijd slot-gebonden begrensd, en kunnen zichzelf
   nooit verlengen of nieuwe bevoegdheid creëren - alleen aanmaken/intrekken via een echte
   passkey. De per-sessie-maxima (lamports/tokens) gelden voor `execute_via_session` en
-  `transfer_token_via_session`. Voor sessies met execute_advanced-bevoegdheid bestaat geen
-  vergelijkbare bedraglimiet; de meegeleverde client maakt zulke sessies daarom niet aan,
-  en een on-chain aanpassing hiervoor is in voorbereiding.
+  `transfer_token_via_session`. Een sessie met execute_advanced-bevoegdheid kan een CPI
+  alleen aankondigen in de PendingAction-wachtrij; bevestigen, uitvoeren en annuleren
+  vereist een passkey (STATUS.md sectie 153/154). De meegeleverde client maakt zulke
+  sessies nog niet aan (zie STATUS.md sectie 155 voor de voorwaarden).
+- Noodstop: elke geldige passkey of de backup authority kan de wallet direct bevriezen.
+  Tijdens een bevriezing zijn alle waardepaden en alle bevoegdheidsuitbreidingen
+  geblokkeerd; versmallende acties (annuleren, sessies en allowlist-entries intrekken,
+  recovery) blijven werken. Ontdooien kan via de wachtrij (24u timelock, 2-van-2 bij twee
+  of meer passkeys) of direct door de backup authority.
+- De backup authority heeft daarmee meer dan alleen de recovery-rol. Zij kan een bevroren
+  wallet **direct** ontdooien, zonder timelock en zonder passkey, en daarbij in dezelfde
+  instructie passkeys verwijderen (nooit de laatste geldige passkey). Verwijdert zij er
+  minstens één, dan worden ook alle sessiesleutels ongeldig. Dit is bewust: bij een
+  gecompromitteerde passkey is zij de enige partij die de wallet kan ontdooien zonder dat
+  die passkey het kan tegenhouden. Het betekent ook dat wie deze sleutel bezit, een
+  bevriezing kan opheffen. Bewaar de backup-authority-sleutel daarom offline en veilig
+  (niet op hetzelfde apparaat als een passkey), maar wel bereikbaar: bij een noodgeval
+  moet de eigenaar hem binnen afzienbare tijd kunnen gebruiken.
 - Recovery heeft een 72u-timelock + owner-veto (cancel_recovery), en wist bij succes de
   volledige extra-passkey-set - geen stale, mogelijk-gecompromitteerde passkeys overleven
   een recovery. Bestaande sessiesleutels worden bij diezelfde finalize_recovery NIET

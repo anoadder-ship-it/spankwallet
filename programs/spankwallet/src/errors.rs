@@ -244,6 +244,8 @@ pub enum SpankWalletError {
     // zelf de ruwe accountlengte VOORDAT enige realloc plaatsvindt (zie de
     // toelichting daar voor waarom dit niet via Anchor's eigen
     // `realloc`-constraint of een `constraint = ...`-attribuut kan).
+    // Sinds STATUS.md sectie 155 ongebruikt (migrate_wallet_account is
+    // verwijderd); blijft staan omdat foutcodes alleen achteraan groeien.
     #[msg("Deze WalletAccount is al gemigreerd naar de huidige layout")]
     WalletAccountAlreadyMigrated,
 
@@ -274,4 +276,15 @@ pub enum SpankWalletError {
     // Noodstop: ontdooien kan alleen als de wallet bevroren is.
     #[msg("Deze wallet is niet bevroren")]
     WalletNotDisarmed,
+
+    // STATUS.md sectie 155: freeze_via_passkey verhoogt de nonce, en weigert
+    // daarom op een al bevroren wallet in plaats van idempotent te slagen.
+    #[msg("Deze wallet is al bevroren")]
+    WalletAlreadyDisarmed,
+
+    // STATUS.md sectie 155: confirm_pending_action vereist dat de sessie die
+    // de actie initieerde nog bestaat, bij de huidige epoch hoort en nog
+    // execute_advanced-bevoegdheid heeft.
+    #[msg("De sessie die deze actie initieerde is ingetrokken - annuleer de actie met cancel_action")]
+    InitiatingSessionRevoked,
 }

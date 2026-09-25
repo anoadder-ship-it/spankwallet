@@ -1692,6 +1692,21 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     return sessionPda;
   }
 
+  /// Anchor's instructie-discriminator: sha256("global:<naam>")[..8].
+  /// confirm_pending_action en unfreeze_via_backup_authority worden
+  /// hieronder met de hand opgebouwd (niet via program.methods): hun
+  /// accounts/argumenten veranderden in sectie 155, en zo draait dezelfde
+  /// testcode tegen de oude én de nieuwe interface (rood vóór groen).
+  function instructionDiscriminator(snakeCaseName: string): Buffer {
+    return createHash("sha256").update(`global:${snakeCaseName}`).digest().subarray(0, 8);
+  }
+
+  function borshVecU8(bytes: Buffer): Buffer {
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(bytes.length, 0);
+    return Buffer.concat([len, bytes]);
+  }
+
   /// Sessie met ALLEEN can_execute_advanced, sub-scope = [cpiProgramId].
   async function callAddAdvancedSessionKey(
     signingPasskey: TestPasskey,
@@ -1699,9 +1714,10 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     passkeysPda: PublicKey,
     policyPda: PublicKey,
     sessionKey: PublicKey,
-    cpiProgramId: PublicKey
+    cpiProgramId: PublicKey,
+    expirySlots = 100_000
   ) {
-    const expirySlot = (await provider.connection.getSlot()) + 100_000;
+    const expirySlot = (await provider.connection.getSlot()) + expirySlots;
     const nonce = await fetchActionNonce(provider.connection, walletPda);
     const expirySlotBuf = Buffer.alloc(8);
     expirySlotBuf.writeBigUInt64LE(BigInt(expirySlot), 0);
@@ -1826,12 +1842,17 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     // vastgelegde commitment, zodat er client-side NIETS van het (dan
     // gesloten) account gelezen hoeft te worden - de weigering moet
     // on-chain gebeuren.
-    commitmentOverride?: Buffer
+    commitmentOverride?: Buffer,
+    // Idem voor het sessie-account (sectie 155): de initiërende sessie.
+    initiatorSessionOverride?: PublicKey
   ) {
     const nonce = nonceOverride ?? (await fetchActionNonce(provider.connection, walletPda));
-    const commitment =
-      commitmentOverride ??
-      Buffer.from((await program.account.pendingAction.fetch(pendingActionPda)).actionCommitment);
+    const pending =
+      commitmentOverride && initiatorSessionOverride
+        ? null
+        : await program.account.pendingAction.fetch(pendingActionPda);
+    const commitment = commitmentOverride ?? Buffer.from(pending!.actionCommitment);
+    const initiatorSession = initiatorSessionOverride ?? pending!.initiatorSession;
     const payload = Buffer.concat([nonceLeBytes(nonce), pendingActionPda.toBuffer(), commitment]);
     const expectedChallenge = buildExpectedChallenge(
       program.programId,
@@ -1841,15 +1862,21 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     );
     const { signedMessage, rawSignature, clientDataJSON } = signTestChallenge(signingPasskey, expectedChallenge);
     const secp256r1Ix = buildSecp256r1Instruction(signingPasskey.compressedPublicKey, signedMessage, rawSignature);
-    const confirmIx = await program.methods
-      .confirmPendingAction(new BN(nonce.toString()), clientDataJSON)
-      .accounts({
-        wallet: walletPda,
-        pendingAction: pendingActionPda,
-        passkeys: passkeysPda,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .instruction();
+    const confirmIx = new TransactionInstruction({
+      programId: program.programId,
+      keys: [
+        { pubkey: walletPda, isSigner: false, isWritable: true },
+        { pubkey: pendingActionPda, isSigner: false, isWritable: true },
+        { pubkey: passkeysPda, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: deriveSessionPda(walletPda, initiatorSession), isSigner: false, isWritable: false },
+      ],
+      data: Buffer.concat([
+        instructionDiscriminator("confirm_pending_action"),
+        nonceLeBytes(nonce),
+        borshVecU8(Buffer.from(clientDataJSON)),
+      ]),
+    });
     return [secp256r1Ix, confirmIx];
   }
 
@@ -1866,7 +1893,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
   /// Wallet + System-programma op de allowlist + een advanced-sessie + een
   /// door die sessie geïnitieerde Assign-CPI. Optioneel met een tweede
   /// passkey (vóór de initiatie toegevoegd, dus confirmed=false).
-  async function setupSessionInitiatedAction(withSecondPasskey: boolean) {
+  async function setupSessionInitiatedAction(withSecondPasskey: boolean, sessionExpirySlots?: number) {
     const wallet = await createWallet();
     let secondPasskey: TestPasskey | null = null;
     if (withSecondPasskey) {
@@ -1881,7 +1908,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       wallet.passkeysPda,
       wallet.policyPda,
       sessionKeypair.publicKey,
-      SystemProgram.programId
+      SystemProgram.programId,
+      sessionExpirySlots
     );
     const { target, assignIx } = await setupAssignCpiFixture();
     const remainingAccounts: RemainingAccountSpec[] = [
@@ -2742,6 +2770,75 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       );
     });
 
+    it("[155] confirm_pending_action weigert als de initiërende sessie is ingetrokken (remove_session_key), ook als dezelfde sleutel daarna opnieuw als sessie zonder can_execute_advanced wordt toegevoegd", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      await provider.sendAndConfirm(await buildRemoveSessionKeyTx(s.passkey, s.walletPda, s.passkeysPda, s.sessionKeypair.publicKey));
+      await expectAnchorError(
+        callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda),
+        "InitiatingSessionRevoked"
+      );
+
+      await callAddSpendSessionKey(s.passkey, s.walletPda, s.passkeysPda, s.policyPda, s.sessionKeypair.publicKey, { canExecute: true });
+      await expectAnchorError(
+        callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda),
+        "InitiatingSessionRevoked"
+      );
+      const pending = await program.account.pendingAction.fetch(s.pendingActionPda);
+      assert.isTrue(Buffer.from(pending.initiatorPasskey).equals(Buffer.alloc(33)), "de actie moet onbevestigd blijven");
+
+      // Opruimen blijft altijd mogelijk.
+      await callCancelAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda);
+      assert.isNull(await provider.connection.getAccountInfo(s.pendingActionPda, "processed"));
+    });
+
+    it("[155] confirm_pending_action weigert als de sessie zichzelf gesloten heeft (close_session)", async () => {
+      const s = await setupSessionInitiatedAction(false);
+      await program.methods
+        .closeSession()
+        .accounts({
+          wallet: s.walletPda,
+          session: deriveSessionPda(s.walletPda, s.sessionKeypair.publicKey),
+          sessionKey: s.sessionKeypair.publicKey,
+        })
+        .signers([s.sessionKeypair])
+        .rpc();
+      await expectAnchorError(
+        callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda),
+        "InitiatingSessionRevoked"
+      );
+    });
+
+    it("[155] confirm_pending_action weigert na het verlopen van de initiërende sessie (SessionExpired), en ook nadat een derde de verlopen sessie heeft opgeruimd (InitiatingSessionRevoked)", async () => {
+      const s = await setupSessionInitiatedAction(false, 40);
+      const sessionPda = deriveSessionPda(s.walletPda, s.sessionKeypair.publicKey);
+      const session = await program.account.sessionKeyAccount.fetch(sessionPda);
+      await advanceSlotPast(provider.connection, payerKeypair(), session.expirySlot.toNumber());
+      await expectAnchorError(
+        callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda),
+        "SessionExpired"
+      );
+
+      const thirdParty = Keypair.generate();
+      await provider.sendAndConfirm(
+        new anchor.web3.Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey: provider.wallet.publicKey,
+            toPubkey: thirdParty.publicKey,
+            lamports: anchor.web3.LAMPORTS_PER_SOL / 100,
+          })
+        )
+      );
+      await program.methods
+        .closeExpiredSession(s.sessionKeypair.publicKey)
+        .accounts({ wallet: s.walletPda, session: sessionPda, closer: thirdParty.publicKey })
+        .signers([thirdParty])
+        .rpc();
+      await expectAnchorError(
+        callConfirmPendingAction(s.passkey, s.walletPda, s.pendingActionPda, s.passkeysPda),
+        "InitiatingSessionRevoked"
+      );
+    });
+
     it("confirm_pending_action na een voltooide recovery faalt met PendingActionStaleEpoch", async () => {
       const wallet = await createWallet(3);
       await callAddAllowedProgram(wallet.passkey, wallet.walletPda, wallet.policyPda, SystemProgram.programId);
@@ -2991,7 +3088,8 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         s.pendingActionPda,
         s.passkeysPda,
         nonceAfterCancel,
-        commitmentBeforeCancel
+        commitmentBeforeCancel,
+        s.sessionKeypair.publicKey
       );
       await expectAnchorError(
         provider.sendAndConfirm(new anchor.web3.Transaction().add(...confirmIxs)),
@@ -3770,15 +3868,38 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       .rpc();
   }
 
-  async function buildUnfreezeViaBackupIx(backupAuthority: Keypair, walletPda: PublicKey, pendingActionPda: PublicKey) {
-    return program.methods
-      .unfreezeViaBackupAuthority()
-      .accounts({ wallet: walletPda, pendingAction: pendingActionPda, backupAuthority: backupAuthority.publicKey })
-      .instruction();
+  /// Met de hand opgebouwd (zie instructionDiscriminator): data = discriminator ||
+  /// Vec<[u8; 33]> passkeys_to_remove, accounts in de volgorde van
+  /// UnfreezeViaBackupAuthority.
+  function buildUnfreezeViaBackupIx(
+    backupAuthority: Keypair,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey,
+    passkeysToRemove: Buffer[] = []
+  ) {
+    const count = Buffer.alloc(4);
+    count.writeUInt32LE(passkeysToRemove.length, 0);
+    return new TransactionInstruction({
+      programId: program.programId,
+      keys: [
+        { pubkey: walletPda, isSigner: false, isWritable: true },
+        { pubkey: pendingActionPda, isSigner: false, isWritable: true },
+        { pubkey: backupAuthority.publicKey, isSigner: true, isWritable: true },
+        { pubkey: passkeysPda, isSigner: false, isWritable: true },
+      ],
+      data: Buffer.concat([instructionDiscriminator("unfreeze_via_backup_authority"), count, ...passkeysToRemove]),
+    });
   }
 
-  async function callUnfreezeViaBackup(backupAuthority: Keypair, walletPda: PublicKey, pendingActionPda: PublicKey) {
-    const ix = await buildUnfreezeViaBackupIx(backupAuthority, walletPda, pendingActionPda);
+  async function callUnfreezeViaBackup(
+    backupAuthority: Keypair,
+    walletPda: PublicKey,
+    pendingActionPda: PublicKey,
+    passkeysPda: PublicKey,
+    passkeysToRemove: Buffer[] = []
+  ) {
+    const ix = buildUnfreezeViaBackupIx(backupAuthority, walletPda, pendingActionPda, passkeysPda, passkeysToRemove);
     return provider.sendAndConfirm(new anchor.web3.Transaction().add(ix), [backupAuthority]);
   }
 
@@ -3970,6 +4091,14 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       .accounts({ wallet: walletPda, passkeys: passkeysPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .preInstructions([secp256r1Ix])
       .rpc();
+  }
+
+  /// action_nonce op "processed" (commitment van de provider): direct na
+  /// een bevestigde transactie kan fetchActionNonce ("confirmed") nog de
+  /// vorige waarde tonen.
+  async function actionNonceProcessed(walletPda: PublicKey): Promise<bigint> {
+    const info = await provider.connection.getAccountInfo(walletPda, "processed");
+    return info!.data.readBigUInt64LE(actionNonceOffset(info!.data));
   }
 
   type AccountSnapshot = Map<string, string>;
@@ -4315,13 +4444,93 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
         "add_allowed_program"
       );
     });
+
+    // Sectie 155 (verdediging in de diepte): deze drie falen sowieso al
+    // onvoorwaardelijk in de body. De noodstop-constraint moet er daarnaast
+    // zelf op staan, zodat de blokkade niet afhangt van die ene regel in de
+    // body. Bewijs: de weigering is WalletDisarmed (account-constraint, vóór
+    // de body), niet de queue-foutcode uit de body. Handtekeningen zijn
+    // bewust dummy - de constraint moet vóór elke verificatie weigeren.
+
+    it("[155] transfer_token", async () => {
+      const w = await createWallet();
+      const { mint, vaultTokenAccount, recipientTokenAccount } = await setupMintAndAccounts(w.vaultPda, Keypair.generate().publicKey, 1000);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const nonce = await fetchActionNonce(provider.connection, w.walletPda);
+      await expectBlockedAndUnchanged(
+        program.methods
+          .transferToken(new BN(10), new BN(nonce.toString()), Buffer.from("{}"))
+          .accounts({
+            wallet: w.walletPda,
+            vault: w.vaultPda,
+            vaultTokenAccount: vaultTokenAccount.publicKey,
+            recipientTokenAccount: recipientTokenAccount.publicKey,
+            tokenMint: mint.publicKey,
+            passkeys: w.passkeysPda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc(),
+        [w.walletPda, vaultTokenAccount.publicKey, recipientTokenAccount.publicKey],
+        "transfer_token"
+      );
+    });
+
+    it("[155] execute_advanced", async () => {
+      const w = await createWallet();
+      await callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const nonce = await fetchActionNonce(provider.connection, w.walletPda);
+      await expectBlockedAndUnchanged(
+        program.methods
+          .executeAdvanced(Buffer.from([]), new BN(nonce.toString()), Buffer.from("{}"))
+          .accounts({
+            wallet: w.walletPda,
+            vault: w.vaultPda,
+            policy: w.policyPda,
+            cpiProgram: SystemProgram.programId,
+            passkeys: w.passkeysPda,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          })
+          .rpc(),
+        [w.walletPda, w.vaultPda],
+        "execute_advanced"
+      );
+    });
+
+    it("[155] execute_advanced_via_session", async () => {
+      const w = await createWallet();
+      await callAddAllowedProgram(w.passkey, w.walletPda, w.policyPda, SystemProgram.programId);
+      const session = Keypair.generate();
+      await callAddAdvancedSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, SystemProgram.programId);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const sessionPda = deriveSessionPda(w.walletPda, session.publicKey);
+      await expectBlockedAndUnchanged(
+        program.methods
+          .executeAdvancedViaSession(Buffer.from([]))
+          .accounts({
+            wallet: w.walletPda,
+            vault: w.vaultPda,
+            policy: w.policyPda,
+            cpiProgram: SystemProgram.programId,
+            session: sessionPda,
+            sessionKey: session.publicKey,
+          })
+          .signers([session])
+          .rpc(),
+        [w.walletPda, w.vaultPda, sessionPda],
+        "execute_advanced_via_session"
+      );
+    });
   });
 
   describe("Noodstop: wat tijdens een bevriezing WEL blijft werken (versmallend of defensief)", () => {
-    it("freeze is idempotent (opnieuw bevriezen slaagt, blijft bevroren)", async () => {
+    it("[155] freeze_via_passkey op een al bevroren wallet weigert (WalletAlreadyDisarmed) en laat de nonce ongemoeid; bevriezen via de backup authority blijft idempotent", async () => {
       const w = await createWallet();
       await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
-      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const nonceFrozen = await actionNonceProcessed(w.walletPda);
+      await expectAnchorError(callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda), "WalletAlreadyDisarmed");
+      assert.equal(await actionNonceProcessed(w.walletPda), nonceFrozen, "een geweigerde bevriezing mag de nonce niet verhogen");
       await callFreezeViaBackup(w.backupAuthority, w.walletPda);
       assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
     });
@@ -4372,16 +4581,26 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       assert.equal(policy.count, 0);
     });
 
-    it("migrate_wallet_account wordt niet door de noodstop geblokkeerd (faalt alleen op 'al gemigreerd')", async () => {
+    it("[155] migrate_wallet_account bestaat niet meer: het programma kent de instructie niet (InstructionFallbackNotFound), een bevroren wallet blijft bevroren, en de IDL noemt hem niet", async () => {
       const w = await createWallet();
       await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
-      await expectAnchorError(
-        program.methods
-          .migrateWalletAccount()
-          .accounts({ wallet: w.walletPda, payer: provider.wallet.publicKey, systemProgram: SystemProgram.programId })
-          .rpc(),
-        "WalletAccountAlreadyMigrated"
-      );
+      // Met de hand opgebouwd, onafhankelijk van wat de IDL nog bevat.
+      const discriminator = instructionDiscriminator("migrate_wallet_account");
+      const ix = new TransactionInstruction({
+        programId: program.programId,
+        keys: [
+          { pubkey: w.walletPda, isSigner: false, isWritable: true },
+          { pubkey: provider.wallet.publicKey, isSigner: true, isWritable: true },
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        ],
+        data: Buffer.from(discriminator),
+      });
+      await expectAnchorError(provider.sendAndConfirm(new anchor.web3.Transaction().add(ix)), "InstructionFallbackNotFound");
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      const names = (program.idl.instructions as unknown as Array<{ name: string }>).map((i) => i.name);
+      // Anchor-JS zet IDL-namen om naar camelCase; beide vormen uitgesloten.
+      assert.notInclude(names, "migrate_wallet_account");
+      assert.notInclude(names, "migrateWalletAccount");
     });
 
     it("recovery: initiate, cancel en finalize werken; na finalize_recovery blijft de wallet BEVROREN", async () => {
@@ -4407,11 +4626,11 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       const w = await createWallet();
       await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
       assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
-      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
 
       await callFreezeViaBackup(w.backupAuthority, w.walletPda);
       assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
-      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
 
       // Een sessiesleutel als "backup authority" wordt geweigerd, en zonder
       // passkey-precompile faalt de passkey-route.
@@ -4443,7 +4662,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       const pendingLamports = (await provider.connection.getAccountInfo(w.pendingActionPda, "processed"))!.lamports;
       await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
       const backupBefore = await provider.connection.getBalance(w.backupAuthority.publicKey, "processed");
-      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
       assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
       assert.isNull(await provider.connection.getAccountInfo(w.pendingActionPda, "processed"), "de wachtende actie had mee gesloten moeten zijn");
       assert.equal(await provider.connection.getBalance(w.backupAuthority.publicKey, "processed"), backupBefore + pendingLamports);
@@ -4451,7 +4670,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
 
     it("ontdooien kan alleen als de wallet bevroren is (WalletNotDisarmed)", async () => {
       const w = await createWallet();
-      await expectAnchorError(callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda), "WalletNotDisarmed");
+      await expectAnchorError(callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda), "WalletNotDisarmed");
       await expectAnchorError(callInitiateUnfreeze(w.passkey, w.walletPda, w.pendingActionPda, w.passkeysPda), "WalletNotDisarmed");
     });
 
@@ -4467,7 +4686,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       const n0 = await nonceProcessed(w.walletPda);
       await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
       const n1 = await nonceProcessed(w.walletPda);
-      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
       const n2 = await nonceProcessed(w.walletPda);
       await callFreezeViaBackup(w.backupAuthority, w.walletPda);
       const n3 = await nonceProcessed(w.walletPda);
@@ -4484,7 +4703,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       const w = await createWallet();
       const freezeIxs = await buildFreezeViaPasskeyIxs(w.passkey, w.walletPda, w.passkeysPda);
       await provider.sendAndConfirm(new anchor.web3.Transaction().add(...freezeIxs));
-      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
       await expectAnchorError(provider.sendAndConfirm(new anchor.web3.Transaction().add(...freezeIxs)), "StaleActionNonce");
       assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
     });
@@ -4493,7 +4712,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       const w = await createWallet();
       const unsubmitted = await buildFreezeViaPasskeyIxs(w.passkey, w.walletPda, w.passkeysPda);
       await callFreezeViaBackup(w.backupAuthority, w.walletPda);
-      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
       await expectAnchorError(provider.sendAndConfirm(new anchor.web3.Transaction().add(...unsubmitted)), "StaleActionNonce");
       assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
     });
@@ -4501,7 +4720,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     it("REPLAY (c): exact dezelfde ondertekende backup-ontdooitransactie opnieuw indienen na opnieuw bevriezen wordt geweigerd", async () => {
       const w = await createWallet();
       await callFreezeViaBackup(w.backupAuthority, w.walletPda);
-      const ix = await buildUnfreezeViaBackupIx(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      const ix = buildUnfreezeViaBackupIx(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
       const tx = new anchor.web3.Transaction().add(ix);
       tx.feePayer = provider.wallet.publicKey;
       tx.recentBlockhash = (await provider.connection.getLatestBlockhash()).blockhash;
@@ -4562,44 +4781,155 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       for (const attempt of attempts) {
         await expectAnchorError(attempt(), "WalletDisarmed");
       }
-      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
 
       assert.equal(await walletRawMasked(), walletBefore, "WalletAccount moet (op action_nonce na) byte voor byte identiek zijn");
       assertSnapshotsEqual(rawBefore, await snapshot([w.vaultPda, w.passkeysPda, w.policyPda, sessionPda, w.pendingActionPda]), "staat na ontdooien");
     });
 
-    it("ATOMISCH (backup-route): ontdooien + remove_passkey in één transactie, met realistische (Chrome-lengte) clientDataJSON, binnen 1232 bytes zonder ALT", async () => {
+    it("[155] ontsnappen: een passkey-houder die tijdens de bevriezing de nonce ophoogt, kan het ontdooien + verwijderen via de backup authority niet verhinderen", async () => {
       const w = await createWallet();
-      const toRemove = generateTestPasskey();
-      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, toRemove.compressedPublicKey);
+      const compromised = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, compromised.compressedPublicKey);
+      // Een sessie aangemaakt met de gecompromitteerde passkey.
+      const session = Keypair.generate();
+      await callAddSpendSessionKey(compromised, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, { canExecute: true });
       await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
 
-      const nonceAfterUnfreeze = (await fetchActionNonce(provider.connection, w.walletPda)) + 1n;
-      const unfreezeIx = await buildUnfreezeViaBackupIx(w.backupAuthority, w.walletPda, w.pendingActionPda);
-      const removeIxs = await buildRemovePasskeyIxs(
+      // Route met een passkey-handtekening van de eigenaar (ontdooien +
+      // remove_passkey, vooraf ondertekend voor nonce+1): die hangt af van
+      // de nonce, en de nonce kan de andere passkey tijdens de bevriezing
+      // blijven verhogen (initiate_unfreeze + cancel_action).
+      const nonceAfterUnfreeze = (await actionNonceProcessed(w.walletPda)) + 1n;
+      const ownerSignedIxs = await buildRemovePasskeyIxs(
         w.passkey,
         w.walletPda,
         w.passkeysPda,
-        toRemove.compressedPublicKey,
-        nonceAfterUnfreeze,
-        CHROME_LIKE_CLIENT_DATA_EXTRA
+        compromised.compressedPublicKey,
+        nonceAfterUnfreeze
       );
-      const tx = new anchor.web3.Transaction().add(unfreezeIx, ...removeIxs);
-      tx.feePayer = provider.wallet.publicKey;
-      tx.recentBlockhash = (await provider.connection.getLatestBlockhash()).blockhash;
-      tx.partialSign(w.backupAuthority);
-      const signed = await provider.wallet.signTransaction(tx);
-      const size = signed.serialize().length;
-      // eslint-disable-next-line no-console
-      console.log(`      [maat] ontdooien(backup) + remove_passkey: ${size} bytes (limiet 1232)`);
-      assert.isAtMost(size, 1232);
-      const sig = await provider.connection.sendRawTransaction(signed.serialize());
-      await provider.connection.confirmTransaction(sig, "confirmed");
+      const ownerSignedBundle = new anchor.web3.Transaction().add(
+        buildUnfreezeViaBackupIx(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda),
+        ...ownerSignedIxs
+      );
+      await callInitiateUnfreeze(compromised, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      await callCancelAction(compromised, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      await expectAnchorError(provider.sendAndConfirm(ownerSignedBundle, [w.backupAuthority]), "StaleActionNonce");
+      assert.isTrue((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+
+      // Backup-route met verwijdering in dezelfde instructie: geen
+      // passkey-handtekening, dus geen afhankelijkheid van de nonce. Er
+      // staat bovendien een wachtende ontdooi-actie van de andere passkey.
+      await callInitiateUnfreeze(compromised, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      const epochBefore = (await program.account.walletAccount.fetch(w.walletPda)).sessionEpoch;
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda, [
+        compromised.compressedPublicKey,
+      ]);
 
       const wallet = await program.account.walletAccount.fetch(w.walletPda);
       assert.isFalse(wallet.disarmed);
+      assert.equal(wallet.sessionEpoch.toString(), epochBefore.addn(1).toString(), "session_epoch moet stijgen zodra er een passkey verwijderd wordt");
       const passkeys = await program.account.passkeysAccount.fetch(w.passkeysPda);
-      assert.equal(passkeys.count, 0, "de te verwijderen passkey moet in dezelfde transactie verwijderd zijn");
+      assert.equal(passkeys.count, 0);
+      assert.isFalse(passkeys.ownerPasskeyRevoked);
+      assert.isNull(await provider.connection.getAccountInfo(w.pendingActionPda, "processed"), "de wachtende actie moet mee gesloten zijn");
+
+      // De verwijderde passkey is geen geldige passkey meer, en de sessie
+      // (net als elke andere sessie) is ongeldig.
+      await expectAnchorError(callFreezeViaPasskey(compromised, w.walletPda, w.passkeysPda), "InvalidPasskeySignature");
+      await expectAnchorError(
+        program.methods
+          .executeViaSession(NOODSTOP_SPEND)
+          .accounts({
+            wallet: w.walletPda,
+            vault: w.vaultPda,
+            recipient: Keypair.generate().publicKey,
+            session: deriveSessionPda(w.walletPda, session.publicKey),
+            sessionKey: session.publicKey,
+          })
+          .signers([session])
+          .rpc(),
+        "SessionRevokedByRecovery"
+      );
+    });
+
+    it("[155] ontdooien met verwijdering: nooit de laatste geldige passkey, alles-of-niets, en de owner-passkey wordt ingetrokken", async () => {
+      // Eén passkey (geen PasskeysAccount): die verwijderen weigert.
+      const single = await createWallet();
+      await callFreezeViaPasskey(single.passkey, single.walletPda, single.passkeysPda);
+      await expectAnchorError(
+        callUnfreezeViaBackup(single.backupAuthority, single.walletPda, single.pendingActionPda, single.passkeysPda, [
+          single.passkey.compressedPublicKey,
+        ]),
+        "CannotRemoveLastPasskey"
+      );
+      assert.isTrue((await program.account.walletAccount.fetch(single.walletPda)).disarmed);
+
+      const w = await createWallet();
+      const second = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey);
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const before = await snapshot([w.walletPda, w.passkeysPda]);
+
+      // Beide verwijderen: de tweede verwijdering zou de laatste zijn.
+      await expectAnchorError(
+        callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda, [
+          w.passkey.compressedPublicKey,
+          second.compressedPublicKey,
+        ]),
+        "CannotRemoveLastPasskey"
+      );
+      // Dezelfde sleutel twee keer, of een onbekende sleutel.
+      await expectAnchorError(
+        callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda, [
+          second.compressedPublicKey,
+          second.compressedPublicKey,
+        ]),
+        "PasskeyNotRegistered"
+      );
+      await expectAnchorError(
+        callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda, [
+          generateTestPasskey().compressedPublicKey,
+        ]),
+        "PasskeyNotRegistered"
+      );
+      assertSnapshotsEqual(before, await snapshot([w.walletPda, w.passkeysPda]), "na geweigerde verwijderingen");
+
+      // De owner-passkey verwijderen, met een tweede geldige passkey.
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda, [
+        w.passkey.compressedPublicKey,
+      ]);
+      const passkeys = await program.account.passkeysAccount.fetch(w.passkeysPda);
+      assert.isTrue(passkeys.ownerPasskeyRevoked);
+      assert.equal(passkeys.count, 1);
+      assert.isFalse((await program.account.walletAccount.fetch(w.walletPda)).disarmed);
+      await expectAnchorError(callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda), "InvalidPasskeySignature");
+      await callFreezeViaPasskey(second, w.walletPda, w.passkeysPda);
+    });
+
+    it("ontdooien via de backup authority zonder verwijdering laat passkeys, sessies en session_epoch ongemoeid", async () => {
+      const w = await createWallet();
+      const second = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, second.compressedPublicKey);
+      const session = Keypair.generate();
+      await callAddSpendSessionKey(w.passkey, w.walletPda, w.passkeysPda, w.policyPda, session.publicKey, { canExecute: true });
+      await callFreezeViaPasskey(w.passkey, w.walletPda, w.passkeysPda);
+      const epochBefore = (await program.account.walletAccount.fetch(w.walletPda)).sessionEpoch;
+      const passkeysBefore = await snapshot([w.passkeysPda]);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda);
+      assert.equal((await program.account.walletAccount.fetch(w.walletPda)).sessionEpoch.toString(), epochBefore.toString());
+      assertSnapshotsEqual(passkeysBefore, await snapshot([w.passkeysPda]), "passkeys");
+      await program.methods
+        .executeViaSession(new BN(1_000_000))
+        .accounts({
+          wallet: w.walletPda,
+          vault: w.vaultPda,
+          recipient: Keypair.generate().publicKey,
+          session: deriveSessionPda(w.walletPda, session.publicKey),
+          sessionKey: session.publicKey,
+        })
+        .signers([session])
+        .rpc();
     });
   });
 

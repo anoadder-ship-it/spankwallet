@@ -205,8 +205,11 @@ pub mod spankwallet {
         instructions::freeze_via_backup_authority(ctx)
     }
 
-    pub fn unfreeze_via_backup_authority(ctx: Context<UnfreezeViaBackupAuthority>) -> Result<()> {
-        instructions::unfreeze_via_backup_authority(ctx)
+    pub fn unfreeze_via_backup_authority(
+        ctx: Context<UnfreezeViaBackupAuthority>,
+        passkeys_to_remove: Vec<[u8; PASSKEY_PUBKEY_LEN]>,
+    ) -> Result<()> {
+        instructions::unfreeze_via_backup_authority(ctx, passkeys_to_remove)
     }
 
     pub fn initiate_unfreeze(
@@ -292,14 +295,6 @@ pub mod spankwallet {
 
     pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
         instructions::finalize_recovery(ctx)
-    }
-
-    // STATUS.md sectie 141/141-vervolg (bouw): migratie-instructie voor de
-    // spend-cap-laagwijziging, Migration<From, To>-gebaseerd, permissionless,
-    // zie instructions.rs::migrate_wallet_account voor de volledige
-    // toelichting.
-    pub fn migrate_wallet_account(ctx: Context<MigrateWalletAccount>) -> Result<()> {
-        instructions::migrate_wallet_account(ctx)
     }
 
     pub fn add_session_key(

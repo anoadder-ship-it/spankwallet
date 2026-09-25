@@ -3,8 +3,10 @@ import { Connection } from "@solana/web3.js";
 import * as fs from "fs";
 
 /**
- * STATUS.md sectie 143 (live-validator-integratietest van
- * migrate_wallet_account): een eigen, apart beheerde solana-test-validator,
+ * STATUS.md sectie 143 (oorspronkelijk voor de live-validator-integratietest
+ * van migrate_wallet_account, die in sectie 155 met de instructie verwijderd
+ * is; nu gebruikt door cancelActionLegacyLayout.ts): een eigen, apart
+ * beheerde solana-test-validator,
  * los van de ambient validator die `anchor test` zelf al start (poort 8899
  * per Anchor.toml). Nodig omdat deze tests EXACTE byte-content op EXACTE,
  * vooraf-berekende PDA-adressen moeten kunnen laten bestaan VOORDAT er ooit

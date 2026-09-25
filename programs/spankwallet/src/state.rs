@@ -118,10 +118,11 @@ pub struct WalletAccount {
 
     /// Noodstop-vlag (STATUS.md sectie 115/126, mechanisme gebouwd in de
     /// noodstop-upgrade). `true` = bevroren. Zetten: freeze_via_passkey
-    /// (elke geldige passkey) of freeze_via_backup_authority, direct.
-    /// Terugzetten: unfreeze_via_backup_authority (direct) of
-    /// initiate_unfreeze/finalize_unfreeze (wachtrij, 24u, 2-of-2 bij ≥2
-    /// passkeys). Zolang `true`: alle waardepaden (execute, hunt,
+    /// (elke geldige passkey; weigert als al bevroren, sectie 155) of
+    /// freeze_via_backup_authority (idempotent), direct. Terugzetten:
+    /// unfreeze_via_backup_authority (direct, kan daarbij passkeys
+    /// verwijderen) of initiate_unfreeze/finalize_unfreeze (wachtrij, 24u,
+    /// 2-of-2 bij ≥2 passkeys). Zolang `true`: alle waardepaden (execute, hunt,
     /// *_via_session, alle initiate_*/confirm/finalize_* behalve de
     /// unfreeze-soort) en alle directe bevoegdheidswijzigingen (add_passkey,
     /// remove_passkey, add_session_key, add_allowed_program) weigeren met
@@ -200,34 +201,6 @@ impl WalletAccount {
 pub struct RecoveryState {
     pub initiated_at: i64,
     pub new_owner_passkey: [u8; PASSKEY_PUBKEY_LEN],
-}
-
-/// STATUS.md sectie 141/141-vervolg (migratie-instructie): de "From"-laag
-/// voor `Migration<'info, WalletAccountOld, WalletAccount>`
-/// (instructions.rs::migrate_wallet_account) - exact de velden t/m
-/// `session_epoch`, met een EXPLICIET discriminator-override gelijk aan het
-/// al-live `WalletAccount`-discriminator (dit MOET hetzelfde account
-/// herkennen, geen nieuw, eigen discriminator). BEWUST GEEN
-/// `spend_threshold_lamports`, BEWUST GEEN `disarmed` - dat is het hele punt
-/// van deze aparte structuurdefinitie: hij kan de regio waar de twee bekende
-/// corrupte accounts stale `RecoveryState`-restbytes hebben zitten
-/// STRUCTUREEL nooit uitlezen, ongeacht wat daar staat (empirisch bevestigd
-/// tegen beide echte, corrupte byte-sets, sectie 141-vervolg vraag 1) - een
-/// generieke `WalletAccount`-deserialisatie zou daar nog steeds op falen.
-#[account(discriminator = [0x9e, 0x62, 0xab, 0x99, 0xd4, 0x40, 0xf2, 0xd5])]
-pub struct WalletAccountOld {
-    pub seed_key: [u8; PASSKEY_PUBKEY_LEN],
-    pub wallet_seed_hash: [u8; 32],
-    pub owner_passkey: [u8; PASSKEY_PUBKEY_LEN],
-    pub bump: u8,
-    pub vault_bump: u8,
-    pub created_at: i64,
-    pub backup_authority: Pubkey,
-    pub recovery_state: Option<RecoveryState>,
-    pub recovery_timelock_seconds: i64,
-    pub deposit_authority: Option<Pubkey>,
-    pub action_nonce: u64,
-    pub session_epoch: u64,
 }
 
 impl RecoveryState {
@@ -354,7 +327,8 @@ pub struct SessionKeyAccount {
     /// is (add_session_key eist een lege lijst als can_execute_advanced
     /// false is, zie instructions.rs).
     pub count: u8,
-    /// Sub-scope voor execute_advanced_via_session (ontwerppunt 2) - moet bij
+    /// Sub-scope voor initiate_advanced_action_via_session (ontwerppunt 2;
+    /// execute_advanced_via_session is sinds sectie 153 geblokkeerd) - moet bij
     /// aanmaak een subset zijn van de op dat moment geldende
     /// PolicyAccount.allowed_programs, EN wordt bij elk gebruik OPNIEUW
     /// herverifieerd tegen de dan geldende PolicyAccount (niet gecached) -
@@ -476,9 +450,9 @@ pub const MAX_SESSION_DURATION_SLOTS: u64 = 1_512_000;
 /// hierboven - `init` faalt vanzelf op een adres dat al bezet is, dus
 /// "maximaal één openstaande grote actie tegelijk" wordt afgedwongen door
 /// Solana's eigen account-aanmaakregel, geen aparte teller/vlag nodig.
-/// `kind` onderscheidt vier gevallen (0=SolWithdrawal, 1=TokenTransfer,
-/// 2=AdvancedAction, 3=ThresholdChange) - zie sectie 115 punt 2b/2c voor de
-/// per-kind payload-/challenge-opbouw. `action_commitment` bevat BEWUST
+/// `kind` onderscheidt vijf gevallen (0=SolWithdrawal, 1=TokenTransfer,
+/// 2=AdvancedAction, 3=ThresholdChange, 4=Unfreeze) - zie sectie 115 punt
+/// 2b/2c voor de per-kind payload-/challenge-opbouw. `action_commitment` bevat BEWUST
 /// geen nonce (die beschermt alleen de initiate-handtekening zelf, al
 /// voltooid zodra dit account bestaat) - finalize herberekent 'm uit de
 /// dan aangeleverde waarden en eist een exacte match, geen nieuwe
@@ -496,9 +470,11 @@ pub struct PendingAction {
     /// één klap ongeldig, zonder 'm apart te hoeven opzoeken/sluiten.
     pub epoch: u64,
     pub action_commitment: [u8; 32],
-    /// Welke passkey initieerde - een eventuele confirm_* (2-of-2, alleen
-    /// relevant/vereist als er bij initiate al ≥2 geldige passkeys
-    /// bestonden) moet een AFWIJKENDE herleide sleutel opleveren.
+    /// De eerste passkey die deze actie autoriseerde: bij een passkey-
+    /// initiatie de initiator, bij een sessie-initiatie de passkey die
+    /// confirm_pending_action ondertekende (tot dan
+    /// SESSION_INITIATOR_SENTINEL, sectie 153). Finalize moet bij ≥2 geldige
+    /// passkeys (bij initiate) een AFWIJKENDE herleide sleutel opleveren.
     pub initiator_passkey: [u8; PASSKEY_PUBKEY_LEN],
     /// Of een tweede, andere passkey heeft mee-ondertekend. Start al
     /// `true` bij initiate als er destijds geen tweede passkey bestond

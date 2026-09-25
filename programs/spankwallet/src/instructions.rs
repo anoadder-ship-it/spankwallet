@@ -826,7 +826,10 @@ pub struct TransferToken<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop (sectie 155, verdediging in de diepte): de body weigert al
+        // onvoorwaardelijk, deze constraint maakt de blokkade daar onafhankelijk van.
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -1148,7 +1151,9 @@ pub struct ExecuteAdvanced<'info> {
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop (sectie 155, verdediging in de diepte): zie TransferToken.
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -1678,7 +1683,7 @@ fn compute_withdrawal_commitment(wallet: &Pubkey, recipient: &Pubkey, amount: u6
 }
 
 /// STATUS.md sectie 118/120: gedeelde velden-initialisatie voor een nieuw
-/// aangemaakte PendingAction - identiek voor alle vier kinds, dus hier
+/// aangemaakte PendingAction - identiek voor elke kind, dus hier
 /// ÉÉN keer geschreven i.p.v. per initiate_*-instructie herhaald. Wat WEL
 /// per kind verschilt (de challenge-opbouw, de commitment-berekening, de
 /// accounts) blijft bewust gedupliceerd - zie de toelichting bij elke
@@ -1719,7 +1724,7 @@ fn init_pending_action(
 }
 
 /// STATUS.md sectie 118/120: gedeelde epoch-/timelock-controle bij
-/// finalize - identiek voor alle vier kinds (leest alleen de kind-
+/// finalize - identiek voor elke kind (leest alleen de kind-
 /// agnostische velden van PendingAction/WalletAccount, raakt geen
 /// kind-specifieke account). Sectie 115 punt 2d: een pending action van
 /// vóór de laatste recovery is nooit meer geldig, ongeacht kind.
@@ -1770,7 +1775,7 @@ fn check_pending_action_finalizable(
 }
 
 /// STATUS.md sectie 118/120: gedeelde 2-of-2-/single-passkey-degradatie-
-/// controle bij finalize - identiek voor alle vier kinds. Zie
+/// controle bij finalize - identiek voor elke kind. Zie
 /// finalize_withdrawal's eigen doc-comment voor de volledige uitleg van
 /// waarom "confirmed" hier de doorslag geeft.
 fn check_pending_action_second_signer(
@@ -1977,7 +1982,7 @@ pub fn finalize_withdrawal(
     // een verkeerd-getypeerde pending action kan hier structureel nooit
     // een match opleveren. `kind` zelf blijft puur informatief/voor
     // client-side indexering (zodat een UI kan tonen WAT er openstaat
-    // zonder alle vier domains te hoeven proberen).
+    // zonder alle domains te hoeven proberen).
     let wallet_key = ctx.accounts.wallet.key();
     let recipient_key = ctx.accounts.recipient.key();
     let commitment = compute_withdrawal_commitment(&wallet_key, &recipient_key, amount);
@@ -3020,6 +3025,55 @@ pub struct ConfirmPendingAction<'info> {
     #[account(address = IX_SYSVAR_ID)]
     /// CHECK: geverifieerd via de secp256r1-precompile-instructie, niet via een Anchor Signer-check.
     pub instructions_sysvar: UncheckedAccount<'info>,
+
+    /// CHECK: sectie 155 - het sessie-account van de initiërende sessie. Seeds
+    /// garanderen dat dit EXACT die sessie van deze wallet is; het account mag
+    /// ontbreken (dan is de sessie ingetrokken) en wordt daarom handmatig
+    /// gelezen in check_initiating_session_live. Bij een passkey-geïnitieerde
+    /// actie is initiator_session Pubkey::default() en weigert de body al
+    /// eerder (PendingActionNotSessionInitiated).
+    #[account(
+        seeds = [b"session", wallet.key().as_ref(), pending_action.initiator_session.as_ref()],
+        bump,
+    )]
+    pub session: UncheckedAccount<'info>,
+}
+
+/// Sectie 155: een sessie-geïnitieerde actie is alleen bevestigbaar zolang de
+/// initiërende sessie nog geldig is - dezelfde vier voorwaarden als waaronder
+/// die sessie de actie mocht initiëren, behalve de programmalijsten (die
+/// herverifieert finalize_advanced_action live tegen de policy).
+///
+/// Ingetrokken (remove_session_key/close_session), bij een andere epoch, of
+/// zonder can_execute_advanced: InitiatingSessionRevoked. Verlopen:
+/// SessionExpired. Verlopen telt bewust ook als weigering: iedereen kan een
+/// verlopen sessie sluiten (close_expired_session), en daarna is "verlopen"
+/// on-chain niet meer te onderscheiden van "ingetrokken" - toestaan zou een
+/// willekeurige derde laten bepalen of een confirm slaagt. Het venster waarin
+/// de eigenaar bevoegdheid delegeerde is dan hoe dan ook voorbij; de actie
+/// kan via de passkey-route opnieuw worden geïnitieerd.
+fn check_initiating_session_live(
+    session_info: &AccountInfo,
+    initiator_session: &Pubkey,
+    wallet_session_epoch: u64,
+) -> Result<()> {
+    require!(
+        session_info.owner == &crate::ID && !session_info.data_is_empty(),
+        SpankWalletError::InitiatingSessionRevoked
+    );
+    let session = load_session_account(session_info)
+        .map_err(|_| error!(SpankWalletError::InitiatingSessionRevoked))?;
+    require!(
+        session.session_key == *initiator_session
+            && session.epoch == wallet_session_epoch
+            && session.can_execute_advanced,
+        SpankWalletError::InitiatingSessionRevoked
+    );
+    require!(
+        Clock::get()?.slot <= session.expiry_slot,
+        SpankWalletError::SessionExpired
+    );
+    Ok(())
 }
 
 /// Een passkey X bevestigt een door een sessie geïnitieerde actie. Legt X
@@ -3041,6 +3095,9 @@ pub struct ConfirmPendingAction<'info> {
 /// door dezelfde passkey mag, zoals bij de single-passkey-terugval van de
 /// passkey-route) - de eigenaar zet dan net als bij de passkey-route twee
 /// ceremonies, 24u uit elkaar.
+///
+/// De initiërende sessie moet op dat moment nog geldig zijn (sectie 155, zie
+/// check_initiating_session_live).
 pub fn confirm_pending_action(
     ctx: Context<ConfirmPendingAction>,
     client_action_nonce: u64,
@@ -3061,6 +3118,11 @@ pub fn confirm_pending_action(
         pending.epoch == ctx.accounts.wallet.session_epoch,
         SpankWalletError::PendingActionStaleEpoch
     );
+    check_initiating_session_live(
+        &ctx.accounts.session.to_account_info(),
+        &pending.initiator_session,
+        ctx.accounts.wallet.session_epoch,
+    )?;
 
     // Bindt aan de volledige commitment, niet alleen aan het PDA-adres -
     // zelfde discipline als elke finalize_*-challenge (sectie 118's
@@ -3099,10 +3161,16 @@ pub fn confirm_pending_action(
 // daarom minstens zo streng als wat daarna uitgegeven kan worden:
 //
 // - Bevriezen: direct, door elke geldige passkey of door de backup
-//   authority. Nooit door een sessiesleutel. Idempotent.
+//   authority. Nooit door een sessiesleutel. Via een passkey alleen op een
+//   niet-bevroren wallet (sectie 155: anders zou herhaald bevriezen een
+//   vrije manier zijn om de nonce te verhogen); via de backup authority
+//   idempotent.
 // - Ontdooien: direct door de backup authority, of door passkeys via de
 //   PendingAction-wachtrij (kind=Unfreeze, 24u timelock, 2-of-2 als er bij
-//   de initiatie twee of meer geldige passkeys waren).
+//   de initiatie twee of meer geldige passkeys waren). De backup authority
+//   kan daarbij in dezelfde instructie passkeys verwijderen (sectie 155):
+//   zo kan een gecompromitteerde passkey het ontdooien niet tegenhouden,
+//   ook niet door de nonce te verhogen.
 //
 // Tijdens een bevriezing zijn alle waardepaden en alle directe
 // bevoegdheidsuitbreidingen geblokkeerd (`!wallet.disarmed` op
@@ -3128,13 +3196,17 @@ pub fn confirm_pending_action(
 
 #[derive(Accounts)]
 pub struct FreezeViaPasskey<'info> {
-    /// Bewust GEEN recovery_state- of disarmed-constraint: bevriezen is een
-    /// verdediging en mag nooit geblokkeerd worden door de staat waartegen
-    /// het beschermt (idempotent als de wallet al bevroren is).
+    /// Bewust GEEN recovery_state-constraint: bevriezen is een verdediging en
+    /// mag nooit geblokkeerd worden door de staat waartegen het beschermt.
+    /// Wel weigeren op een al bevroren wallet (sectie 155): de wallet is dan
+    /// al in de gewenste staat, en een geslaagde aanroep zou alleen de nonce
+    /// verhogen - daarmee kon elke passkey-houder vooraf ondertekende
+    /// handelingen van de eigenaar ongeldig maken.
     #[account(
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
+        constraint = !wallet.disarmed @ SpankWalletError::WalletAlreadyDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -3219,10 +3291,65 @@ pub struct UnfreezeViaBackupAuthority<'info> {
         address = wallet.backup_authority @ SpankWalletError::InvalidBackupAuthoritySignature
     )]
     pub backup_authority: Signer<'info>,
+
+    /// CHECK: multi-passkey-set - hoeft niet te bestaan (zie
+    /// read_passkeys_account); seeds garanderen dat dit EXACT het
+    /// PasskeysAccount van deze wallet is. Alleen gelezen/geschreven als er
+    /// passkeys verwijderd worden.
+    #[account(
+        mut,
+        seeds = [b"passkeys", wallet.key().as_ref()],
+        bump,
+    )]
+    pub passkeys: UncheckedAccount<'info>,
 }
 
-pub fn unfreeze_via_backup_authority(ctx: Context<UnfreezeViaBackupAuthority>) -> Result<()> {
+/// Direct ontdooien door de backup authority, optioneel met het verwijderen
+/// van passkeys in dezelfde instructie (sectie 155). De backup authority is
+/// hier de asymmetrische scheidsrechter: geen passkey-handtekening, dus ook
+/// geen afhankelijkheid van de nonce - een gecompromitteerde passkey kan dit
+/// niet tegenhouden. Verwijderen volgt exact de regels van remove_passkey
+/// (gedeelde helper): nooit de laatste geldige passkey, en alles-of-niets
+/// (één ongeldige entry laat de hele instructie falen, de wallet blijft dan
+/// bevroren). Wordt er minstens één passkey verwijderd, dan stijgt
+/// session_epoch: alle sessies worden ongeldig, ook die van de eigenaar -
+/// on-chain is niet vast te stellen welke passkey welke sessie aanmaakte.
+/// Zelfde regel als finalize_recovery.
+pub fn unfreeze_via_backup_authority(
+    ctx: Context<UnfreezeViaBackupAuthority>,
+    passkeys_to_remove: Vec<[u8; PASSKEY_PUBKEY_LEN]>,
+) -> Result<()> {
     consume_action_nonce(&mut ctx.accounts.wallet)?;
+
+    if !passkeys_to_remove.is_empty() {
+        let passkeys_info = ctx.accounts.passkeys.to_account_info();
+        // Zonder PasskeysAccount is alleen owner_passkey geldig; de helper
+        // weigert dan elke verwijdering (laatste passkey of onbekend), en een
+        // schrijfpoging naar het niet-bestaande account zou sowieso falen.
+        let mut passkeys = read_passkeys_account(&passkeys_info).unwrap_or(PasskeysAccount {
+            wallet: ctx.accounts.wallet.key(),
+            bump: 0,
+            owner_passkey_revoked: false,
+            count: 0,
+            additional_passkeys: [[0u8; PASSKEY_PUBKEY_LEN]; MAX_ADDITIONAL_PASSKEYS],
+        });
+        let owner_passkey = ctx.accounts.wallet.owner_passkey;
+        for target in passkeys_to_remove.iter() {
+            remove_passkey_from_set(&mut passkeys, &owner_passkey, target)?;
+        }
+        {
+            let mut data = passkeys_info.try_borrow_mut_data()?;
+            let mut writer: &mut [u8] = &mut data;
+            passkeys.try_serialize(&mut writer)?;
+        }
+
+        ctx.accounts.wallet.session_epoch = ctx
+            .accounts
+            .wallet
+            .session_epoch
+            .checked_add(1)
+            .ok_or(SpankWalletError::SessionEpochOverflow)?;
+    }
 
     let pending_info = ctx.accounts.pending_action.to_account_info();
     if pending_info.owner == &crate::ID {
@@ -3860,8 +3987,18 @@ pub fn remove_passkey(
     consume_action_nonce(&mut ctx.accounts.wallet)?;
 
     let owner_passkey = ctx.accounts.wallet.owner_passkey;
-    let passkeys = &mut ctx.accounts.passkeys;
+    remove_passkey_from_set(&mut ctx.accounts.passkeys, &owner_passkey, &target_passkey)
+}
 
+/// Verwijdert één passkey uit de geldige set - gedeeld door remove_passkey
+/// en unfreeze_via_backup_authority (sectie 155), zodat beide routes exact
+/// dezelfde regels volgen. De owner-passkey wordt ingetrokken
+/// (owner_passkey_revoked), een extra passkey via swap-remove verwijderd.
+fn remove_passkey_from_set(
+    passkeys: &mut PasskeysAccount,
+    owner_passkey: &[u8; PASSKEY_PUBKEY_LEN],
+    target_passkey: &[u8; PASSKEY_PUBKEY_LEN],
+) -> Result<()> {
     // Lockout-bescherming: het totaal aantal geldige sleutels NA deze
     // verwijdering moet minstens 1 blijven - anders zou geen enkele
     // handtekening verify_passkey_signature_multi ooit nog accepteren en is
@@ -3877,7 +4014,7 @@ pub fn remove_passkey(
         let count = passkeys.count as usize;
         let index = passkeys.additional_passkeys[..count]
             .iter()
-            .position(|p| *p == target_passkey)
+            .position(|p| p == target_passkey)
             .ok_or(SpankWalletError::PasskeyNotRegistered)?;
         require!(total_before > 1, SpankWalletError::CannotRemoveLastPasskey);
 
@@ -4060,157 +4197,6 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
         passkeys.try_serialize(&mut writer)?;
     }
 
-    Ok(())
-}
-
-/// STATUS.md sectie 141/141-vervolg (bouw): migratie-instructie voor de
-/// spend-cap-laagwijziging (sectie 115). Gebouwd op Anchor's eigen
-/// `Migration<'info, From, To>`-type - beschikbaar sinds anchor-lang 1.0.0,
-/// dit project draait al op 1.1.2 (Cargo.lock/Anchor.toml bevestigen dit,
-/// zie sectie 141-vervolg) - GEEN framework-upgrade nodig. Permissionless
-/// (zelfde precedent als `close_expired_session`, sectie 141-vervolg vraag
-/// 3): de uitkomst is onvoorwaardelijk veilig ongeacht wie de aanroeper is -
-/// geen waardeoverdracht, geen autorisatiewijziging, uitsluitend bekende,
-/// veilige defaults voor de twee nieuwe velden. Werkt uniform voor elke
-/// bestaande `WalletAccount` (sectie 141-vervolg vraag 2: uniform boven
-/// gericht, want "slaagt zonder crash" bleek niet hetzelfde als "geeft
-/// correcte waarden terug" - een gericht-alleen-de-2-bekende-gevallen-fix
-/// zou het sluimerende corruptierisico bij eventuele toekomstige/onbekende
-/// gevallen niet afdekken).
-#[derive(Accounts)]
-pub struct MigrateWalletAccount<'info> {
-    // STATUS.md sectie 143 (bronfix, dubbele-migratie-gat): BEWUST GEEN
-    // `realloc`-constraint hier - anchor-syn's `linearize()` (constraints.rs)
-    // plaatst Realloc altijd vóór elke Raw/`constraint = ...`-check op
-    // hetzelfde veld, dus een guard via een `constraint = ...`-attribuut zou
-    // hoe dan ook pas NA de resize draaien en dus nooit het verschil tussen
-    // "nog niet gemigreerd" en "al gemigreerd" kunnen zien (beide zijn dan al
-    // 256 bytes). De guard EN de realloc zelf gebeuren daarom bewust
-    // handmatig, vooraan in migrate_wallet_account() - zie de toelichting
-    // daar.
-    #[account(
-        mut,
-        seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
-        bump = wallet.bump,
-    )]
-    pub wallet: Migration<'info, WalletAccountOld, WalletAccount>,
-
-    /// Permissionless: wie dan ook mag deze migratie triggeren en de kleine,
-    /// eenmalige rent-toename betalen die nodig is voor de gegroeide
-    /// accountruimte (oud: 231/239/247 bytes, nieuw: 256) - zelfde
-    /// precedent als `close_expired_session` hierboven.
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    pub system_program: Program<'info, System>,
-}
-
-/// STATUS.md sectie 141-vervolg ("derde aanvulling"): de ENIGE, met de hand
-/// onderzochte uitzondering op "action_nonce/session_epoch worden 1-op-1
-/// overgenomen uit WalletAccountOld". Dit ENE adres is van de zeventien
-/// bekende wallets het enige dat zowel (a) 231-byte-vintage is (van vóór
-/// action_nonce/session_epoch bestonden) ALS (b) een voltooide
-/// recovery-cyclus doorliep - de bytes die WalletAccountOld voor
-/// action_nonce/session_epoch bij DIT account leest zijn zelf ook stale
-/// RecoveryState-restanten, geen echte waarden (empirisch bevestigd:
-/// action_nonce las 11743083837406067974, session_epoch
-/// 9932421821989444450 - onmogelijke waarden voor een account van deze
-/// leeftijd/herkomst). GEEN GENERIEK PATROON, GEEN AFLEIDBARE REGEL (bijv.
-/// "alle 231-byte-accounts" is FOUT - de overige 11 231-byte-accounts zijn
-/// wél schoon, zie de volledige geschiedeniscontrole in STATUS.md sectie
-/// 141-vervolg): voeg hier NOOIT een tweede adres aan toe zonder dezelfde,
-/// volledige transactiegeschiedeniscontrole opnieuw te doen voor dat
-/// specifieke account.
-const WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH: Pubkey =
-    pubkey!("3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ");
-
-pub fn migrate_wallet_account(ctx: Context<MigrateWalletAccount>) -> Result<()> {
-    // STATUS.md sectie 143 (dubbele-migratie-gat, empirisch gevonden tijdens
-    // de live-validator-integratietest): WalletAccountOld deelt bewust
-    // hetzelfde discriminator als WalletAccount (state.rs), en Borsh's
-    // try_deserialize_unchecked controleert nooit of de hele buffer verbruikt
-    // is - een AL-gemigreerd, 256-byte account deserialiseert daardoor gewoon
-    // opnieuw succesvol als WalletAccountOld (leest de eerste velden, negeert
-    // de rest). Zonder deze guard zou een tweede aanroep dus NIET falen, maar
-    // spend_threshold_lamports/disarmed stilzwijgend terugzetten naar
-    // 0/false - empirisch bevestigd (zie STATUS.md sectie 143) vóórdat deze
-    // guard bestond.
-    //
-    // Deze check MOET gebeuren VOORDAT de accountbuffer wordt vergroot - zie
-    // de toelichting bij MigrateWalletAccount hierboven voor waarom dat een
-    // handmatige realloc vereist i.p.v. Anchor's eigen `realloc`-constraint.
-    // Elke bestaande, nog-niet-gemigreerde WalletAccount is 231, 239 of 247
-    // bytes - altijd STRIKT kleiner dan WalletAccount::LEN (256); elk account
-    // dat al exact WalletAccount::LEN is, is per definitie al gemigreerd
-    // (deze migratie is de ENIGE plek die de accountgrootte ooit naar 256
-    // brengt).
-    let wallet_info = ctx.accounts.wallet.as_ref().clone();
-    require!(
-        wallet_info.data_len() != WalletAccount::LEN,
-        SpankWalletError::WalletAccountAlreadyMigrated
-    );
-
-    // Handmatige realloc - spiegelt exact wat Anchor's eigen
-    // `realloc`/`realloc::payer`/`realloc::zero = false`-constraint zou
-    // hebben gedaan (zie anchor-syn-1.1.2's generate_constraint_realloc):
-    // rent-exempt-minimum voor de nieuwe grootte berekenen, het tekort (indien
-    // aanwezig) van `payer` overmaken, dan pas de buffer vergroten. Altijd een
-    // groei (231/239/247 -> 256, dankzij de guard hierboven), dus alleen het
-    // "grow"-pad is nodig - geen krimp-tak zoals de generieke constraint-
-    // codegen die wel heeft.
-    let rent = Rent::get()?;
-    let new_rent_minimum = rent.minimum_balance(WalletAccount::LEN);
-    if new_rent_minimum > wallet_info.lamports() {
-        let top_up = new_rent_minimum
-            .checked_sub(wallet_info.lamports())
-            .unwrap();
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.key(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.payer.to_account_info(),
-                    to: wallet_info.clone(),
-                },
-            ),
-            top_up,
-        )?;
-    }
-    wallet_info.resize(WalletAccount::LEN)?;
-
-    let is_stale_action_nonce_wallet =
-        ctx.accounts.wallet.key() == WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH;
-
-    let new_wallet = {
-        let old = ctx.accounts.wallet.try_as_from()?;
-        WalletAccount {
-            seed_key: old.seed_key,
-            wallet_seed_hash: old.wallet_seed_hash,
-            owner_passkey: old.owner_passkey,
-            bump: old.bump,
-            vault_bump: old.vault_bump,
-            created_at: old.created_at,
-            backup_authority: old.backup_authority,
-            recovery_state: old.recovery_state,
-            recovery_timelock_seconds: old.recovery_timelock_seconds,
-            deposit_authority: old.deposit_authority,
-            // Zie WALLET_WITH_STALE_ACTION_NONCE_AND_SESSION_EPOCH hierboven
-            // voor waarom dit ENE adres hier een uitzondering is - voor
-            // elke andere wallet worden deze twee velden gewoon 1-op-1
-            // overgenomen.
-            action_nonce: if is_stale_action_nonce_wallet { 0 } else { old.action_nonce },
-            session_epoch: if is_stale_action_nonce_wallet { 0 } else { old.session_epoch },
-            // Bewust ALTIJD 0/false, voor elke wallet zonder uitzondering -
-            // geen enkele bestaande WalletAccount heeft deze velden ooit
-            // doelbewust beschreven (ze bestonden niet vóór deze migratie),
-            // dus er is structureel niets om over te nemen.
-            // WalletAccountOld kent deze velden zelfs niet - hier valt dus
-            // ook niets "per ongeluk" over te nemen.
-            spend_threshold_lamports: 0,
-            disarmed: false,
-        }
-    };
-
-    ctx.accounts.wallet.migrate(new_wallet)?;
     Ok(())
 }
 
@@ -4819,7 +4805,9 @@ pub struct ExecuteAdvancedViaSession<'info> {
     #[account(
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
+        // Noodstop (sectie 155, verdediging in de diepte): zie TransferToken.
+        constraint = !wallet.disarmed @ SpankWalletError::WalletDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
 

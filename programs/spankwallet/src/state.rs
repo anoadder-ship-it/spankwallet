@@ -119,10 +119,11 @@ pub struct WalletAccount {
     /// Noodstop-vlag (STATUS.md sectie 115/126, mechanisme gebouwd in de
     /// noodstop-upgrade). `true` = bevroren. Zetten: freeze_via_passkey
     /// (elke geldige passkey; weigert als al bevroren, sectie 155) of
-    /// freeze_via_backup_authority (idempotent), direct. Terugzetten:
+    /// freeze_via_backup_authority (idempotent, ook tijdens een lopende
+    /// recovery, sectie 159), direct. Terugzetten:
     /// unfreeze_via_backup_authority (direct, kan daarbij passkeys
-    /// verwijderen; beide backup-routes weigeren tijdens een lopende
-    /// recovery, sectie 158) of initiate_unfreeze/finalize_unfreeze (wachtrij, 24u,
+    /// verwijderen; weigert tijdens een lopende recovery, sectie 158) of
+    /// initiate_unfreeze/finalize_unfreeze (wachtrij, 24u,
     /// 2-of-2 bij ≥2 passkeys). Zolang `true`: alle waardepaden (execute, hunt,
     /// *_via_session, alle initiate_*/confirm/finalize_* behalve de
     /// unfreeze-soort) en alle directe bevoegdheidswijzigingen (add_passkey,
@@ -133,6 +134,24 @@ pub struct WalletAccount {
     /// hij tegen beschermt. Zie instructions.rs (blok "Noodstop") voor de
     /// volledige toelichting.
     pub disarmed: bool,
+
+    /// STATUS.md sectie 159: action_nonce op het moment van
+    /// initiate_recovery - een vaste momentopname, geen live waarde.
+    /// cancel_recovery bindt zijn challenge hieraan (naast initiated_at en
+    /// new_owner_passkey). cancel_recovery en finalize_recovery verhogen de
+    /// nonce allebei en zetten dit veld terug op 0, dus elke volgende
+    /// recovery heeft een strikt hogere momentopname - ook als hij in
+    /// dezelfde seconde met dezelfde nieuwe sleutel start.
+    ///
+    /// Alleen betekenisvol zolang `recovery_state` Some is: initiate_recovery
+    /// schrijft het altijd voordat iets het leest. Bewust een vlak veld
+    /// ACHTERAAN, niet in RecoveryState: een extra veld in RecoveryState zou
+    /// bij een tijdens de upgrade lopende recovery alle velden erachter
+    /// verschuiven (op devnet gemeten: recovery_timelock_seconds zou dan als
+    /// 0 gelezen worden). Hier achteraan leest zo'n lopende recovery 0 uit
+    /// de padding van het 256-byte-account, en de bereikbare worst case
+    /// (recovery_state Some, deposit_authority None) is 232 bytes.
+    pub recovery_nonce_snapshot: u64,
 }
 
 impl WalletAccount {
@@ -142,6 +161,13 @@ impl WalletAccount {
     // + deposit_authority option (1 + 32) + action_nonce (8) + session_epoch (8)
     // + spend_threshold_lamports (8) + disarmed (1)
     //   = 247 (vóór sectie 115) + 9 (de twee nieuwe velden) = 256
+    // + recovery_nonce_snapshot (8, sectie 159) = 264
+    //
+    // Sectie 159 (2026-09-25): alle 19 WalletAccounts op devnet zijn 256
+    // bytes. Bereikbare worst case wordt 224 + 8 = 232: past, geen migratie
+    // nodig. De volledige Option-worst-case (264) past niet in 256, zelfde
+    // dode-letter-situatie als hieronder beschreven (deposit_authority wordt
+    // nooit Some).
     //
     // STATUS.md sectie 115/meetstap 1 (2026-08-30): 256 is de VOLLEDIGE
     // Option-worst-case (recovery_state EN deposit_authority beide Some) -
@@ -169,7 +195,8 @@ impl WalletAccount {
         + 8
         + 8
         + 8
-        + 1;
+        + 1
+        + 8;
 
     /// STATUS.md sectie 141-vervolg (bronfix): byte-offset, IN DE RUWE
     /// accountbytes (inclusief de 8-byte Anchor-discriminator), waar de
@@ -594,6 +621,7 @@ mod tests {
             // volledige, huidige LEN blijft serialiseren.
             spend_threshold_lamports: 0,
             disarmed: false,
+            recovery_nonce_snapshot: 0,
         }
     }
 
@@ -690,6 +718,30 @@ mod tests {
         assert!(
             result.is_err(),
             "een 247-byte WalletAccount (mét action_nonce/session_epoch, zonder spend_threshold_lamports/disarmed) had schoon moeten falen tegen de huidige layout"
+        );
+    }
+
+    /// STATUS.md sectie 159 - zelfde fail-closed-grens voor de Some/Some-
+    /// layout, nu voor een 256-byte WalletAccount (van vóór
+    /// recovery_nonce_snapshot). Zelfde beperking als de drie tests
+    /// hierboven: dit bewaakt alleen de theoretische Some/Some-grens.
+    #[test]
+    fn old_256_byte_wallet_account_fails_closed_against_current_layout() {
+        let wallet = sample_wallet_for_layout_tests();
+
+        let mut current_layout_bytes = Vec::new();
+        wallet.try_serialize(&mut current_layout_bytes).unwrap();
+        assert_eq!(current_layout_bytes.len(), WalletAccount::LEN);
+        assert_eq!(WalletAccount::LEN, 264);
+
+        let old_layout_bytes = &current_layout_bytes[..256];
+        assert_eq!(old_layout_bytes.len(), 256);
+
+        let mut slice: &[u8] = old_layout_bytes;
+        let result = WalletAccount::try_deserialize(&mut slice);
+        assert!(
+            result.is_err(),
+            "een 256-byte WalletAccount (zonder recovery_nonce_snapshot) had schoon moeten falen tegen de huidige Some/Some-layout"
         );
     }
 

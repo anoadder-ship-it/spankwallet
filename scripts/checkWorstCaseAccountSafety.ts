@@ -29,11 +29,12 @@ function disc(name: string): Buffer {
 
 const PROGRAM_ID = new PublicKey("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
 
-// Pas deze vier constanten aan per upgrade die gecontroleerd wordt.
-// Huidig ingevuld voor de B1-B7-vraag (sectie 84/85, 2026-08-22).
-const WALLET_LEN_ALL_OPTIONS_SOME = 247; // volledige theoretische worst case (recovery_state EN deposit_authority Some)
-const WALLET_LEN_REACHABLE_WORST_CASE = 215; // recovery_state Some (initiate_recovery, echt bereikbaar), deposit_authority geforceerd None (zie waarschuwing hierboven)
-const SESSION_LEN_NEW = 429; // SessionKeyAccount heeft geen Option-velden: "worst case" == enige case
+// Pas deze constanten aan per upgrade die gecontroleerd wordt.
+// Huidig ingevuld voor sectie 159 (recovery_nonce_snapshot, 2026-09-25).
+// Eerder: 247/215 (sectie 84/85), tijdelijk 256/224 (sectie 115).
+const WALLET_LEN_ALL_OPTIONS_SOME = 264; // WalletAccount::LEN: volledige theoretische worst case (recovery_state EN deposit_authority Some)
+const WALLET_LEN_REACHABLE_WORST_CASE = 264 - 32; // = 232: recovery_state Some (initiate_recovery, echt bereikbaar), deposit_authority geforceerd None (zie waarschuwing hierboven)
+const SESSION_LEN_NEW = 429; // SessionKeyAccount::LEN, ongewijzigd sinds sectie 85; geen Option-velden: "worst case" == enige case
 
 async function main() {
   const connection = new Connection("https://api.devnet.solana.com", "confirmed");

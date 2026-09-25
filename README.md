@@ -90,8 +90,8 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | add_passkey                     | Een van de al geldige passkeys        | Extra, gelijkwaardige passkey registreren (multi-passkey)           |
 | remove_passkey                  | Een van de al geldige passkeys        | Passkey intrekken (lockout-beschermd: nooit de laatste verwijderen) |
 | initiate_recovery                | Backup authority                     | Recovery starten                                                    |
-| cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren; de handtekening is gebonden aan precies deze recovery (geen nonce) |
-| finalize_recovery                | Permissionless (na timelock)          | Recovery afronden: wist alle extra passkeys, maakt bestaande sessiesleutels ongeldig (epoch-verhoging, sluit ze niet) |
+| cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren; de handtekening is gebonden aan precies deze recovery-poging (momentopname van de nonce bij de start, niet de live nonce) |
+| finalize_recovery                | Permissionless (na timelock)          | Recovery afronden: wist alle extra passkeys, maakt bestaande sessiesleutels ongeldig (epoch-verhoging, sluit ze niet), verhoogt de action_nonce |
 | add_session_key                  | Een van de al geldige passkeys        | Tijdelijke session key registreren (scope + slot-gebonden expiry)   |
 | remove_session_key               | Een van de al geldige passkeys        | Session key vroegtijdig intrekken                                    |
 | close_session                    | De session key zelf                   | Eigen sessie zelf sluiten, rent terug (enige zelfstandige actie)     |
@@ -102,7 +102,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | initiate_advanced_action_via_session | De session key zelf                 | CPI aankondigen in de PendingAction-wachtrij (kind=AdvancedAction); geen CPI, geen nonce |
 | confirm_pending_action            | Passkey                               | Een door een sessie geïnitieerde actie bevestigen; de timelock start hier. Weigert als de initiërende sessie ingetrokken of verlopen is |
 | freeze_via_passkey                | Passkey                               | Wallet bevriezen (noodstop); weigert als de wallet al bevroren is  |
-| freeze_via_backup_authority       | Backup authority                      | Wallet bevriezen (noodstop), idempotent; weigert tijdens een lopende recovery |
+| freeze_via_backup_authority       | Backup authority                      | Wallet bevriezen (noodstop), idempotent; werkt ook tijdens een lopende recovery |
 | unfreeze_via_backup_authority     | Backup authority                      | Direct ontdooien; kan in dezelfde instructie passkeys verwijderen (zie Veiligheidsprincipes); weigert tijdens een lopende recovery |
 | initiate_unfreeze                 | Passkey                               | Ontdooien aankondigen (queued, timelock) - opent PendingAction (kind=Unfreeze) |
 | finalize_unfreeze                 | Passkey                               | Aangekondigd ontdooien afronden, ná de timelock (2-van-2 bij ≥2 passkeys) |
@@ -130,7 +130,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (121 passing, 108 pending, 0 failing - `npm test`, 2026-09-25)
+tests/                        - Anchor-tests (121 passing, 112 pending, 0 failing - `npm test`, 2026-09-25)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -304,9 +304,19 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
   vanaf dat moment met `SessionRevokedByRecovery` - de accounts zelf blijven bestaan tot
   ze via `remove_session_key`, `close_session` of `close_expired_session` daadwerkelijk
   opgeruimd worden. De handtekening van het veto is gebonden aan precies de lopende
-  recovery (startmoment en nieuwe sleutel), niet aan de action_nonce. Zolang een recovery
-  loopt, weigeren de backup-routes (bevriezen en direct ontdooien); in dezelfde transactie
-  direct na `cancel_recovery` of `finalize_recovery` werken ze weer.
+  recovery-poging: een momentopname van de action_nonce bij `initiate_recovery`, plus het
+  startmoment en de nieuwe sleutel - niet aan de live action_nonce. Omdat `cancel_recovery`
+  en `finalize_recovery` de nonce allebei verhogen, geldt een handtekening nooit voor een
+  latere poging, ook niet als die in dezelfde seconde met dezelfde sleutel start.
+- Tijdens een lopende recovery kan de backup authority de wallet bevriezen, maar niet direct
+  ontdooien. Bevriezen is nodig omdat elke geldige passkey de recovery kan annuleren en de
+  waardepaden daarmee weer opengaan; een eigenaar die alleen nog de backup-sleutel heeft,
+  moet dat kunnen voorkomen. Direct ontdooien kan passkeys verwijderen en blijft daarom
+  geblokkeerd: zo ligt vast welke passkeys de recovery mogen tegenhouden. Dat houdt de
+  combinatie backup-sleutel + één passkey niet tegen (zie hierboven, 2-van-3); die kan de
+  passkey-set vóór een recovery al aanpassen. Wie vermoedt dat een passkey in verkeerde
+  handen is, bevriest vóór of samen met `initiate_recovery`, en verwijdert eventuele
+  passkeys vóór de recovery.
 - Elke gevoelige actie bindt zijn volledige, relevante parameters in de ondertekende
   challenge (nooit alleen een deel) - voorkomt dat een geldige handtekening voor iets anders
   hergebruikt kan worden dan waarvoor hij bedoeld was.

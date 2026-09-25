@@ -250,6 +250,8 @@ pub fn init_wallet(
     wallet.action_nonce = 0;
     // B2 (STATUS.md sectie 76): start op 0, zelfde reden als action_nonce.
     wallet.session_epoch = 0;
+    // Sectie 159: alleen betekenisvol tijdens een recovery; zie state.rs.
+    wallet.recovery_nonce_snapshot = 0;
 
     let vault = &mut ctx.accounts.vault;
     vault.wallet = wallet.key();
@@ -3171,9 +3173,10 @@ pub fn confirm_pending_action(
 //   kan daarbij in dezelfde instructie passkeys verwijderen (sectie 155):
 //   zo kan een gecompromitteerde passkey het ontdooien niet tegenhouden,
 //   ook niet door de nonce te verhogen.
-// - Beide backup-routes weigeren tijdens een lopende recovery (sectie
-//   158); in dezelfde transactie direct na cancel_recovery of
-//   finalize_recovery werken ze weer.
+// - Tijdens een lopende recovery (sectie 158/159): bevriezen via de backup
+//   authority blijft werken, direct ontdooien via de backup authority
+//   weigert. Zie de toelichting bij FreezeViaBackupAuthority en
+//   UnfreezeViaBackupAuthority.
 //
 // Tijdens een bevriezing zijn alle waardepaden en alle directe
 // bevoegdheidsuitbreidingen geblokkeerd (`!wallet.disarmed` op
@@ -3250,15 +3253,22 @@ pub fn freeze_via_passkey(
 
 #[derive(Accounts)]
 pub struct FreezeViaBackupAuthority<'info> {
-    /// Sectie 158: de backup-routes weigeren tijdens een lopende recovery.
-    /// Tijdens een recovery zijn alle waardepaden al dicht; bevriezen kan
-    /// vóór de recovery, via een passkey, of in dezelfde transactie direct
-    /// na cancel_recovery/finalize_recovery.
+    /// Sectie 159: bewust GEEN recovery_state-constraint (sectie 158 had er
+    /// een; die is teruggedraaid). Tijdens een recovery zijn de waardepaden
+    /// alleen dicht zolang de recovery loopt: elke geldige passkey kan
+    /// cancel_recovery aanroepen, en in dezelfde transactie gaan de
+    /// waardepaden dan weer open. Een eigenaar die alleen nog de backup-
+    /// sleutel heeft, moet daarom ook tijdens de recovery kunnen bevriezen.
+    ///
+    /// Dit heropent het probleem uit sectie 155/158 niet: bevriezen wijzigt
+    /// de passkey-set en recovery_state niet, en cancel_recovery hangt niet
+    /// van de live action_nonce af (challenge over recovery_nonce_snapshot)
+    /// en draagt geen disarmed-constraint. Wat hier de nonce ophoogt, raakt
+    /// het veto dus niet.
     #[account(
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
-        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -3274,9 +3284,22 @@ pub fn freeze_via_backup_authority(ctx: Context<FreezeViaBackupAuthority>) -> Re
 
 #[derive(Accounts)]
 pub struct UnfreezeViaBackupAuthority<'info> {
-    /// Sectie 158: weigert tijdens een lopende recovery, zie
-    /// FreezeViaBackupAuthority. De recovery-controle staat vóór de
-    /// disarmed-controle, zodat de foutcode niet van de bevriezing afhangt.
+    /// Sectie 158/159: weigert tijdens een lopende recovery. Deze instructie
+    /// kan passkeys verwijderen; de blokkade legt de veto-set vast zolang de
+    /// recovery loopt: wie de recovery startte (de backup authority), kan
+    /// tijdens de timelock niet meer veranderen welke passkeys hem mogen
+    /// tegenhouden. Wie de set wil verkleinen, moet dat vóór de recovery
+    /// doen, en dat is dan zichtbaar voordat de timelock begint.
+    ///
+    /// Wat de blokkade NIET oplost: wie de backup-sleutel en één passkey
+    /// heeft, kan buiten een recovery al alle andere passkeys verwijderen en
+    /// daarna een recovery starten (de 2-van-3 uit de README). Die
+    /// combinatie houdt deze blokkade niet tegen. Keerzijde: ook een eerlijke
+    /// eigenaar kan tijdens een recovery geen passkey verwijderen; ook dat
+    /// moet vóór initiate_recovery.
+    ///
+    /// De recovery-controle staat vóór de disarmed-controle, zodat de
+    /// foutcode niet van de bevriezing afhangt.
     #[account(
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
@@ -4062,10 +4085,13 @@ pub fn initiate_recovery(
 ) -> Result<()> {
     validate_passkey_prefix(&new_owner_passkey)?;
     let clock = Clock::get()?;
-    ctx.accounts.wallet.recovery_state = Some(RecoveryState {
+    let wallet = &mut ctx.accounts.wallet;
+    wallet.recovery_state = Some(RecoveryState {
         initiated_at: clock.unix_timestamp,
         new_owner_passkey,
     });
+    // Sectie 159: vaste momentopname voor de cancel_recovery-challenge.
+    wallet.recovery_nonce_snapshot = wallet.action_nonce;
     Ok(())
 }
 
@@ -4093,25 +4119,28 @@ pub struct CancelRecovery<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-/// Sectie 158: de challenge bevat bewust GEEN action_nonce, maar is
-/// gebonden aan precies deze recovery (initiated_at + new_owner_passkey,
-/// domein cancel_recovery_v2). Het veto van de eigenaar hangt daardoor
-/// alleen af van de recovery zelf. Annuleren is veilig ongeacht wie de
-/// handtekening indient; een herhaling werkt alleen tegen een recovery met
-/// exact dezelfde initiated_at en new_owner_passkey, en betekent dan
-/// hetzelfde veto. De nonce stijgt wel, zoals bij elke passkey-actie.
+/// Sectie 158/159: de challenge bevat bewust niet de live action_nonce, maar
+/// is gebonden aan precies deze recovery-poging (domein
+/// cancel_recovery_v3, payload recovery_nonce_snapshot || initiated_at ||
+/// new_owner_passkey). Het veto hangt daardoor niet af van wat er tijdens de
+/// recovery met de nonce gebeurt. De momentopname is de action_nonce bij
+/// initiate_recovery; cancel_recovery en finalize_recovery verhogen de nonce
+/// allebei, dus elke volgende recovery heeft een strikt hogere momentopname
+/// en een handtekening geldt nooit voor een latere poging. Annuleren is
+/// veilig ongeacht wie de handtekening indient.
 pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) -> Result<()> {
     let recovery = ctx
         .accounts
         .wallet
         .recovery_state
         .ok_or(SpankWalletError::NoRecoveryInProgress)?;
-    let mut payload = Vec::with_capacity(8 + PASSKEY_PUBKEY_LEN);
+    let mut payload = Vec::with_capacity(8 + 8 + PASSKEY_PUBKEY_LEN);
+    payload.extend_from_slice(&ctx.accounts.wallet.recovery_nonce_snapshot.to_le_bytes());
     payload.extend_from_slice(&recovery.initiated_at.to_le_bytes());
     payload.extend_from_slice(&recovery.new_owner_passkey);
 
     let expected_challenge =
-        build_expected_challenge(&ctx.accounts.wallet.key(), b"cancel_recovery_v2", &payload);
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"cancel_recovery_v3", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,
@@ -4121,6 +4150,7 @@ pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) 
     )?;
     consume_action_nonce(&mut ctx.accounts.wallet)?;
     ctx.accounts.wallet.recovery_state = None;
+    ctx.accounts.wallet.recovery_nonce_snapshot = 0;
     clear_recovery_state_payload_bytes(&ctx.accounts.wallet.to_account_info())?;
     Ok(())
 }
@@ -4180,6 +4210,13 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
 
     wallet.owner_passkey = recovery.new_owner_passkey;
     wallet.recovery_state = None;
+    // Sectie 159: net als cancel_recovery verhoogt afronden de nonce, zodat
+    // de momentopname van elke volgende recovery strikt hoger is (anders kon
+    // een recovery na een AFGERONDE recovery dezelfde momentopname krijgen).
+    // Dit maakt ook elke nog openstaande passkey-handtekening ongeldig; de
+    // passkey-set wordt hieronder toch gewist.
+    consume_action_nonce(wallet)?;
+    wallet.recovery_nonce_snapshot = 0;
     clear_recovery_state_payload_bytes(&wallet.to_account_info())?;
     // B2 (STATUS.md sectie 76): elke bestaande sessiesleutel wordt hier in
     // één klap ongeldig - zie execute_via_session/transfer_token_via_session/

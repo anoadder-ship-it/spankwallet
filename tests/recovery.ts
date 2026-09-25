@@ -18,6 +18,7 @@ import {
   encodeOptionalI64,
   advanceOnChainClockPast,
   fetchActionNonce,
+  nonceLeBytes,
 } from "./webauthnTestHelper";
 
 describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize zelf vereisen geen passkey, init_wallet erin wel)", () => {
@@ -284,6 +285,13 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
   // geïmporteerd) - een toekomstige veldherordening/-toevoeging die deze
   // constanten laat verschuiven zou dit testbewijs dan ook zelf moeten
   // bijwerken, geen stille aanname.
+  //
+  // Sectie 159: sinds recovery_nonce_snapshot (8 bytes, achter `disarmed`)
+  // zijn de 7 bytes hieronder niet meer "buiten elk veld", maar de eerste 7
+  // bytes van dat nieuwe veld. cancel_recovery en finalize_recovery zetten
+  // het op 0, dus de check blijft geldig en dekt nu ook die reset. De
+  // bytes daarna (vanaf 191) vallen buiten deze test, zoals voorheen de
+  // bytes vanaf 190.
   const RECOVERY_STATE_PAYLOAD_OFFSET = 149; // WalletAccount::RECOVERY_STATE_PAYLOAD_OFFSET
   const RECOVERY_STATE_PAYLOAD_LEN = 41; // RecoveryState::LEN
   // Einde van wat de HUIDIGE struct daadwerkelijk beschrijft, vanaf
@@ -408,17 +416,19 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       "sanity-check: de RecoveryState-payload-regio hoort NIET al-nul te zijn direct na initiate_recovery"
     );
 
-    // Sectie 158: de challenge is gebonden aan deze recovery, zonder nonce.
+    // Sectie 158/159: de challenge is gebonden aan deze recovery-poging
+    // (momentopname van de nonce bij initiate_recovery), niet aan de live nonce.
     const walletAfterInitiate = await program.account.walletAccount.fetch(walletPda);
     const nonceBefore = await fetchActionNonce(provider.connection, walletPda);
     const cancelPayload = Buffer.concat([
+      nonceLeBytes(BigInt(walletAfterInitiate.recoveryNonceSnapshot.toString())),
       walletAfterInitiate.recoveryState.initiatedAt.toArrayLike(Buffer, "le", 8),
       Buffer.from(walletAfterInitiate.recoveryState.newOwnerPasskey),
     ]);
     const cancelChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
-      "cancel_recovery_v2",
+      "cancel_recovery_v3",
       cancelPayload
     );
     const cancelSigned = signTestChallenge(passkey, cancelChallenge);

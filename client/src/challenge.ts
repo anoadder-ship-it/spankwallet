@@ -114,6 +114,16 @@ function offsetAfterDepositAuthority(data: Buffer): number {
   return offset; // = offset van action_nonce
 }
 
+/**
+ * Offset van WalletAccount.recovery_nonce_snapshot (STATUS.md sectie 159):
+ * het veld staat achter `disarmed`, dus na action_nonce(8) + session_epoch(8)
+ * + spend_threshold_lamports(8) + disarmed(1). Alleen betekenisvol zolang
+ * recovery_state Some is.
+ */
+export function offsetOfRecoveryNonceSnapshot(data: Buffer): number {
+  return offsetAfterDepositAuthority(data) + 8 + 8 + 8 + 1;
+}
+
 export async function readActionNonce(
   connection: Connection,
   walletPda: PublicKey

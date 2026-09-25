@@ -14792,9 +14792,12 @@ staat die vóór de `disarmed`-constraint, zodat de foutcode niet van de bevriez
 `freeze_via_backup_authority` had geen `disarmed`-constraint (bewust idempotent) en houdt
 die ook niet.
 
-Er gaat niets verloren: tijdens een recovery zijn alle waardepaden al dicht. Bevriezen
-kan vóór de recovery, via een passkey, of in dezelfde transactie direct na
-`cancel_recovery`/`finalize_recovery`; dat laatste geldt ook voor direct ontdooien.
+GECORRIGEERD (sectie 159): hier stond dat er niets verloren ging omdat tijdens een recovery
+alle waardepaden al dicht zijn. Dat klopte niet: elke geldige passkey kan de recovery
+annuleren, en in dezelfde transactie gaan de waardepaden dan weer open. Een eigenaar die
+alleen nog de backup-sleutel heeft, verloor zo de mogelijkheid om tijdens de recovery te
+bevriezen. Sectie 159 draait de blokkade op `freeze_via_backup_authority` terug; die op
+`unfreeze_via_backup_authority` blijft, met de onderbouwing uit sectie 159.
 
 ### 2. `cancel_recovery` gebonden aan de recovery, niet aan de nonce
 
@@ -14830,6 +14833,107 @@ Regressie (2026-09-25): `yarn test:pending-action` 105 passing / 0 failing (1 pe
 rollover-test, alleen onder zijn eigen feature); `yarn test` 121 passing / 0 failing
 (108 pending), geen stackframe-waarschuwingen; `yarn test:spend-window-rollover` 106
 passing / 0 failing. Client: `tsc --noEmit` schoon.
+
+Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
+RC-verificatie, dan het upgradevoorstel.
+
+## 159. Recovery: bevriezen tijdens een recovery, cancel_recovery aan een momentopname van de nonce (2026-09-25)
+
+Reparatieronde na de onafhankelijke review van sectie 158 (bevindingen M1 en L1). Rood vóór
+groen: de tests zijn eerst geschreven en gedraaid tegen het ongewijzigde programma (8d8206b).
+
+### 1. Bevriezen via de backup authority werkt weer tijdens een recovery (M1)
+
+De constraint `recovery_state.is_none()` op `freeze_via_backup_authority` uit sectie 158 is
+verwijderd. Tijdens een recovery zijn de waardepaden alleen dicht zolang de recovery loopt:
+elke geldige passkey kan `cancel_recovery` aanroepen, en in dezelfde transactie gaan de
+waardepaden dan weer open. Een eigenaar die alleen nog de backup-sleutel heeft, moet daarom
+ook tijdens de recovery kunnen bevriezen.
+
+Dit heropent het probleem uit sectie 155/158 niet: bevriezen wijzigt de passkey-set en
+`recovery_state` niet, en `cancel_recovery` hangt niet van de live `action_nonce` af (zie
+punt 3) en draagt geen `disarmed`-constraint. Dat bevriezen de nonce ophoogt, raakt het veto
+dus niet.
+
+### 2. Direct ontdooien via de backup authority blijft geblokkeerd tijdens een recovery
+
+`unfreeze_via_backup_authority` kan passkeys verwijderen. De blokkade legt de veto-set vast
+zolang de recovery loopt: wie de recovery startte (de backup authority), kan tijdens de
+timelock niet meer veranderen welke passkeys hem mogen tegenhouden. Wie de set wil
+verkleinen, moet dat vóór de recovery doen, en dat is dan zichtbaar voordat de timelock
+begint.
+
+Wat de blokkade niet oplost: wie de backup-sleutel en één passkey heeft, kan buiten een
+recovery al alle andere passkeys verwijderen en daarna een recovery starten (de 2-van-3 uit
+de README, sectie 158). Die combinatie houdt deze blokkade niet tegen. Keerzijde: ook een
+eerlijke eigenaar kan tijdens een recovery geen passkey verwijderen; dat moet vóór
+`initiate_recovery`.
+
+### 3. `cancel_recovery` gebonden aan een momentopname van de nonce (L1)
+
+Nieuw veld `WalletAccount.recovery_nonce_snapshot: u64`, achteraan (na `disarmed`).
+`initiate_recovery` zet het op de `action_nonce` van dat moment. De challenge wordt
+`cancel_recovery_v3` over `recovery_nonce_snapshot || initiated_at || new_owner_passkey`
+(nieuw domein: de v2-payload had dezelfde lengte als een payload met alleen de momentopname).
+
+`finalize_recovery` verhoogt nu ook de `action_nonce`, net als `cancel_recovery`; beide zetten
+de momentopname terug op 0. Omdat een recovery alleen via die twee eindigt en de nonce nooit
+daalt, heeft elke volgende recovery een strikt hogere momentopname, ook als hij in dezelfde
+seconde met dezelfde nieuwe sleutel start. Sectie 158 garandeerde dat alleen per seconde.
+
+Layout: het veld staat bewust niet in `RecoveryState`. Dat zou bij een recovery die tijdens de
+upgrade loopt alle velden erachter verschuiven; op devnet loopt er één
+(`5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ`, gestart 2026-08-10), en die zou
+`recovery_timelock_seconds` dan als 0 lezen. Achteraan leest die recovery 0 uit de padding.
+
+Devnet-check (read-only, 2026-09-25): 19 WalletAccounts, alle 256 bytes; geen
+`deposit_authority` Some. `WalletAccount::LEN` wordt 264; de bereikbare worst case
+(`recovery_state` Some, `deposit_authority` None) wordt 232 en past. Geen migratie nodig. De
+volledige Option-worst-case (264) past niet in 256 - ongewijzigde dode-letter-situatie. Twee
+bekende wallets (`3Ape3ge7…`, `FSGNLavh…`) hebben niet-nul-bytes op de plek van het nieuwe
+veld zolang `recovery_state` None is; het veld wordt alleen gelezen als `recovery_state` Some
+is, en `initiate_recovery` schrijft het altijd eerst.
+
+`scripts/checkWorstCaseAccountSafety.ts` bijgewerkt naar 264 (volledig) / 232 (bereikbaar)
+en opnieuw gedraaid (read-only, 2026-09-25): 19 WalletAccounts, 0 onveilig onder de
+bereikbare worst case, 19 "onveilig" onder de volledige Option-worst-case (dode letter,
+zie boven). SessionKeyAccount ongewijzigd (429): 4 accounts, 3 onder 429 - de drie bekende
+341-byte-accounts uit sectie 86/88, los van deze wijziging.
+
+Bijgewerkt: `client/src/recovery.ts` (v3-payload, momentopname uitgelezen),
+`client/src/challenge.ts` (offset-helper), `client/src/cancelRecoveryPreview.ts` (de kaart
+noemt de recovery-poging), README.
+
+### Tests
+
+Rood (tegen 8d8206b, `yarn test:pending-action`): 103 passing, 6 failing, allemaal om de
+bedoelde reden:
+- `[159] M1`: bevriezen via backup gaf `RecoveryAlreadyInProgress (6007)`; een tweede
+  passkey-houder annuleerde en gaf in dezelfde transactie 0,1 SOL uit.
+- `[159] L1`: twee recovery's in dezelfde seconde met dezelfde sleutel (in één transactie);
+  de cancel-handtekening van de eerste landde opnieuw tegen de tweede.
+- `[159]` volgordes in één transactie: bevriezen + `cancel_recovery` en `initiate_recovery` +
+  bevriezen faalden met 6007.
+- `[159]` momentopname: `finalize_recovery` verhoogde de nonce niet.
+- De twee omgedraaide tests `[158/159]` (bevriezen tijdens een recovery; herhaalde
+  backup-pogingen) faalden op het oude gedrag.
+
+Omgedraaid in overleg: de twee `[158]`-tests die het oude gedrag vastlegden. De test met
+herhaalde backup-pogingen begint nu met een ontdooiing op een niet-bevroren wallet, zodat de
+foutcode-volgorde (`RecoveryAlreadyInProgress` vóór `WalletNotDisarmed`) getest blijft.
+De foutcode-tabel bevat nu ook `WalletDisarmed (6053)` en `WalletNotDisarmed (6067)`.
+De test-ondertekenhulp tekende in de rode run nog v2; de overstap naar v3 hoort bij de fix.
+
+Bestaande tests die aannemen dat de nonce na `finalize_recovery` gelijk blijft: geen gevonden
+(elke aanroep na een finalize leest de nonce live). Wel aangepast: `tests/recovery.ts` (de
+cancel-test tekent v3; de stale-tail-controle van sectie 141 dekt nu de eerste 7 bytes van
+het nieuwe veld, dat op 0 wordt gezet - toelichting bij de constanten, testlogica
+ongewijzigd). Rust: nieuwe fail-closed-grenstest voor een 256-byte WalletAccount.
+
+Groen (2026-09-25): `cargo test` 9 passed; `yarn test:pending-action` 109 passing /
+0 failing (1 pending: de rollover-test); `yarn test` 121 passing / 0 failing (112 pending),
+geen stackframe-waarschuwingen; `yarn test:spend-window-rollover` 110 passing / 0 failing.
+Client: `tsc --noEmit` schoon.
 
 Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
 RC-verificatie, dan het upgradevoorstel.

@@ -8,7 +8,13 @@ import {
 } from "@solana/web3.js";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
+import {
+  concatBytes,
+  encodeBorshVecU8,
+  buildExpectedChallenge,
+  actionNonceLeBytes,
+  offsetOfRecoveryNonceSnapshot,
+} from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 
@@ -32,6 +38,8 @@ const OFFSET_RECOVERY_NEW_OWNER_PASSKEY = 157;
 export interface ParsedRecoveryState {
   initiatedAt: bigint;
   newOwnerPasskey: Uint8Array;
+  /** WalletAccount.recovery_nonce_snapshot: de action_nonce bij initiate_recovery (sectie 159). */
+  nonceSnapshot: bigint;
 }
 
 export interface ParsedWalletAccount {
@@ -67,8 +75,9 @@ export async function readWalletAccount(
     )
   );
   const recoveryTimelockSeconds = data.readBigInt64LE(OFFSET_RECOVERY_NEW_OWNER_PASSKEY + 33);
+  const nonceSnapshot = data.readBigUInt64LE(offsetOfRecoveryNonceSnapshot(data));
 
-  return { recoveryState: { initiatedAt, newOwnerPasskey }, recoveryTimelockSeconds };
+  return { recoveryState: { initiatedAt, newOwnerPasskey, nonceSnapshot }, recoveryTimelockSeconds };
 }
 
 export async function buildInitiateRecoveryTransaction(
@@ -108,10 +117,13 @@ export interface CancelRecoveryResult {
 }
 
 /**
- * Sectie 158: de handtekening is gebonden aan precies deze recovery
- * (initiated_at + new_owner_passkey, domein cancel_recovery_v2), zonder
- * action_nonce - ook het instructieargument client_action_nonce is weg.
- * Een handtekening voor de ene recovery geldt nooit voor een andere.
+ * Sectie 158/159: de handtekening is gebonden aan precies deze
+ * recovery-poging (domein cancel_recovery_v3, payload
+ * recovery_nonce_snapshot || initiated_at || new_owner_passkey), niet aan de
+ * live action_nonce - er is ook geen instructieargument client_action_nonce.
+ * De momentopname is de action_nonce bij initiate_recovery; omdat
+ * cancel_recovery en finalize_recovery de nonce allebei ophogen, heeft elke
+ * volgende recovery een hogere momentopname, ook binnen dezelfde seconde.
  */
 export async function buildCancelRecoveryTransaction(
   connection: Connection,
@@ -124,9 +136,13 @@ export async function buildCancelRecoveryTransaction(
 ): Promise<CancelRecoveryResult> {
   const initiatedAtBytes = new Uint8Array(8);
   new DataView(initiatedAtBytes.buffer).setBigInt64(0, recoveryState.initiatedAt, true);
-  const payload = concatBytes(initiatedAtBytes, recoveryState.newOwnerPasskey);
+  const payload = concatBytes(
+    actionNonceLeBytes(recoveryState.nonceSnapshot),
+    initiatedAtBytes,
+    recoveryState.newOwnerPasskey
+  );
 
-  const expectedChallenge = buildExpectedChallenge(walletPda, "cancel_recovery_v2", payload);
+  const expectedChallenge = buildExpectedChallenge(walletPda, "cancel_recovery_v3", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,

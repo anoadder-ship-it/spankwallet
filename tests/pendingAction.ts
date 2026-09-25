@@ -25,6 +25,7 @@ import {
   PublicKey,
   Keypair,
   SystemProgram,
+  SYSVAR_CLOCK_PUBKEY,
   SYSVAR_INSTRUCTIONS_PUBKEY,
   SYSVAR_RENT_PUBKEY,
   TransactionInstruction,
@@ -4074,17 +4075,35 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       .rpc();
   }
 
-  /// [secp256r1-instructie, cancel_recovery]. Sectie 158: de challenge
-  /// (cancel_recovery_v2) is gebonden aan de recovery zelf, zonder nonce.
-  /// Met de hand opgebouwd (zie instructionDiscriminator), zoals in de rode
-  /// fase tegen de oude en de nieuwe interface.
-  async function buildCancelRecoveryIxs(signingPasskey: TestPasskey, walletPda: PublicKey, passkeysPda: PublicKey) {
-    const wallet = await program.account.walletAccount.fetch(walletPda, "processed");
-    const recovery = wallet.recoveryState!;
+  /// WalletAccount.recovery_nonce_snapshot (sectie 159), rechtstreeks uit de
+  /// ruwe accountbytes: het veld staat achter `disarmed`, dus direct na
+  /// action_nonce(8) + session_epoch(8) + spend_threshold_lamports(8) +
+  /// disarmed(1). Alleen betekenisvol zolang recovery_state Some is.
+  async function recoveryNonceSnapshotProcessed(walletPda: PublicKey): Promise<bigint> {
+    const info = await provider.connection.getAccountInfo(walletPda, "processed");
+    return info!.data.readBigUInt64LE(actionNonceOffset(info!.data) + 8 + 8 + 8 + 1);
+  }
+
+  interface CancelRecoveryFields {
+    nonceSnapshot: bigint;
+    initiatedAt: bigint;
+    newOwnerPasskey: Buffer;
+  }
+
+  /// [secp256r1-instructie, cancel_recovery] voor precies deze recovery.
+  /// Sectie 159: challenge cancel_recovery_v3 over
+  /// recovery_nonce_snapshot || initiated_at || new_owner_passkey, zonder de
+  /// live nonce. Met de hand opgebouwd (zie instructionDiscriminator).
+  function buildCancelRecoveryIxsFor(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    passkeysPda: PublicKey,
+    fields: CancelRecoveryFields
+  ) {
     const initiatedAt = Buffer.alloc(8);
-    initiatedAt.writeBigInt64LE(BigInt(recovery.initiatedAt.toString()), 0);
-    const payload = Buffer.concat([initiatedAt, Buffer.from(recovery.newOwnerPasskey)]);
-    const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "cancel_recovery_v2", payload);
+    initiatedAt.writeBigInt64LE(fields.initiatedAt, 0);
+    const payload = Buffer.concat([nonceLeBytes(fields.nonceSnapshot), initiatedAt, fields.newOwnerPasskey]);
+    const expectedChallenge = buildExpectedChallenge(program.programId, walletPda, "cancel_recovery_v3", payload);
     const signed = signTestChallenge(signingPasskey, expectedChallenge);
     const secp256r1Ix = buildSecp256r1Instruction(
       signingPasskey.compressedPublicKey,
@@ -4101,6 +4120,17 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       data: Buffer.concat([instructionDiscriminator("cancel_recovery"), borshVecU8(Buffer.from(signed.clientDataJSON))]),
     });
     return [secp256r1Ix, cancelIx];
+  }
+
+  /// Zelfde als hierboven, met de velden van de lopende recovery van de keten.
+  async function buildCancelRecoveryIxs(signingPasskey: TestPasskey, walletPda: PublicKey, passkeysPda: PublicKey) {
+    const wallet = await program.account.walletAccount.fetch(walletPda, "processed");
+    const recovery = wallet.recoveryState!;
+    return buildCancelRecoveryIxsFor(signingPasskey, walletPda, passkeysPda, {
+      nonceSnapshot: await recoveryNonceSnapshotProcessed(walletPda),
+      initiatedAt: BigInt(recovery.initiatedAt.toString()),
+      newOwnerPasskey: Buffer.from(recovery.newOwnerPasskey),
+    });
   }
 
   async function callCancelRecovery(signingPasskey: TestPasskey, walletPda: PublicKey, passkeysPda: PublicKey) {
@@ -5170,7 +5200,7 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
     }
   }
 
-  describe("Recovery: backup-routes weigeren tijdens een lopende recovery; cancel_recovery is gebonden aan de recovery (sectie 158)", () => {
+  describe("Recovery: unfreeze via de backup authority weigert tijdens een lopende recovery; bevriezen blijft toegestaan (zie sectie 159); cancel_recovery is gebonden aan de recovery (sectie 158)", () => {
     it("[158] foutcodes: namen en nummers volgens de IDL", async () => {
       assert.deepEqual(
         {
@@ -5178,7 +5208,9 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
           RecoveryAlreadyInProgress: idlErrorNumber("RecoveryAlreadyInProgress"),
           NoRecoveryInProgress: idlErrorNumber("NoRecoveryInProgress"),
           StaleActionNonce: idlErrorNumber("StaleActionNonce"),
+          WalletDisarmed: idlErrorNumber("WalletDisarmed"),
           NoPendingAction: idlErrorNumber("NoPendingAction"),
+          WalletNotDisarmed: idlErrorNumber("WalletNotDisarmed"),
           WalletAlreadyDisarmed: idlErrorNumber("WalletAlreadyDisarmed"),
         },
         {
@@ -5186,41 +5218,48 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
           RecoveryAlreadyInProgress: 6007,
           NoRecoveryInProgress: 6008,
           StaleActionNonce: 6043,
+          WalletDisarmed: 6053,
           NoPendingAction: 6066,
+          WalletNotDisarmed: 6067,
           WalletAlreadyDisarmed: 6068,
         }
       );
     });
 
-    it("[158] bevriezen via de backup authority weigert tijdens een lopende recovery (RecoveryAlreadyInProgress); nonce en accounts ongewijzigd, een eerder ondertekende cancel_recovery landt daarna", async () => {
+    // Sectie 159: omgedraaid. Vóór sectie 159 weigerde bevriezen via de
+    // backup authority tijdens een recovery; nu slaagt het.
+    it("[158/159] bevriezen via de backup authority slaagt tijdens een lopende recovery; de recovery blijft lopen, de passkey-set blijft gelijk, en een eerder ondertekende cancel_recovery landt daarna", async () => {
       const w = await createWallet();
       await callInitiateRecovery(w.backupAuthority, w.walletPda, dummyNewOwnerPasskey());
       const cancelIxs = await buildCancelRecoveryIxs(w.passkey, w.walletPda, w.passkeysPda);
 
       const nonceBefore = await actionNonceProcessed(w.walletPda);
-      const before = await snapshot([w.walletPda, w.passkeysPda]);
+      const passkeysBefore = await snapshot([w.passkeysPda]);
       const freeze = await outcomeOf(callFreezeViaBackup(w.backupAuthority, w.walletPda));
-      const nonceUnchanged = (await actionNonceProcessed(w.walletPda)) === nonceBefore;
-      const accountsUnchanged = snapshotsEqual(before, await snapshot([w.walletPda, w.passkeysPda]));
+      const nonceBump = Number((await actionNonceProcessed(w.walletPda)) - nonceBefore);
+      const passkeysUnchanged = snapshotsEqual(passkeysBefore, await snapshot([w.passkeysPda]));
+      const recoveryStillActive = (await program.account.walletAccount.fetch(w.walletPda, "processed")).recoveryState !== null;
       const cancel = await outcomeOf(provider.sendAndConfirm(new anchor.web3.Transaction().add(...cancelIxs)));
       const wallet = await program.account.walletAccount.fetch(w.walletPda, "processed");
 
       assert.deepEqual(
         {
           freeze,
-          nonceUnchanged,
-          accountsUnchanged,
+          nonceBump,
+          passkeysUnchanged,
+          recoveryStillActive,
           cancel,
           recoveryCancelled: wallet.recoveryState === null,
           disarmed: wallet.disarmed,
         },
         {
-          freeze: expectedError("RecoveryAlreadyInProgress"),
-          nonceUnchanged: true,
-          accountsUnchanged: true,
+          freeze: "ok",
+          nonceBump: 1,
+          passkeysUnchanged: true,
+          recoveryStillActive: true,
           cancel: "ok",
           recoveryCancelled: true,
-          disarmed: false,
+          disarmed: true,
         }
       );
     });
@@ -5259,15 +5298,28 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
       );
     });
 
-    it("[158] herhaalde backup-pogingen tijdens een lopende recovery veranderen niets; een vóór de pogingen ondertekende cancel_recovery landt, en de recovery wordt daarna niet afgerond (NoRecoveryInProgress)", async () => {
+    // Sectie 159: omgedraaid. Bevriezen via de backup authority slaagt nu
+    // tijdens een recovery (idempotent, elke keer +1 nonce); direct ontdooien
+    // blijft weigeren. De eerste poging is een ontdooiing op een NIET-bevroren
+    // wallet: bewijst dat RecoveryAlreadyInProgress vóór WalletNotDisarmed komt.
+    it("[158/159] herhaalde backup-pogingen tijdens een lopende recovery: bevriezen slaagt (idempotent), direct ontdooien weigert (RecoveryAlreadyInProgress, ook op een niet-bevroren wallet); passkey-set en wachtrij ongewijzigd; een vóór de pogingen ondertekende cancel_recovery landt, en de recovery wordt daarna niet afgerond (NoRecoveryInProgress)", async () => {
       const w = await createWallet(3);
       await callInitiateRecovery(w.backupAuthority, w.walletPda, dummyNewOwnerPasskey());
       const initiatedAt = (await program.account.walletAccount.fetch(w.walletPda, "processed")).recoveryState!.initiatedAt;
       const cancelIxs = await buildCancelRecoveryIxs(w.passkey, w.walletPda, w.passkeysPda);
 
       const nonceBefore = await actionNonceProcessed(w.walletPda);
-      const before = await snapshot([w.walletPda, w.passkeysPda, w.pendingActionPda]);
+      const before = await snapshot([w.passkeysPda, w.pendingActionPda]);
       const attempts: string[] = [];
+      attempts.push(
+        await outcomeOf(
+          sendWithBackup(
+            w.backupAuthority,
+            uniqueIx(100),
+            buildUnfreezeViaBackupIx(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda)
+          )
+        )
+      );
       for (let i = 0; i < 3; i++) {
         attempts.push(
           await outcomeOf(sendWithBackup(w.backupAuthority, uniqueIx(2 * i), await buildFreezeViaBackupIx(w.backupAuthority, w.walletPda)))
@@ -5282,27 +5334,33 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
           )
         );
       }
-      const nonceUnchanged = (await actionNonceProcessed(w.walletPda)) === nonceBefore;
-      const accountsUnchanged = snapshotsEqual(before, await snapshot([w.walletPda, w.passkeysPda, w.pendingActionPda]));
+      const nonceBumps = Number((await actionNonceProcessed(w.walletPda)) - nonceBefore);
+      const passkeysAndQueueUnchanged = snapshotsEqual(before, await snapshot([w.passkeysPda, w.pendingActionPda]));
+      const afterAttempts = await program.account.walletAccount.fetch(w.walletPda, "processed");
       const cancel = await outcomeOf(provider.sendAndConfirm(new anchor.web3.Transaction().add(...cancelIxs)));
 
       await advanceOnChainClockPast(provider.connection, payerKeypair(), initiatedAt.toNumber() + 3);
       const finalize = await outcomeOf(callFinalizeRecovery(w.walletPda, w.passkeysPda));
       const wallet = await program.account.walletAccount.fetch(w.walletPda, "processed");
 
+      const blockedUnfreeze = expectedError("RecoveryAlreadyInProgress");
       assert.deepEqual(
         {
           attempts,
-          nonceUnchanged,
-          accountsUnchanged,
+          nonceBumps,
+          passkeysAndQueueUnchanged,
+          recoveryActiveAfterAttempts: afterAttempts.recoveryState !== null,
+          disarmedAfterAttempts: afterAttempts.disarmed,
           cancel,
           finalize,
           ownerPasskeyUnchanged: Buffer.from(wallet.ownerPasskey).equals(w.passkey.compressedPublicKey),
         },
         {
-          attempts: Array(6).fill(expectedError("RecoveryAlreadyInProgress")),
-          nonceUnchanged: true,
-          accountsUnchanged: true,
+          attempts: [blockedUnfreeze, "ok", blockedUnfreeze, "ok", blockedUnfreeze, "ok", blockedUnfreeze],
+          nonceBumps: 3,
+          passkeysAndQueueUnchanged: true,
+          recoveryActiveAfterAttempts: true,
+          disarmedAfterAttempts: true,
           cancel: "ok",
           finalize: expectedError("NoRecoveryInProgress"),
           ownerPasskeyUnchanged: true,
@@ -5521,6 +5579,272 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
           first: "ok",
           replayOtherKey: expectedError("WebAuthnChallengeMismatch"),
           replayLaterStart: expectedError("WebAuthnChallengeMismatch"),
+        }
+      );
+    });
+  });
+
+  // ================= Recovery: bevriezen tijdens een recovery, momentopname van de nonce (sectie 159) =================
+
+  async function buildExecuteIxs(
+    signingPasskey: TestPasskey,
+    walletPda: PublicKey,
+    vaultPda: PublicKey,
+    passkeysPda: PublicKey,
+    recipient: PublicKey,
+    amount: BN,
+    nonce: bigint
+  ) {
+    const { secp256r1Ix, clientDataJSON } = await passkeyIxs(
+      signingPasskey,
+      walletPda,
+      "execute",
+      Buffer.concat([recipient.toBuffer(), amount.toArrayLike(Buffer, "le", 8)]),
+      nonce
+    );
+    const [spendWindowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("spend_window"), walletPda.toBuffer()],
+      program.programId
+    );
+    const executeIx = await program.methods
+      .execute(amount, new BN(nonce.toString()), clientDataJSON)
+      .accounts({
+        wallet: walletPda,
+        vault: vaultPda,
+        spendWindow: spendWindowPda,
+        recipient,
+        passkeys: passkeysPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .instruction();
+    return [secp256r1Ix, executeIx];
+  }
+
+  /// Clock::unix_timestamp zoals het programma die ziet (Clock-sysvar, offset 32).
+  async function clockUnixTimestampProcessed(): Promise<bigint> {
+    const info = await provider.connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY, "processed");
+    return info!.data.readBigInt64LE(32);
+  }
+
+  async function lamportsProcessed(address: PublicKey): Promise<number> {
+    return provider.connection.getBalance(address, "processed");
+  }
+
+  describe("Recovery: bevriezen via de backup authority tijdens een recovery; cancel_recovery gebonden aan een momentopname van de nonce (sectie 159)", () => {
+    it("[159] M1: de eigenaar heeft alleen nog de backup-sleutel en bevriest tijdens de recovery; een tweede passkey-houder die annuleert en in dezelfde transactie uitgeeft, faalt (WalletDisarmed)", async () => {
+      const w = await createWallet();
+      const other = generateTestPasskey();
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, other.compressedPublicKey);
+      await callInitiateRecovery(w.backupAuthority, w.walletPda, dummyNewOwnerPasskey());
+
+      const freeze = await outcomeOf(callFreezeViaBackup(w.backupAuthority, w.walletPda));
+
+      const recipient = Keypair.generate().publicKey;
+      const amount = new BN(100_000_000);
+      const vaultBefore = await lamportsProcessed(w.vaultPda);
+      const nonce = await actionNonceProcessed(w.walletPda);
+      const cancelIxs = await buildCancelRecoveryIxs(other, w.walletPda, w.passkeysPda);
+      // cancel_recovery verhoogt de nonce met 1; de uitgave is daarop ondertekend.
+      const executeIxs = await buildExecuteIxs(other, w.walletPda, w.vaultPda, w.passkeysPda, recipient, amount, nonce + 1n);
+      const cancelAndSpend = await outcomeOf(
+        provider.sendAndConfirm(new anchor.web3.Transaction().add(...cancelIxs, ...executeIxs))
+      );
+      const vaultUnchanged = (await lamportsProcessed(w.vaultPda)) === vaultBefore;
+      const recipientBalance = await lamportsProcessed(recipient);
+      const wallet = await program.account.walletAccount.fetch(w.walletPda, "processed");
+
+      assert.deepEqual(
+        {
+          freeze,
+          cancelAndSpend,
+          vaultUnchanged,
+          recipientBalance,
+          recoveryStillActive: wallet.recoveryState !== null,
+          disarmed: wallet.disarmed,
+        },
+        {
+          freeze: "ok",
+          cancelAndSpend: expectedError("WalletDisarmed"),
+          vaultUnchanged: true,
+          recipientBalance: 0,
+          recoveryStillActive: true,
+          disarmed: true,
+        }
+      );
+    });
+
+    it("[159] L1: twee recovery's in dezelfde seconde met dezelfde nieuwe sleutel; de publieke cancel-handtekening van de eerste werkt niet tegen de tweede (WebAuthnChallengeMismatch)", async () => {
+      const w = await createWallet();
+      const newOwner = dummyNewOwnerPasskey();
+      const initiateIx = await program.methods
+        .initiateRecovery(newOwner)
+        .accounts({ wallet: w.walletPda, backupAuthority: w.backupAuthority.publicKey })
+        .instruction();
+
+      // [initiate(K), cancel(S), initiate(K)] in één transactie: beide recovery's
+      // hebben dan per definitie hetzelfde initiated_at. S wordt vooraf
+      // ondertekend over de voorspelde klokwaarde; is de seconde intussen
+      // omgeslagen, dan faalt de hele transactie en volgt een nieuwe poging.
+      let landed: { cancelIxs: TransactionInstruction[]; predictedAt: bigint; nonceAtFirst: bigint } | null = null;
+      for (let attempt = 0; attempt < 20 && landed === null; attempt++) {
+        const predictedAt = await clockUnixTimestampProcessed();
+        const nonceAtFirst = await actionNonceProcessed(w.walletPda);
+        const cancelIxs = buildCancelRecoveryIxsFor(w.passkey, w.walletPda, w.passkeysPda, {
+          nonceSnapshot: nonceAtFirst,
+          initiatedAt: predictedAt,
+          newOwnerPasskey: Buffer.from(newOwner),
+        });
+        const outcome = await outcomeOf(
+          sendWithBackup(w.backupAuthority, uniqueIx(attempt), initiateIx, ...cancelIxs, initiateIx)
+        );
+        if (outcome === "ok") {
+          landed = { cancelIxs, predictedAt, nonceAtFirst };
+        } else if (outcome !== expectedError("WebAuthnChallengeMismatch")) {
+          throw new Error(`onverwachte uitkomst van de gecombineerde transactie: ${outcome}`);
+        }
+      }
+      assert.isNotNull(landed, "de gecombineerde transactie landde niet binnen 20 pogingen");
+
+      const second = (await program.account.walletAccount.fetch(w.walletPda, "processed")).recoveryState!;
+      const secondSnapshot = await recoveryNonceSnapshotProcessed(w.walletPda);
+      const replay = await outcomeOf(provider.sendAndConfirm(new anchor.web3.Transaction().add(...landed!.cancelIxs)));
+
+      assert.deepEqual(
+        {
+          sameSecond: BigInt(second.initiatedAt.toString()) === landed!.predictedAt,
+          sameNewOwner: Buffer.from(second.newOwnerPasskey).equals(Buffer.from(newOwner)),
+          secondSnapshot: secondSnapshot.toString(),
+          replay,
+        },
+        {
+          sameSecond: true,
+          sameNewOwner: true,
+          secondSnapshot: (landed!.nonceAtFirst + 1n).toString(),
+          replay: expectedError("WebAuthnChallengeMismatch"),
+        }
+      );
+    });
+
+    it("[159] volgordes in één transactie: bevriezen via backup + cancel_recovery, initiate_recovery + bevriezen via backup, bevriezen via backup + initiate_recovery slagen; initiate_recovery + direct ontdooien weigert atomisch (RecoveryAlreadyInProgress)", async () => {
+      // Bevriezen via de backup authority, dan cancel_recovery, tijdens een recovery.
+      const a = await createWallet();
+      await callInitiateRecovery(a.backupAuthority, a.walletPda, dummyNewOwnerPasskey());
+      const freezeThenCancel = await outcomeOf(
+        sendWithBackup(
+          a.backupAuthority,
+          await buildFreezeViaBackupIx(a.backupAuthority, a.walletPda),
+          ...(await buildCancelRecoveryIxs(a.passkey, a.walletPda, a.passkeysPda))
+        )
+      );
+      const aWallet = await program.account.walletAccount.fetch(a.walletPda, "processed");
+
+      // initiate_recovery, dan bevriezen via de backup authority.
+      const b = await createWallet();
+      const initiateThenFreeze = await outcomeOf(
+        sendWithBackup(
+          b.backupAuthority,
+          await program.methods
+            .initiateRecovery(dummyNewOwnerPasskey())
+            .accounts({ wallet: b.walletPda, backupAuthority: b.backupAuthority.publicKey })
+            .instruction(),
+          await buildFreezeViaBackupIx(b.backupAuthority, b.walletPda)
+        )
+      );
+      const bWallet = await program.account.walletAccount.fetch(b.walletPda, "processed");
+
+      // Bevriezen via de backup authority, dan initiate_recovery.
+      const c = await createWallet();
+      const freezeThenInitiate = await outcomeOf(
+        sendWithBackup(
+          c.backupAuthority,
+          await buildFreezeViaBackupIx(c.backupAuthority, c.walletPda),
+          await program.methods
+            .initiateRecovery(dummyNewOwnerPasskey())
+            .accounts({ wallet: c.walletPda, backupAuthority: c.backupAuthority.publicKey })
+            .instruction()
+        )
+      );
+      const cWallet = await program.account.walletAccount.fetch(c.walletPda, "processed");
+
+      // initiate_recovery, dan direct ontdooien, op een bevroren wallet.
+      const d = await createWallet();
+      await callFreezeViaPasskey(d.passkey, d.walletPda, d.passkeysPda);
+      const dBefore = await snapshot([d.walletPda, d.passkeysPda, d.pendingActionPda]);
+      const initiateThenUnfreeze = await outcomeOf(
+        sendWithBackup(
+          d.backupAuthority,
+          await program.methods
+            .initiateRecovery(dummyNewOwnerPasskey())
+            .accounts({ wallet: d.walletPda, backupAuthority: d.backupAuthority.publicKey })
+            .instruction(),
+          buildUnfreezeViaBackupIx(d.backupAuthority, d.walletPda, d.pendingActionPda, d.passkeysPda)
+        )
+      );
+      const dUnchanged = snapshotsEqual(dBefore, await snapshot([d.walletPda, d.passkeysPda, d.pendingActionPda]));
+
+      assert.deepEqual(
+        {
+          freezeThenCancel,
+          aRecoveryCancelled: aWallet.recoveryState === null,
+          aDisarmed: aWallet.disarmed,
+          initiateThenFreeze,
+          bRecoveryActive: bWallet.recoveryState !== null,
+          bDisarmed: bWallet.disarmed,
+          freezeThenInitiate,
+          cRecoveryActive: cWallet.recoveryState !== null,
+          cDisarmed: cWallet.disarmed,
+          initiateThenUnfreeze,
+          dUnchanged,
+        },
+        {
+          freezeThenCancel: "ok",
+          aRecoveryCancelled: true,
+          aDisarmed: true,
+          initiateThenFreeze: "ok",
+          bRecoveryActive: true,
+          bDisarmed: true,
+          freezeThenInitiate: "ok",
+          cRecoveryActive: true,
+          cDisarmed: true,
+          initiateThenUnfreeze: expectedError("RecoveryAlreadyInProgress"),
+          dUnchanged: true,
+        }
+      );
+    });
+
+    it("[159] de momentopname is de nonce bij initiate_recovery; finalize_recovery verhoogt de nonce en zet de momentopname op 0, zodat een volgende recovery altijd een hogere momentopname heeft", async () => {
+      const w = await createWallet(3);
+      // Eén passkey-actie vooraf, zodat de nonce bij initiate_recovery niet 0 is.
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, generateTestPasskey().compressedPublicKey);
+      const newOwner = dummyNewOwnerPasskey();
+
+      const nonceAtFirst = await actionNonceProcessed(w.walletPda);
+      await callInitiateRecovery(w.backupAuthority, w.walletPda, newOwner);
+      const firstSnapshot = await recoveryNonceSnapshotProcessed(w.walletPda);
+      const initiatedAt = (await program.account.walletAccount.fetch(w.walletPda, "processed")).recoveryState!.initiatedAt;
+
+      await advanceOnChainClockPast(provider.connection, payerKeypair(), initiatedAt.toNumber() + 3);
+      await callFinalizeRecovery(w.walletPda, w.passkeysPda);
+      const nonceAfterFinalize = await actionNonceProcessed(w.walletPda);
+      const snapshotAfterFinalize = await recoveryNonceSnapshotProcessed(w.walletPda);
+
+      await callInitiateRecovery(w.backupAuthority, w.walletPda, newOwner);
+      const secondSnapshot = await recoveryNonceSnapshotProcessed(w.walletPda);
+
+      assert.deepEqual(
+        {
+          nonceAtFirst: nonceAtFirst.toString(),
+          firstSnapshot: firstSnapshot.toString(),
+          finalizeBump: Number(nonceAfterFinalize - nonceAtFirst),
+          snapshotAfterFinalize: snapshotAfterFinalize.toString(),
+          secondSnapshot: secondSnapshot.toString(),
+        },
+        {
+          nonceAtFirst: "1",
+          firstSnapshot: "1",
+          finalizeBump: 1,
+          snapshotAfterFinalize: "0",
+          secondSnapshot: "2",
         }
       );
     });

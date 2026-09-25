@@ -33,9 +33,12 @@ export type CancelRecoveryPreviewResult =
  * recoveryTimelockSeconds), zodat de gebruiker meteen ziet hoe dichtbij de
  * overname al was.
  *
- * Sectie 158: de handtekening is gebonden aan precies deze recovery
- * (startmoment + nieuwe eigenaars-sleutel), niet aan de action_nonce. De
- * kaart zegt dat expliciet: alleen deze ene recovery wordt geannuleerd.
+ * Sectie 158/159: de handtekening is gebonden aan precies deze
+ * recovery-poging (recovery_nonce_snapshot + startmoment + nieuwe
+ * eigenaars-sleutel), niet aan de live action_nonce. De momentopname
+ * verschilt per poging, ook als een volgende recovery in dezelfde seconde
+ * met dezelfde sleutel start. De kaart zegt dat expliciet: alleen deze ene
+ * poging wordt geannuleerd.
  */
 export async function showCancelRecoveryPreview(
   connection: Connection,
@@ -72,7 +75,7 @@ export async function showCancelRecoveryPreview(
       Gestart op: <strong>${escapeHtml(initiatedAtDate.toLocaleString("nl-NL"))}</strong> (${elapsedLine})<br />
       Nieuwe eigenaars-sleutel die klaarstond: <span class="preview-recipient-echo">${escapeHtml(bytesToHex(recoveryState.newOwnerPasskey))}</span> (${PASSKEY_LEN} bytes, hex)<br />
       finalize_recovery zou mogelijk zijn geworden op: <strong>${escapeHtml(finalizeAtDate.toLocaleString("nl-NL"))}</strong> (${finalizeLine})<br />
-      Deze handtekening geldt alleen voor deze recovery (dit startmoment en deze nieuwe sleutel), niet voor een eventuele latere.
+      Deze handtekening geldt alleen voor deze recovery-poging (nummer ${escapeHtml(recoveryState.nonceSnapshot.toString())}), niet voor een eventuele latere, ook niet als die met dezelfde sleutel start.
     `,
     fields: [],
     validate: () => ({ values: {} }),

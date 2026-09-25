@@ -14777,3 +14777,59 @@ níet in spoor A meegenomen; sluiten is een aparte beslissing.
 Vervolg (OBP): de mint-authorities intrekken (spoor C) en de herbouw volgens het
 niet-publieke herstelplan (buiten de repo). De details staan niet in deze repo en niet
 in de OBP-repo.
+
+## 158. Recovery: backup-routes en cancel_recovery (2026-09-25)
+
+Reparatieronde na de onafhankelijke review van sectie 155. Alle programmawijzigingen
+zijn rood vóór groen gebouwd (tests met prefix `[158]` in `tests/pendingAction.ts`, eerst
+falend tegen het ongewijzigde programma, om de bedoelde reden).
+
+### 1. Backup-routes weigeren tijdens een lopende recovery
+
+`freeze_via_backup_authority` en `unfreeze_via_backup_authority` krijgen de constraint
+`recovery_state.is_none() @ RecoveryAlreadyInProgress`. Bij `unfreeze_via_backup_authority`
+staat die vóór de `disarmed`-constraint, zodat de foutcode niet van de bevriezing afhangt.
+`freeze_via_backup_authority` had geen `disarmed`-constraint (bewust idempotent) en houdt
+die ook niet.
+
+Er gaat niets verloren: tijdens een recovery zijn alle waardepaden al dicht. Bevriezen
+kan vóór de recovery, via een passkey, of in dezelfde transactie direct na
+`cancel_recovery`/`finalize_recovery`; dat laatste geldt ook voor direct ontdooien.
+
+### 2. `cancel_recovery` gebonden aan de recovery, niet aan de nonce
+
+De challenge wordt `cancel_recovery_v2` over `initiated_at || new_owner_passkey`, zonder
+`action_nonce`. Het argument `client_action_nonce` is vervallen (interfacewijziging; de
+instructiediscriminator blijft gelijk). De nonce stijgt bij verwerking wel, zoals bij elke
+passkey-actie. Een handtekening werkt alleen tegen een recovery met exact hetzelfde
+startmoment en dezelfde nieuwe sleutel (`WebAuthnChallengeMismatch` anders), en betekent
+dan hetzelfde veto. Bijgewerkt: `client/src/recovery.ts`, `client/src/cancelRecoveryPreview.ts`
+(de kaart vermeldt dat de handtekening alleen voor deze recovery geldt), `tests/recovery.ts`.
+
+### 3. README
+
+De rol van de backup authority is aangevuld: wijzigingen aan de passkey-set via de
+backup-route zijn in feite 2-van-3 (backup-sleutel + één willekeurige passkey = volledige
+controle over de set). Daarnaast de tabelregels en de recovery-alinea voor punt 1 en 2.
+
+### Tests
+
+`[158]` (7 tests): foutcodes volgens de IDL; bevriezen via backup tijdens een recovery;
+direct ontdooien tijdens een recovery (met en zonder verwijderingslijst); herhaalde
+backup-pogingen tijdens de timelock; begrensde passkey-acties tijdens een recovery; vijf
+combinaties in één transactie direct na een recovery plus idempotent bevriezen erbuiten;
+`cancel_recovery` gebonden aan de recovery. Foutcodes worden op naam én nummer vergeleken,
+het nummer uit de IDL (6002, 6007, 6008, 6043, 6066, 6068).
+
+Rood vóór groen: tegen het ongewijzigde programma faalden de vier tests voor punt 1 en 2
+om de bedoelde reden; na punt 1 alleen nog de test voor punt 2; na punt 2 alles groen. De
+foutcodetest, de passkey-grenstest en de combinatietest waren al groen (bestaand gedrag,
+vastgelegd als regressie).
+
+Regressie (2026-09-25): `yarn test:pending-action` 105 passing / 0 failing (1 pending: de
+rollover-test, alleen onder zijn eigen feature); `yarn test` 121 passing / 0 failing
+(108 pending), geen stackframe-waarschuwingen; `yarn test:spend-window-rollover` 106
+passing / 0 failing. Client: `tsc --noEmit` schoon.
+
+Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
+RC-verificatie, dan het upgradevoorstel.

@@ -18,7 +18,6 @@ import {
   encodeOptionalI64,
   advanceOnChainClockPast,
   fetchActionNonce,
-  nonceLeBytes,
 } from "./webauthnTestHelper";
 
 describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize zelf vereisen geen passkey, init_wallet erin wel)", () => {
@@ -409,17 +408,17 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       "sanity-check: de RecoveryState-payload-regio hoort NIET al-nul te zijn direct na initiate_recovery"
     );
 
+    // Sectie 158: de challenge is gebonden aan deze recovery, zonder nonce.
     const walletAfterInitiate = await program.account.walletAccount.fetch(walletPda);
-    const nonce = await fetchActionNonce(provider.connection, walletPda);
+    const nonceBefore = await fetchActionNonce(provider.connection, walletPda);
     const cancelPayload = Buffer.concat([
-      nonceLeBytes(nonce),
       walletAfterInitiate.recoveryState.initiatedAt.toArrayLike(Buffer, "le", 8),
       Buffer.from(walletAfterInitiate.recoveryState.newOwnerPasskey),
     ]);
     const cancelChallenge = buildExpectedChallenge(
       program.programId,
       walletPda,
-      "cancel_recovery",
+      "cancel_recovery_v2",
       cancelPayload
     );
     const cancelSigned = signTestChallenge(passkey, cancelChallenge);
@@ -430,7 +429,7 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
     );
 
     await program.methods
-      .cancelRecovery(new BN(nonce.toString()), cancelSigned.clientDataJSON)
+      .cancelRecovery(cancelSigned.clientDataJSON)
       .accounts({
         wallet: walletPda,
         passkeys: passkeysPda,
@@ -441,6 +440,11 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
 
     const walletAfterCancel = await program.account.walletAccount.fetch(walletPda);
     assert.isNull(walletAfterCancel.recoveryState);
+    assert.equal(
+      (await fetchActionNonce(provider.connection, walletPda)).toString(),
+      (nonceBefore + 1n).toString(),
+      "cancel_recovery verhoogt de nonce nog steeds"
+    );
     await assertStaleTailZeroedAndCurrentFieldsPlausible(walletPda, "cancel_recovery");
   });
 

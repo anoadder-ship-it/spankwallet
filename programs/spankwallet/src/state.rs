@@ -121,7 +121,8 @@ pub struct WalletAccount {
     /// (elke geldige passkey; weigert als al bevroren, sectie 155) of
     /// freeze_via_backup_authority (idempotent), direct. Terugzetten:
     /// unfreeze_via_backup_authority (direct, kan daarbij passkeys
-    /// verwijderen) of initiate_unfreeze/finalize_unfreeze (wachtrij, 24u,
+    /// verwijderen; beide backup-routes weigeren tijdens een lopende
+    /// recovery, sectie 158) of initiate_unfreeze/finalize_unfreeze (wachtrij, 24u,
     /// 2-of-2 bij ≥2 passkeys). Zolang `true`: alle waardepaden (execute, hunt,
     /// *_via_session, alle initiate_*/confirm/finalize_* behalve de
     /// unfreeze-soort) en alle directe bevoegdheidswijzigingen (add_passkey,

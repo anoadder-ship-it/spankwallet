@@ -8,13 +8,7 @@ import {
 } from "@solana/web3.js";
 import { signWithPasskey } from "./webauthnSign";
 import { buildSecp256r1Instruction } from "./secp256r1";
-import {
-  concatBytes,
-  encodeBorshVecU8,
-  buildExpectedChallenge,
-  actionNonceLeBytes,
-  readActionNonce,
-} from "./challenge";
+import { concatBytes, encodeBorshVecU8, buildExpectedChallenge } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
 
@@ -113,6 +107,12 @@ export interface CancelRecoveryResult {
   transaction: Transaction;
 }
 
+/**
+ * Sectie 158: de handtekening is gebonden aan precies deze recovery
+ * (initiated_at + new_owner_passkey, domein cancel_recovery_v2), zonder
+ * action_nonce - ook het instructieargument client_action_nonce is weg.
+ * Een handtekening voor de ene recovery geldt nooit voor een andere.
+ */
 export async function buildCancelRecoveryTransaction(
   connection: Connection,
   payer: PublicKey,
@@ -122,12 +122,11 @@ export async function buildCancelRecoveryTransaction(
   rpId: string,
   recoveryState: ParsedRecoveryState
 ): Promise<CancelRecoveryResult> {
-  const nonce = await readActionNonce(connection, walletPda);
   const initiatedAtBytes = new Uint8Array(8);
   new DataView(initiatedAtBytes.buffer).setBigInt64(0, recoveryState.initiatedAt, true);
-  const payload = concatBytes(actionNonceLeBytes(nonce), initiatedAtBytes, recoveryState.newOwnerPasskey);
+  const payload = concatBytes(initiatedAtBytes, recoveryState.newOwnerPasskey);
 
-  const expectedChallenge = buildExpectedChallenge(walletPda, "cancel_recovery", payload);
+  const expectedChallenge = buildExpectedChallenge(walletPda, "cancel_recovery_v2", payload);
 
   const { signedMessage, rawSignature, clientDataJSON } = await signWithPasskey(
     rpId,
@@ -141,11 +140,7 @@ export async function buildCancelRecoveryTransaction(
     rawSignature
   );
 
-  const data = concatBytes(
-    CANCEL_RECOVERY_DISCRIMINATOR,
-    actionNonceLeBytes(nonce),
-    encodeBorshVecU8(clientDataJSON)
-  );
+  const data = concatBytes(CANCEL_RECOVERY_DISCRIMINATOR, encodeBorshVecU8(clientDataJSON));
 
   const cancelIx = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,

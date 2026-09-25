@@ -285,12 +285,8 @@ pub mod spankwallet {
         instructions::initiate_recovery(ctx, new_owner_passkey)
     }
 
-    pub fn cancel_recovery(
-        ctx: Context<CancelRecovery>,
-        client_action_nonce: u64,
-        client_data_json: Vec<u8>,
-    ) -> Result<()> {
-        instructions::cancel_recovery(ctx, client_action_nonce, client_data_json)
+    pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) -> Result<()> {
+        instructions::cancel_recovery(ctx, client_data_json)
     }
 
     pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {

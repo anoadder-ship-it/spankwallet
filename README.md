@@ -90,7 +90,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | add_passkey                     | Een van de al geldige passkeys        | Extra, gelijkwaardige passkey registreren (multi-passkey)           |
 | remove_passkey                  | Een van de al geldige passkeys        | Passkey intrekken (lockout-beschermd: nooit de laatste verwijderen) |
 | initiate_recovery                | Backup authority                     | Recovery starten                                                    |
-| cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren                                                   |
+| cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren; de handtekening is gebonden aan precies deze recovery (geen nonce) |
 | finalize_recovery                | Permissionless (na timelock)          | Recovery afronden: wist alle extra passkeys, maakt bestaande sessiesleutels ongeldig (epoch-verhoging, sluit ze niet) |
 | add_session_key                  | Een van de al geldige passkeys        | Tijdelijke session key registreren (scope + slot-gebonden expiry)   |
 | remove_session_key               | Een van de al geldige passkeys        | Session key vroegtijdig intrekken                                    |
@@ -102,8 +102,8 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | initiate_advanced_action_via_session | De session key zelf                 | CPI aankondigen in de PendingAction-wachtrij (kind=AdvancedAction); geen CPI, geen nonce |
 | confirm_pending_action            | Passkey                               | Een door een sessie geïnitieerde actie bevestigen; de timelock start hier. Weigert als de initiërende sessie ingetrokken of verlopen is |
 | freeze_via_passkey                | Passkey                               | Wallet bevriezen (noodstop); weigert als de wallet al bevroren is  |
-| freeze_via_backup_authority       | Backup authority                      | Wallet bevriezen (noodstop), idempotent                              |
-| unfreeze_via_backup_authority     | Backup authority                      | Direct ontdooien; kan in dezelfde instructie passkeys verwijderen (zie Veiligheidsprincipes) |
+| freeze_via_backup_authority       | Backup authority                      | Wallet bevriezen (noodstop), idempotent; weigert tijdens een lopende recovery |
+| unfreeze_via_backup_authority     | Backup authority                      | Direct ontdooien; kan in dezelfde instructie passkeys verwijderen (zie Veiligheidsprincipes); weigert tijdens een lopende recovery |
 | initiate_unfreeze                 | Passkey                               | Ontdooien aankondigen (queued, timelock) - opent PendingAction (kind=Unfreeze) |
 | finalize_unfreeze                 | Passkey                               | Aangekondigd ontdooien afronden, ná de timelock (2-van-2 bij ≥2 passkeys) |
 
@@ -130,7 +130,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (117 passing, 42 pending, 0 failing - `npm test`, 2026-09-23)
+tests/                        - Anchor-tests (121 passing, 108 pending, 0 failing - `npm test`, 2026-09-25)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -288,6 +288,14 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
   bevriezing kan opheffen. Bewaar de backup-authority-sleutel daarom offline en veilig
   (niet op hetzelfde apparaat als een passkey), maar wel bereikbaar: bij een noodgeval
   moet de eigenaar hem binnen afzienbare tijd kunnen gebruiken.
+- **Wijzigingen aan de passkey-set zijn via de backup-route in feite 2-van-3.** Omdat de
+  backup authority bij het ontdooien passkeys kan verwijderen zonder passkey-handtekening,
+  geldt: de backup-authority-sleutel samen met één willekeurige geldige passkey geeft
+  volledige controle over welke passkeys geldig blijven, en daarmee over de wallet. De
+  2-van-2 bij grote uitgaven beschermt tegen het verlies van één passkey, niet tegen de
+  combinatie van de backup-sleutel en één passkey. Behandel de backup-sleutel daarom als een
+  volwaardige derde sleutel: bewaar hem gescheiden van elke passkey, nooit op hetzelfde
+  apparaat en nooit in dezelfde cloud-synchronisatie als een passkey.
 - Recovery heeft een 72u-timelock + owner-veto (cancel_recovery), en wist bij succes de
   volledige extra-passkey-set - geen stale, mogelijk-gecompromitteerde passkeys overleven
   een recovery. Bestaande sessiesleutels worden bij diezelfde finalize_recovery NIET
@@ -295,7 +303,10 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
   verhoogt, en elke `_via_session`-instructie tegen een sessie met een oudere epoch faalt
   vanaf dat moment met `SessionRevokedByRecovery` - de accounts zelf blijven bestaan tot
   ze via `remove_session_key`, `close_session` of `close_expired_session` daadwerkelijk
-  opgeruimd worden.
+  opgeruimd worden. De handtekening van het veto is gebonden aan precies de lopende
+  recovery (startmoment en nieuwe sleutel), niet aan de action_nonce. Zolang een recovery
+  loopt, weigeren de backup-routes (bevriezen en direct ontdooien); in dezelfde transactie
+  direct na `cancel_recovery` of `finalize_recovery` werken ze weer.
 - Elke gevoelige actie bindt zijn volledige, relevante parameters in de ondertekende
   challenge (nooit alleen een deel) - voorkomt dat een geldige handtekening voor iets anders
   hergebruikt kan worden dan waarvoor hij bedoeld was.

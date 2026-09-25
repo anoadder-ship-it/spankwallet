@@ -32,6 +32,10 @@ export type CancelRecoveryPreviewResult =
  * datum waarop `finalize_recovery` mogelijk zou zijn geworden (initiatedAt +
  * recoveryTimelockSeconds), zodat de gebruiker meteen ziet hoe dichtbij de
  * overname al was.
+ *
+ * Sectie 158: de handtekening is gebonden aan precies deze recovery
+ * (startmoment + nieuwe eigenaars-sleutel), niet aan de action_nonce. De
+ * kaart zegt dat expliciet: alleen deze ene recovery wordt geannuleerd.
  */
 export async function showCancelRecoveryPreview(
   connection: Connection,
@@ -67,7 +71,8 @@ export async function showCancelRecoveryPreview(
       Lopende recovery annuleren (noodrem tegen een overname die nog niet is afgerond):<br />
       Gestart op: <strong>${escapeHtml(initiatedAtDate.toLocaleString("nl-NL"))}</strong> (${elapsedLine})<br />
       Nieuwe eigenaars-sleutel die klaarstond: <span class="preview-recipient-echo">${escapeHtml(bytesToHex(recoveryState.newOwnerPasskey))}</span> (${PASSKEY_LEN} bytes, hex)<br />
-      finalize_recovery zou mogelijk zijn geworden op: <strong>${escapeHtml(finalizeAtDate.toLocaleString("nl-NL"))}</strong> (${finalizeLine})
+      finalize_recovery zou mogelijk zijn geworden op: <strong>${escapeHtml(finalizeAtDate.toLocaleString("nl-NL"))}</strong> (${finalizeLine})<br />
+      Deze handtekening geldt alleen voor deze recovery (dit startmoment en deze nieuwe sleutel), niet voor een eventuele latere.
     `,
     fields: [],
     validate: () => ({ values: {} }),

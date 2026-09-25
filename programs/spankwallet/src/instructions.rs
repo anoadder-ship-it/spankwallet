@@ -3171,6 +3171,9 @@ pub fn confirm_pending_action(
 //   kan daarbij in dezelfde instructie passkeys verwijderen (sectie 155):
 //   zo kan een gecompromitteerde passkey het ontdooien niet tegenhouden,
 //   ook niet door de nonce te verhogen.
+// - Beide backup-routes weigeren tijdens een lopende recovery (sectie
+//   158); in dezelfde transactie direct na cancel_recovery of
+//   finalize_recovery werken ze weer.
 //
 // Tijdens een bevriezing zijn alle waardepaden en alle directe
 // bevoegdheidsuitbreidingen geblokkeerd (`!wallet.disarmed` op
@@ -3247,10 +3250,15 @@ pub fn freeze_via_passkey(
 
 #[derive(Accounts)]
 pub struct FreezeViaBackupAuthority<'info> {
+    /// Sectie 158: de backup-routes weigeren tijdens een lopende recovery.
+    /// Tijdens een recovery zijn alle waardepaden al dicht; bevriezen kan
+    /// vóór de recovery, via een passkey, of in dezelfde transactie direct
+    /// na cancel_recovery/finalize_recovery.
     #[account(
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
     )]
     pub wallet: Account<'info, WalletAccount>,
 
@@ -3266,10 +3274,14 @@ pub fn freeze_via_backup_authority(ctx: Context<FreezeViaBackupAuthority>) -> Re
 
 #[derive(Accounts)]
 pub struct UnfreezeViaBackupAuthority<'info> {
+    /// Sectie 158: weigert tijdens een lopende recovery, zie
+    /// FreezeViaBackupAuthority. De recovery-controle staat vóór de
+    /// disarmed-controle, zodat de foutcode niet van de bevriezing afhangt.
     #[account(
         mut,
         seeds = [b"wallet", wallet.wallet_seed_hash.as_ref()],
         bump = wallet.bump,
+        constraint = wallet.recovery_state.is_none() @ SpankWalletError::RecoveryAlreadyInProgress,
         constraint = wallet.disarmed @ SpankWalletError::WalletNotDisarmed,
     )]
     pub wallet: Account<'info, WalletAccount>,
@@ -4081,24 +4093,25 @@ pub struct CancelRecovery<'info> {
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-pub fn cancel_recovery(
-    ctx: Context<CancelRecovery>,
-    client_action_nonce: u64,
-    client_data_json: Vec<u8>,
-) -> Result<()> {
-    let current_nonce = check_current_action_nonce(&ctx.accounts.wallet, client_action_nonce)?;
+/// Sectie 158: de challenge bevat bewust GEEN action_nonce, maar is
+/// gebonden aan precies deze recovery (initiated_at + new_owner_passkey,
+/// domein cancel_recovery_v2). Het veto van de eigenaar hangt daardoor
+/// alleen af van de recovery zelf. Annuleren is veilig ongeacht wie de
+/// handtekening indient; een herhaling werkt alleen tegen een recovery met
+/// exact dezelfde initiated_at en new_owner_passkey, en betekent dan
+/// hetzelfde veto. De nonce stijgt wel, zoals bij elke passkey-actie.
+pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) -> Result<()> {
     let recovery = ctx
         .accounts
         .wallet
         .recovery_state
         .ok_or(SpankWalletError::NoRecoveryInProgress)?;
-    let mut payload = Vec::with_capacity(8 + 8 + PASSKEY_PUBKEY_LEN);
-    payload.extend_from_slice(&current_nonce.to_le_bytes());
+    let mut payload = Vec::with_capacity(8 + PASSKEY_PUBKEY_LEN);
     payload.extend_from_slice(&recovery.initiated_at.to_le_bytes());
     payload.extend_from_slice(&recovery.new_owner_passkey);
 
     let expected_challenge =
-        build_expected_challenge(&ctx.accounts.wallet.key(), b"cancel_recovery", &payload);
+        build_expected_challenge(&ctx.accounts.wallet.key(), b"cancel_recovery_v2", &payload);
     verify_passkey_signature_multi(
         &ctx.accounts.instructions_sysvar.to_account_info(),
         &ctx.accounts.wallet.owner_passkey,

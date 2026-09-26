@@ -14950,7 +14950,7 @@ Client: `tsc --noEmit` schoon.
 Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
 RC-verificatie, dan het upgradevoorstel.
 
-## 160. Recovery: initiate_recovery sluit een wachtende actie, eerlijke onderbouwing van de unfreeze-blokkade, stale-tail-opruiming die echt werkt (2026-09-25)
+## 160. Recovery: initiate_recovery sluit een wachtende actie, eerlijke onderbouwing van de unfreeze-blokkade, stale-tail-opruiming die echt werkt (2026-09-26)
 
 Reparatieronde na de onafhankelijke review van sectie 159 (bevindingen M-1, L-1, L-2).
 Rood vóór groen: de tests zijn eerst geschreven en gedraaid tegen het ongewijzigde programma
@@ -15010,6 +15010,16 @@ publieke instructies niet meer ontstaan (`finalize_recovery` verhoogt de epoch a
 wachtrij al leeg is; `unfreeze_via_backup_authority` sluit de wachtrij in dezelfde instructie
 waarin hij de epoch verhoogt). `PendingActionStaleEpoch` blijft staan als tweede
 verdedigingslaag, maar is niet meer met een test te bereiken.
+
+GECORRIGEERD (sectie 161, na de onafhankelijke review van deze sectie): de invariant hierboven
+("zolang `recovery_state` Some is, is de wachtrij leeg") en het gevolg voor de epoch-check
+gelden voor elke recovery die na deze upgrade start. Bestaande toestand van vóór de upgrade
+valt er niet onder: onder de vorige binary overleefde een wachtende actie `initiate_recovery`,
+en `finalize_recovery` kon een actie met een verouderde epoch achterlaten. Zulke toestand moet
+apart gecontroleerd worden (`scripts/checkRecoveryQueueInvariant.ts`, sectie 161). Ook "niet
+meer met een test te bereiken" klopte alleen voor de publieke instructies: sectie 161 dekt de
+check met een Rust-unittest en een genesis-fixture. De acht omgedraaide tests hieronder blijven
+geldig voor toestand die na de upgrade ontstaat.
 
 ### 2. Eerlijke onderbouwing van de unfreeze-blokkade (L-1)
 
@@ -15093,3 +15103,146 @@ omgedraaide tests hierboven plus `[159] L1` (zie test-hulp).
 
 Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
 RC-verificatie, dan het upgradevoorstel.
+
+## 161. Invariant-controle vóór en ná de deploy, tweede verdedigingslaag getest, tekstcorrecties (2026-09-26)
+
+Reparatieronde na de onafhankelijke review van sectie 160 (bevindingen L-1, I-1, I-2, I-4).
+Geen wijziging aan het gedrag van het programma: alleen tests, een read-only script,
+commentaar, een foutmeldingstekst en documentatie.
+
+### 1. Invariant-controle als harde voorwaarde voor het upgradevoorstel (L-1)
+
+Sectie 160 laat `initiate_recovery` de wachtrij sluiten. Daardoor geldt "zolang
+`recovery_state` Some is, is de wachtrij leeg" (en: geen wachtende actie met een verouderde
+epoch) voor elke recovery die na de upgrade start. Toestand die de huidige binary achterlaat,
+valt daar niet onder.
+
+Read-only scan van devnet (2026-09-26, `getProgramAccounts`, geen transacties):
+- 50 programma-accounts: 19 WalletAccount, 19 VaultAccount, 4 PasskeysAccount, 4
+  SessionKeyAccount, 2 PolicyAccount, 1 SpendWindow, 1 account van 0 bytes zonder
+  discriminator (`5VT3xfFM…`, geen PendingAction, buiten deze controle).
+- **0 PendingAction-accounts** (van welke layout dan ook). Er is dus geen wachtende actie bij
+  een wallet met een lopende recovery, en geen wachtende actie met een afwijkende epoch.
+  Daarmee is ook de eerdere notitie "vóór de upgrade opnieuw controleren op 124-byte-
+  PendingActions" voor dit moment afgedaan.
+- 1 wallet met een lopende recovery: `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ`
+  (gestart 2026-08-10, sinds 2026-08-13 af te ronden, nooit afgerond). De wachtrij is leeg
+  (het pending_action-PDA bestaat niet), dus deze wallet voldoet al aan de invariant. Hij
+  blijft bewust ongemoeid: het is de enige bestaande recovery die de upgrade aantreft, en onder
+  de nieuwe layout leest hij `recovery_nonce_snapshot` als 0 uit de opvulling (sectie 159).
+
+Er is dus geen migratie- of reparatiestap nodig. Een scan is wel een momentopname: tot de
+deploy draait de huidige binary, en daaronder overleeft een wachtende actie
+`initiate_recovery` nog. Daarom een controle die herhaald wordt, geen eenmalige constatering.
+
+Nieuw: `scripts/checkRecoveryQueueInvariant.ts` (read-only), met de beslislogica in
+`scripts/lib/recoveryQueueInvariant.ts` (pure functie, getest in
+`tests/recoveryQueueInvariant.ts`). Een treffer is een PendingAction bij een wallet met
+`recovery_state` Some, of met `pending.epoch != wallet.session_epoch`. Fail-closed: wat niet te
+verifiëren is (wallet ontbreekt, te korte bytes, ongeldige Option-tag, niet het canonieke
+PDA), telt ook als treffer. Exit-code 0 = groen, 1 = treffer, anders = de controle zelf
+faalde. Draaien:
+`RPC_URL=https://api.devnet.solana.com npx ts-node --transpile-only scripts/checkRecoveryQueueInvariant.ts`.
+Uitkomst 2026-09-26: groen (0 PendingActions; 19 wallets, waarvan 1 met een lopende recovery:
+`5MoXqg…`).
+
+**Harde voorwaarde, over te nemen in het (nog te schrijven) upgradevoorstel van upgrade 1**
+(zelfde discipline als sectie 142, punt 2: een verplichte stap in het draaiboek, geen losse
+kanttekening):
+- (a) `checkRecoveryQueueInvariant.ts` is groen direct vóór het uitvoeren van de upgrade;
+- (b) `checkRecoveryQueueInvariant.ts` is opnieuw groen direct ná het uitvoeren. (a) alleen
+  dekt het venster tussen (a) en de deploy niet af.
+
+Bij een treffer (devnet, testwaarde): `cancel_action` met een passkey van die wallet. Die
+draagt bewust geen recovery- of disarmed-constraint en sluit elke PendingAction, ook een van de
+oude layout (`tests/cancelActionLegacyLayout.ts`). Daarna het script opnieuw.
+
+De invariant-tekst is op drie plekken voorwaardelijk gemaakt (README, `initiate_recovery` en
+`UnfreezeViaBackupAuthority` in `instructions.rs`): "geldt voor elke recovery die na deze
+upgrade start; bestaande toestand van vóór de upgrade moet apart gecontroleerd worden". Bij
+sectie 160 staat een GECORRIGEERD-blok.
+
+### 2. `PendingActionStaleEpoch` weer gedekt door tests (I-1)
+
+Sinds sectie 160 is de check via de publieke instructies niet te bereiken voor toestand die na
+de upgrade ontstaat, en had hij geen enkele test meer. Zonder test zou het verwijderen ervan
+door niets opgemerkt worden.
+
+- (a) Rust-unittests in `instructions.rs` (`mod tests`, 4 tests) roepen
+  `check_pending_action_finalizable` direct aan, voor alle vijf finalize-kinds (withdrawal,
+  token transfer, advanced action, drempelwijziging, unfreeze): een gelijke epoch slaagt; een
+  lagere én een hogere epoch weigeren met `PendingActionStaleEpoch`; en de epoch-check gaat
+  vóór de timelock-check.
+- (b) End-to-end, `tests/staleEpochFixture.ts`: een eigen validator met genesis-accounts
+  (zelfde techniek als `cancelActionLegacyLayout.ts`), vier wallets met vault en een
+  PendingAction in de huidige 164-byte-layout, de fixtures synthetisch en per run vers.
+  - `finalize_withdrawal` met `pending.epoch < wallet.session_epoch` weigert met
+    `PendingActionStaleEpoch`: de vault is onaangeroerd, de actie blijft staan, er wordt geen
+    nonce verbruikt. De controlefixture, die alleen in de epoch verschilt, finalizet wel.
+  - `confirm_pending_action` heeft een eigen inline epoch-check (niet via de helper) en krijgt
+    dezelfde behandeling: bij een sessie-geïnitieerde actie met een verouderde epoch weigert
+    hij met `PendingActionStaleEpoch`. De controlefixture komt voorbij de epoch-check en stopt
+    pas bij de volgende check (`InitiatingSessionRevoked`; de initiërende sessie bestaat in
+    de fixture bewust niet).
+  - Bewust niet end-to-end gebouwd: finalize voor token transfer, advanced action, unfreeze
+    en drempelwijziging (die vragen tokenaccounts, een CPI-doel of een SpendWindow). Deze vier
+    roepen dezelfde helper aan als `finalize_withdrawal`, en de helper is voor alle vijf kinds
+    gedekt door (a).
+
+Rood vóór groen (mutant: beide `require!`s op de epoch verwijderd, daarna teruggezet):
+- (a) 3 van de 4 Rust-tests falen. De vierde (gelijke epoch slaagt) hoort ook zonder de check
+  te slagen.
+- (b) De twee stale-tests falen: de verouderde `finalize_withdrawal` slaagt dan en verplaatst
+  0,1 SOL uit de vault, en `confirm_pending_action` loopt door tot `InitiatingSessionRevoked`.
+  De twee controles blijven groen. In een eerste mutant-run faalde de withdrawal-controle mee,
+  omdat beide fixtures dezelfde ontvanger deelden; nu heeft elke fixture een eigen ontvanger.
+- Na het terugzetten: alle groen.
+
+Rood vóór groen voor de beslislogica van het script: tegen een stub die niets vindt, 7
+failing / 2 passing (de twee "niet geflagd"-gevallen slagen triviaal tegen een stub). Na de
+implementatie: 9 passing.
+
+### 3. Oude staart-data op bestaande wallets (I-2)
+
+`zero_wallet_account_tail` (sectie 160) ruimt alleen op in de instructie waarin
+`recovery_state` van Some naar None gaat. Wallets die onder een eerdere binary een recovery
+doorliepen, houden oude bytes achter hun serialisatie tot hun volgende `cancel_recovery` of
+`finalize_recovery` onder de nieuwe code. Onder de nieuwe layout valt een deel daarvan binnen
+`recovery_nonce_snapshot` (bytes 183..191 bij recovery None): het veld leest dan een
+willekeurige, niet-nul waarde. Dat is functioneel onschadelijk: het veld is alleen
+betekenisvol zolang `recovery_state` Some is, `initiate_recovery` schrijft het voordat iets
+het leest, en `cancel_recovery`/`finalize_recovery` zetten het op 0 en nullen de staart. Een
+client of indexer die het veld buiten een recovery toont, ziet tot dan wel onzin.
+
+Read-only telling (devnet, 2026-09-26): 2 van de 19 wallets, precies de twee met een
+historische recovery-cyclus. `3Ape3ge7…` leest snapshot 9233775345393650525 (2 niet-nul bytes
+achter de serialisatie), `FSGNLavh…` leest 368783838364255303 (1 niet-nul byte). De andere
+17, waaronder `5MoXqg…`, zijn schoon. De migratie van sectie 141/144 heeft deze staart dus
+niet genuld; de eerste recovery-afronding onder de nieuwe code doet dat wel.
+
+### 4. Tekstcorrecties (I-4)
+
+- `errors.rs`: de melding van `WalletAccountTooShortForRecoveryCleanup` luidt nu
+  "WalletAccount is korter dan zijn serialisatie; staart-opruiming geweigerd" (naam en
+  foutnummer ongewijzigd).
+- De kop van sectie 160 heeft de juiste datum (2026-09-26, de dag van de groene run en de
+  commit).
+- README: bevriezen houdt alle waardepaden dicht totdat een ontdooiing is afgerond. Voor een
+  passkey-houder is dat minimaal 24 uur (via de wachtrij), want direct ontdooien via de backup
+  authority is tijdens een recovery geblokkeerd. Eerder stond er alleen "in dezelfde
+  transactie als het annuleren".
+
+### Tests
+
+Groen (2026-09-26), volledige regressie op de definitieve code:
+- `cargo test`: 13 passed (9 bestaand + 4 nieuw).
+- `yarn test`: 134 passing / 0 failing (117 pending), geen stackframe-waarschuwingen. Dat is 121 +
+  13 nieuw: 4 in `staleEpochFixture.ts`, 9 in `recoveryQueueInvariant.ts`.
+- `yarn test:pending-action`: 114 passing / 0 failing (1 pending, de rollover-test).
+- `yarn test:spend-window-rollover`: 115 passing / 0 failing.
+
+Die laatste twee draaien alleen `tests/pendingAction.ts` (met test-features); ongewijzigd ten
+opzichte van sectie 160. Nieuwe TS-bestanden: strikte `tsc --noEmit` schoon.
+
+Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
+RC-verificatie, dan het upgradevoorstel (met de harde voorwaarde uit punt 1).

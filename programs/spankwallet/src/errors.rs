@@ -226,8 +226,9 @@ pub enum SpankWalletError {
     // praktijk onbereikbaar - zero_wallet_account_tail() weigert als de
     // serialisatie langer is dan het account (dan zou Anchor's exit()
     // sowieso falen). Bestaat uitsluitend om nooit stilzwijgend buiten de
-    // accountgrenzen te schrijven.
-    #[msg("WalletAccount is te kort om de recovery_state-payload-regio veilig te nullen")]
+    // accountgrenzen te schrijven. Meldingstekst bijgewerkt in sectie 161
+    // (naam en foutnummer ongewijzigd).
+    #[msg("WalletAccount is korter dan zijn serialisatie; staart-opruiming geweigerd")]
     WalletAccountTooShortForRecoveryCleanup,
 
     // STATUS.md sectie 143 (dubbele-migratie-gat, gevonden tijdens de

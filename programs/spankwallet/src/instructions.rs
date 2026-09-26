@@ -3339,7 +3339,10 @@ pub struct UnfreezeViaBackupAuthority<'info> {
     /// blokkade niet tegen. Keerzijde: ook een eerlijke eigenaar kan tijdens
     /// een recovery geen passkey verwijderen; dat moet vóór initiate_recovery.
     /// Een wachtende PendingAction speelt tijdens een recovery geen rol meer:
-    /// initiate_recovery sluit die (sectie 160).
+    /// initiate_recovery sluit die (sectie 160). Dat geldt voor elke
+    /// recovery die na de upgrade van sectie 160 start; toestand van vóór de
+    /// upgrade moet apart gecontroleerd worden
+    /// (scripts/checkRecoveryQueueInvariant.ts, sectie 161).
     ///
     /// De recovery-controle staat vóór de disarmed-controle, zodat de
     /// foutcode niet van de bevriezing afhangt.
@@ -4135,7 +4138,11 @@ pub struct InitiateRecovery<'info> {
 /// rent naar de backup authority. Samen met de recovery_state.is_none()-
 /// constraint op alle zes instructies die een PendingAction aanmaken (en op
 /// confirm_pending_action) geldt daardoor: zolang recovery_state Some is, is
-/// de wachtrij leeg.
+/// de wachtrij leeg. Dat geldt voor elke recovery die na deze upgrade start;
+/// bestaande toestand van vóór de upgrade moet apart gecontroleerd worden
+/// (sectie 161: scripts/checkRecoveryQueueInvariant.ts, vóór én ná de
+/// deploy). Onder de vorige binary overleefde een wachtende actie
+/// initiate_recovery nog.
 ///
 /// Aanleiding (review sectie 159, M-1): een eigenaar die alleen de backup-
 /// sleutel heeft, bevriest; de dief (met de enige passkey) zet een Unfreeze
@@ -5002,4 +5009,113 @@ pub fn execute_advanced_via_session<'info>(
     _cpi_instruction_data: Vec<u8>,
 ) -> Result<()> {
     err!(SpankWalletError::SessionAdvancedMustUseQueue)
+}
+
+/// STATUS.md sectie 161 (review §160, I-1): de epoch-check in
+/// check_pending_action_finalizable is sinds sectie 160 via de publieke
+/// instructies niet meer te bereiken voor toestand die na de upgrade
+/// ontstaat (initiate_recovery sluit de wachtrij; zie de toelichting daar).
+/// Hij blijft staan als tweede verdedigingslaag, en deze tests houden hem
+/// gedekt: zonder hen zou het verwijderen van de check door geen enkele test
+/// opgemerkt worden. De functie is kind-agnostisch en wordt door alle vijf
+/// finalize-instructies aangeroepen (withdrawal, token transfer, advanced
+/// action, unfreeze, drempelwijziging); de tests draaien daarom over alle
+/// vijf kinds. De bedrading in een echte instructie bewijst
+/// tests/staleEpochFixture.ts (finalize_withdrawal en de aparte inline check
+/// in confirm_pending_action).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_FINALIZE_KINDS: [u8; 5] = [
+        PENDING_ACTION_KIND_SOL_WITHDRAWAL,
+        PENDING_ACTION_KIND_TOKEN_TRANSFER,
+        PENDING_ACTION_KIND_ADVANCED_ACTION,
+        PENDING_ACTION_KIND_THRESHOLD_CHANGE,
+        PENDING_ACTION_KIND_UNFREEZE,
+    ];
+
+    // Ruim na elke timelock: een falende check komt dan nooit van de timelock.
+    const NOW: i64 = 1_800_000_000;
+    const LONG_AGO: i64 = NOW - 10 * PENDING_ACTION_TIMELOCK_SECONDS;
+
+    fn passkey_initiated_pending(kind: u8, epoch: u64, timelock_started_at: i64) -> PendingAction {
+        PendingAction {
+            wallet: Pubkey::new_unique(),
+            bump: 255,
+            kind,
+            initiated_at: timelock_started_at,
+            epoch,
+            action_commitment: [7u8; 32],
+            initiator_passkey: [2u8; PASSKEY_PUBKEY_LEN],
+            confirmed: true,
+            initiator_session: Pubkey::default(),
+            timelock_started_at,
+        }
+    }
+
+    fn error_code_of(result: Result<()>) -> Option<u32> {
+        match result {
+            Ok(()) => None,
+            Err(Error::AnchorError(e)) => Some(e.error_code_number),
+            Err(other) => panic!("onverwacht fouttype: {other:?}"),
+        }
+    }
+
+    fn stale_epoch_code() -> u32 {
+        anchor_lang::error::ERROR_CODE_OFFSET + SpankWalletError::PendingActionStaleEpoch as u32
+    }
+
+    #[test]
+    fn matching_epoch_passes_for_every_finalize_kind() {
+        for kind in ALL_FINALIZE_KINDS {
+            let pending = passkey_initiated_pending(kind, 3, LONG_AGO);
+            assert_eq!(
+                error_code_of(check_pending_action_finalizable(&pending, 3, NOW)),
+                None,
+                "kind {kind}: gelijke epoch en verstreken timelock moet slagen"
+            );
+        }
+    }
+
+    #[test]
+    fn older_epoch_fails_with_stale_epoch_for_every_finalize_kind() {
+        for kind in ALL_FINALIZE_KINDS {
+            let pending = passkey_initiated_pending(kind, 0, LONG_AGO);
+            assert_eq!(
+                error_code_of(check_pending_action_finalizable(&pending, 1, NOW)),
+                Some(stale_epoch_code()),
+                "kind {kind}: een actie van vóór een epoch-verhoging mag nooit finalizable zijn"
+            );
+        }
+    }
+
+    #[test]
+    fn newer_epoch_also_fails_with_stale_epoch() {
+        // De check is een gelijkheidstoets, geen "minstens": ook een epoch die
+        // hoger is dan die van de wallet (onmogelijk via de instructies, wel
+        // denkbaar bij kapotte toestand) weigert.
+        for kind in ALL_FINALIZE_KINDS {
+            let pending = passkey_initiated_pending(kind, 2, LONG_AGO);
+            assert_eq!(
+                error_code_of(check_pending_action_finalizable(&pending, 1, NOW)),
+                Some(stale_epoch_code()),
+                "kind {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_epoch_is_checked_before_the_timelock() {
+        // Timelock nog lang niet verstreken: de foutcode moet toch de epoch
+        // zijn, zodat de volgorde van de controles vastligt.
+        for kind in ALL_FINALIZE_KINDS {
+            let pending = passkey_initiated_pending(kind, 0, NOW);
+            assert_eq!(
+                error_code_of(check_pending_action_finalizable(&pending, 1, NOW)),
+                Some(stale_epoch_code()),
+                "kind {kind}"
+            );
+        }
+    }
 }

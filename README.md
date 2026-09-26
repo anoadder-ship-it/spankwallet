@@ -130,7 +130,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (121 passing, 117 pending, 0 failing - `npm test`, 2026-09-26)
+tests/                        - Anchor-tests (134 passing, 117 pending, 0 failing - `npm test`, 2026-09-26)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -146,6 +146,8 @@ tests/                        - Anchor-tests (121 passing, 117 pending, 0 failin
   thresholdBanner.ts                         - drempel-statusbanner, pure-logica + DOM-effectkant (sectie 127-129)
   migrateWalletAccountValidator.ts             - eigen test-validator met vooraf geplaatste accounts (gebruikt door cancelActionLegacyLayout.ts)
   cancelActionLegacyLayout.ts                   - cancel_action op een PendingAction in de oude 124-byte-layout
+  staleEpochFixture.ts                           - PendingActionStaleEpoch in finalize/confirm, via genesis-fixtures (sectie 161)
+  recoveryQueueInvariant.ts                       - beslislogica van scripts/checkRecoveryQueueInvariant.ts (sectie 161)
   sessionKeys.ts                     - session keys, alle 7 instructies
   addSessionKeyBlock.ts               - tijdelijke client-blokkade op execute_advanced-sessies
   uint8ArrayByteFidelity.ts           - bytegetrouwheid WebAuthn/Web-Crypto-tekenpad (sectie 78)
@@ -311,7 +313,9 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
 - Tijdens een lopende recovery kan de backup authority de wallet bevriezen, maar niet direct
   ontdooien. Bevriezen is nodig omdat elke geldige passkey de recovery kan annuleren en de
   waardepaden daarmee weer opengaan; een eigenaar die alleen nog de backup-sleutel heeft,
-  kan zo voorkomen dat er in dezelfde transactie als het annuleren wordt uitgegeven. Direct
+  houdt met bevriezen alle waardepaden dicht totdat een ontdooiing is afgerond. Voor een
+  passkey-houder is dat minimaal 24 uur (via de wachtrij), want direct ontdooien via de
+  backup authority is tijdens een recovery geblokkeerd. Direct
   ontdooien kan passkeys verwijderen; de blokkade voorkomt alleen dat de passkey-set ná de
   start van de recovery nog via die route verandert. Hij legt de set niet vóór de recovery
   vast: de backup-sleutel kan bevriezen, ontdooien met het verwijderen van alle passkeys op
@@ -320,7 +324,9 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
   hierboven, 2-van-3).
 - `initiate_recovery` sluit een eventuele wachtende actie, van elke soort, ook een
   klaargezette ontdooiing. Omdat geen enkele wachtende actie kan ontstaan zolang een
-  recovery loopt, is de wachtrij tijdens een recovery altijd leeg. Een wachtende actie van
+  recovery loopt, is de wachtrij tijdens een recovery leeg. Dat geldt voor elke recovery
+  die na deze upgrade start; bestaande toestand van vóór de upgrade moet apart
+  gecontroleerd worden (`scripts/checkRecoveryQueueInvariant.ts`). Een wachtende actie van
   de eigenaar vervalt daardoor ook als iemand anders met de backup-sleutel een recovery
   start; na `cancel_recovery` moet die opnieuw, met een nieuwe timelock.
 - Wat een eigenaar met alleen de backup-sleutel níet kan: winnen van iemand die een geldige

@@ -15157,6 +15157,18 @@ Bij een treffer (devnet, testwaarde): `cancel_action` met een passkey van die wa
 draagt bewust geen recovery- of disarmed-constraint en sluit elke PendingAction, ook een van de
 oude layout (`tests/cancelActionLegacyLayout.ts`). Daarna het script opnieuw.
 
+GECORRIGEERD (sectie 162, na de onafhankelijke review van deze sectie, L-2): "bij een treffer:
+`cancel_action`" is geen herstelpad in precies het scenario waartegen het script beschermt.
+Een treffer `recovery_in_progress` is een recovery die onder de oude binary startte, met een
+wachtende actie. Heeft de eigenaar alleen de backup-sleutel (M-1), dan kan hij die actie
+onder de nieuwe binary niet weghalen: `cancel_action` vereist een passkey,
+`initiate_recovery` kan niet opnieuw (er loopt al een recovery) en
+`unfreeze_via_backup_authority` weigert tijdens een recovery. Een rode uitslag is dan
+DETECTIE, geen herstel. Alleen wie een geldige passkey van die wallet heeft, kan de actie
+weghalen. De structurele fix (`cancel_recovery` sluit ook de wachtrij) staat als punt voor
+upgrade 2 in sectie 162, niet in deze upgrade. De uitslag van 2026-09-26 (0 PendingActions)
+blijft ongewijzigd.
+
 De invariant-tekst is op drie plekken voorwaardelijk gemaakt (README, `initiate_recovery` en
 `UnfreezeViaBackupAuthority` in `instructions.rs`): "geldt voor elke recovery die na deze
 upgrade start; bestaande toestand van vóór de upgrade moet apart gecontroleerd worden". Bij
@@ -15246,3 +15258,143 @@ opzichte van sectie 160. Nieuwe TS-bestanden: strikte `tsc --noEmit` schoon.
 
 Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
 RC-verificatie, dan het upgradevoorstel (met de harde voorwaarde uit punt 1).
+
+## 162. Afronding upgrade 1: pre-flight-wrapper, eerlijke betekenis van een rode uitslag, tegencontrole en vaste lengtes in de invariant-controle (2026-09-26)
+
+Reparatieronde na de onafhankelijke review van sectie 161 (bevindingen L-1 t/m L-4). Geen
+wijziging aan het programma: alleen scripts, tests en documentatie.
+
+### 1. Pre-flight-wrapper als verplichte stap (L-1)
+
+De eis "invariant-controle groen vóór en ná de deploy" stond alleen als tekst in sectie 161.
+Nieuw: `scripts/preUpgradeChecks.ts`, één commando dat bij de eerste fout stopt met een
+non-zero exit-code:
+- `--pre` (direct vóór het uitvoeren): `checkProposalTimelock.ts`, daarna
+  `checkRecoveryQueueInvariant.ts`. Vereist `TRANSACTION_INDEX`; zonder die variabele
+  weigert de wrapper (exit 2), zodat hij nooit stil een oud voorstelnummer toetst.
+  `checkProposalTimelock.ts` leest daarvoor nu `TRANSACTION_INDEX` uit de omgeving (los
+  gebruikt zonder variabele: ongewijzigd, #11).
+- `--post` (direct ná het uitvoeren): alleen `checkRecoveryQueueInvariant.ts`. De timelock-
+  check hoort daar niet: het voorstel staat dan op `Executed` en dat script faalt daar terecht
+  op. Een rode `--post` meldt dat het detectie is, geen herstel (zie punt 2).
+- Zonder of met een ander argument: exit 2.
+
+Vastgelegd als stap 1 van de pre-flight (volgorde van sectie 94: wrapper, sessies,
+voorstel/buffer, adminpagina) in README "Deployen naar devnet" (nieuwe stappen 3 en 4) en in
+het nieuwe draaiboek `docs/upgradevoorstel-sjabloon.md`, dat per upgrade als eigen
+STATUS-sectie ingevuld wordt (gegevens, vóór het voorstel, pre-flight, uitvoeren, ná het
+uitvoeren met de vijf verificaties van sectie 95, vastleggen).
+
+Gedrag, read-only tegen devnet gedraaid (2026-09-26):
+- zonder argument: exit 2; `--pre` zonder `TRANSACTION_INDEX`: exit 2;
+- `TRANSACTION_INDEX=11 --pre`: stap 1 faalt (voorstel #11 staat op `Executed`), exit 1,
+  stap 2 draait niet ("STOP ... NIET UITVOEREN");
+- `--post`: groen, exit 0;
+- `--post` met een onbereikbare RPC (`RPC_URL=http://127.0.0.1:1`): de controle faalt met
+  exit 2 en de wrapper geeft exit 2 door.
+
+Niet te tonen zonder een goedgekeurd voorstel met verstreken timelock: `--pre` met stap 1
+groen en stap 2 rood. Dat pad is dezelfde code als het vorige punt (exit-code van de stap
+doorgeven, stoppen).
+
+### 2. Een rode uitslag is detectie, geen herstel (L-2)
+
+Sectie 161 schreef bij een treffer "`cancel_action` met een passkey van die wallet" voor. In
+het scenario waartegen het script beschermt (M-1: de eigenaar heeft alleen de backup-sleutel)
+werkt dat niet, en onder de nieuwe binary is er dan geen enkel herstelpad:
+`initiate_recovery` kan niet opnieuw, `unfreeze_via_backup_authority` weigert tijdens een
+recovery. GECORRIGEERD-blok in sectie 161; het commentaar in
+`scripts/checkRecoveryQueueInvariant.ts` zegt het nu zo. Bij een treffer vóór de upgrade:
+niet uitvoeren voordat de toestand begrepen is.
+
+**Openstaand voor upgrade 2 (niet in deze upgrade gebouwd):** `cancel_recovery` sluit ook een
+wachtende PendingAction (zelfde helper als `initiate_recovery`,
+`close_pending_action_if_present`). Dan hangt de invariant niet meer af van toestand van vóór
+een upgrade: wie een recovery annuleert, neemt nooit een wachtende actie mee naar buiten de
+recovery. Te beoordelen: wie de rent ontvangt (de annuleerder heeft geen eigen signer in
+`CancelRecovery`), en dat een eigen wachtende actie van een eerlijke eigenaar dan ook
+vervalt bij annuleren (al bestaand bij `initiate_recovery`, sectie 160).
+
+### 3. Tegencontrole op het RPC-antwoord (L-3)
+
+Probleem: groen betekende "0 PendingActions gezien", en dat is precies de normale toestand.
+Een leeg of onvolledig RPC-antwoord was niet van groen te onderscheiden.
+
+Nieuw: `evaluateProgramScan` in `scripts/lib/recoveryQueueInvariant.ts`. Het script beoordeelt
+nu het ONGEFILTERDE `getProgramAccounts`-antwoord (wallets en PendingActions uit één
+momentopname; de aparte `getMultipleAccountsInfo`-ronde is vervallen) en rapporteert een
+tellingsprobleem (exit 2, "CONTROLE ONBETROUWBAAR") bij:
+- minder dan `MIN_WALLET_ACCOUNTS` = 19 WalletAccounts. Er bestaat geen instructie die een
+  WalletAccount sluit, dus het aantal kan alleen groeien;
+- een ander aantal VaultAccounts dan WalletAccounts (`init_wallet` maakt ze samen aan, geen
+  van beide is te sluiten);
+- een account in het antwoord dat niet van het programma is;
+- een WalletAccount die niet te decoderen is, ook zonder wachtende actie (zie punt 4);
+- verschil tussen de gefilterde (memcmp op de discriminator) en de ongefilterde
+  PendingAction-lijst, in beide richtingen.
+Een treffer gaat vóór: treffers geven exit 1, ook als er tegelijk een tellingsprobleem is.
+
+Rood vóór groen:
+- Unittests (`tests/recoveryQueueInvariant.ts`, 7 nieuw) eerst tegen een stub met het
+  gedrag van sectie 161: 7 failing. Kern: "een leeg RPC-antwoord is NIET groen" faalt op de
+  beslissing zelf (de stub noemt het groen). Twee tests ("volledig antwoord is groen", "een
+  treffer blijft een treffer") falen tegen de stub alleen op de tellers, niet op het oordeel.
+- Script-niveau: een eigen `solana-test-validator` (scratchpad, aparte poorten) met het
+  programma geladen maar zonder devnet-state, dus een RPC die wel antwoordt maar niets van
+  de echte toestand heeft. Het script van sectie 161: "GROEN", exit 0. Het nieuwe script:
+  "CONTROLE ONBETROUWBAAR: 0 WalletAccounts, minder dan het bekende minimum 19", exit 2.
+- Devnet, read-only, 2026-09-26: groen, exit 0 (50 programma-accounts, 19 WalletAccounts,
+  19 VaultAccounts, 0 PendingActions, 1 lopende recovery `5MoXqg…`, beide lijsten op
+  dezelfde slot).
+
+### 4. Alleen bekende accountlengtes (L-4)
+
+`decodeWalletForInvariant` en `decodePendingForInvariant` beoordelen alleen lengtes waarvoor
+de offsets bewezen gelden; elke andere lengte is `unverifiable`:
+- WalletAccount 256 en 264. **Afwijking van de opdracht ("wallet 256"):** `init_wallet`
+  alloceert `WalletAccount::LEN`, en dat is sinds sectie 159 264. De 19 bestaande devnet-
+  wallets zijn 256; elke wallet die na de upgrade ontstaat, is 264. Met alleen 256 zou de
+  `--post`-run rood worden zodra iemand een wallet aanmaakt, en de live test hieronder (die
+  264-byte-wallets ziet) ook. Beide lengtes zijn vaste, bekende layouts; de bedoeling (geen
+  stil verkeerd lezen bij een onbekende layout) blijft.
+- PendingAction 124 (oude layout) en 164 (`PendingAction::LEN`).
+
+Tests:
+- Handgebouwde bytes (`tests/recoveryQueueInvariant.ts`, 4 nieuw): 256/264 en 124/164
+  worden beoordeeld; 248, 255, 257, 263, 265, 300 (wallet) en 58, 123, 125, 163, 172
+  (pending) zijn `unverifiable`; een wallet met een onbekende lengte maakt de scan ook
+  zonder wachtende actie niet groen. Tegen de stub: 3 van de 4 rood (de vierde, "256 en 264
+  worden beoordeeld", slaagt ook zonder lengtecontrole).
+- Tegen accounts van het echte programma (`tests/pendingAction.ts`, blok "Invariant-controle:
+  decoder tegen accounts van het echte programma", 2 tests, draait onder
+  `yarn test:pending-action`):
+  - een wallet krijgt een tweede passkey, wordt bevroren en via de backup authority ontdooid
+    met verwijdering van die passkey (session_epoch wordt 1; een 0 zou op een verkeerde
+    offset net zo goed "kloppen"), daarna `initiate_withdrawal`. De decoder leest uit de
+    ruwe bytes exact wat Anchor's IDL-decoder leest (lengtes 264/164, recovery_state,
+    session_epoch, PendingAction.wallet/epoch); daarna `initiate_recovery` (alle offsets
+    41 bytes verschoven): recovery_state Some en session_epoch 1, gelijk aan Anchor;
+  - `evaluateProgramScan` over alle accounts die de validator-run tot dan heeft aangemaakt
+    (minimum 1 wallet), met minstens één echte PendingAction: geen treffers, geen
+    tellingsproblemen.
+  - Rood vóór groen met een GEDEELDE fout: decoder én de handgebouwde testbytes gaan uit van
+    40 in plaats van 41 bytes recovery-payload. De handgebouwde tests: 20 passing (kunnen
+    dit per constructie niet zien). De live test: rood, de decoder leest session_epoch 256
+    in plaats van 1. Teruggezet, beide groen. De scan-test bleef onder deze mutant groen (de
+    verkeerd gelezen wallet heeft geen wachtende actie); de decodertest is wat hem vangt.
+
+### Tests
+
+Groen (2026-09-26), volledige regressie op de definitieve code:
+- `cargo test`: 13 passed (ongewijzigd).
+- `yarn test`: 145 passing / 0 failing (119 pending), geen stackframe-waarschuwingen. Dat is 134
+  + 11 nieuw in `recoveryQueueInvariant.ts`; de 2 nieuwe tests in `pendingAction.ts` tellen
+  hier als pending (die suite vereist de fast-timelock-build).
+- `yarn test:pending-action`: 116 passing / 0 failing (1 pending, de rollover-test): 114 + 2.
+- `yarn test:spend-window-rollover`: 117 passing / 0 failing: 115 + 2.
+- Strikte `tsc --noEmit`: de nieuwe en gewijzigde scripts en `tests/recoveryQueueInvariant.ts`
+  schoon. `tests/pendingAction.ts` geeft typefouten, allemaal in bestaande code (Anchor-typing
+  van `.accounts({...})`, regel ≤ 5972), geen in het nieuwe blok.
+
+Volgende stap: RC-verificatie, dan het upgradevoorstel volgens
+`docs/upgradevoorstel-sjabloon.md`.

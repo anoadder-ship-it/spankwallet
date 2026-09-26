@@ -130,7 +130,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (134 passing, 117 pending, 0 failing - `npm test`, 2026-09-26)
+tests/                        - Anchor-tests (145 passing, 119 pending, 0 failing - `npm test`, 2026-09-26)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -147,7 +147,7 @@ tests/                        - Anchor-tests (134 passing, 117 pending, 0 failin
   migrateWalletAccountValidator.ts             - eigen test-validator met vooraf geplaatste accounts (gebruikt door cancelActionLegacyLayout.ts)
   cancelActionLegacyLayout.ts                   - cancel_action op een PendingAction in de oude 124-byte-layout
   staleEpochFixture.ts                           - PendingActionStaleEpoch in finalize/confirm, via genesis-fixtures (sectie 161)
-  recoveryQueueInvariant.ts                       - beslislogica van scripts/checkRecoveryQueueInvariant.ts (sectie 161)
+  recoveryQueueInvariant.ts                       - beslislogica van scripts/checkRecoveryQueueInvariant.ts, incl. tegencontrole en lengtes (sectie 161/162; de decoder tegen echte programma-accounts staat in pendingAction.ts)
   sessionKeys.ts                     - session keys, alle 7 instructies
   addSessionKeyBlock.ts               - tijdelijke client-blokkade op execute_advanced-sessies
   uint8ArrayByteFidelity.ts           - bytegetrouwheid WebAuthn/Web-Crypto-tekenpad (sectie 78)
@@ -221,6 +221,19 @@ in twee delen:
    aantal reëel tegengekomen valkuilen (SDK-foutvertaalbugs, ProgramData-headroom-tekort,
    RPC-timing-races, browsercaching, transactionIndex-verwarring) die de moeite waard
    zijn om te kennen voordat je dit voor het eerst zelf doet.
+3. **Pre-flight, direct vóór het uitvoeren (verplicht, in deze volgorde; STATUS.md sectie
+   94 en 162):**
+   1. `TRANSACTION_INDEX=<n> npx ts-node --transpile-only scripts/preUpgradeChecks.ts --pre`
+      moet eindigen met exit 0 (timelock verstreken volgens de Clock-sysvar, en de
+      recovery-/wachtrij-invariant groen met een volledig RPC-antwoord). Niet 0: niet
+      uitvoeren.
+   2. Sessie-bruikbaarheid.
+   3. Voorstel- en bufferstatus on-chain.
+   4. Adminpagina: `findCanonicalProposal()`.
+4. **Direct ná het uitvoeren:** `npx ts-node --transpile-only scripts/preUpgradeChecks.ts --post`
+   (exit 0), daarna de vijf verificaties van STATUS.md sectie 95.
+
+Het volledige draaiboek per upgrade staat in `docs/upgradevoorstel-sjabloon.md`.
 
 Controleer de huidige authority altijd met:
 ```bash

@@ -49,6 +49,14 @@ import {
   nonceLeBytes,
   TestPasskey,
 } from "./webauthnTestHelper";
+import {
+  decodePendingForInvariant,
+  decodeWalletForInvariant,
+  evaluateProgramScan,
+  findInvariantViolations,
+  PENDING_ACTION_DISCRIMINATOR,
+  ProgramAccountBytes,
+} from "../scripts/lib/recoveryQueueInvariant";
 
 // Moet overeenkomen met de `test-fast-pending-timelock`-variant van
 // PENDING_ACTION_TIMELOCK_SECONDS in instructions.rs (3 seconden) - zie
@@ -6417,6 +6425,114 @@ describe("spankwallet: PendingAction - initiate/finalize/cancel voor alle vier k
           disarmedAtEnd: false,
           recoveryAtEnd: false,
         }
+      );
+    });
+  });
+
+  // STATUS.md sectie 162 (review §161, L-4): de decoder van
+  // scripts/checkRecoveryQueueInvariant.ts tegen bytes die het echte
+  // programma zelf schreef, niet tegen handgebouwde bytes die dezelfde
+  // offset-aannames delen als de decoder. De "waarheid" is Anchor's eigen
+  // IDL-decoder (program.account.*.fetch).
+  describe("Invariant-controle: decoder tegen accounts van het echte programma (sectie 162)", () => {
+    async function rawProgramAccount(address: PublicKey): Promise<ProgramAccountBytes> {
+      const info = await provider.connection.getAccountInfo(address, "processed");
+      assert.isNotNull(info, `${address.toBase58()} bestaat niet`);
+      return { address: address.toBase58(), data: info!.data, owner: info!.owner };
+    }
+
+    it("[162] decoder leest wat Anchor leest: session_epoch na een epoch-verhoging, PendingAction.epoch, en recovery_state Some (verschoven offsets)", async () => {
+      const w = await createWallet();
+      const second = Buffer.from(generateTestPasskey().compressedPublicKey);
+      await callAddPasskey(w.passkey, w.walletPda, w.passkeysPda, second);
+      // Ontdooien met passkey-verwijdering verhoogt session_epoch naar 1. Een
+      // epoch van 0 zou op een verkeerde offset net zo goed "kloppen".
+      await callFreezeViaBackup(w.backupAuthority, w.walletPda);
+      await callUnfreezeViaBackup(w.backupAuthority, w.walletPda, w.pendingActionPda, w.passkeysPda, [second]);
+      await callInitiateWithdrawal(
+        w.passkey,
+        w.walletPda,
+        w.pendingActionPda,
+        w.passkeysPda,
+        Keypair.generate().publicKey,
+        new BN(anchor.web3.LAMPORTS_PER_SOL / 4)
+      );
+
+      const walletRaw = await rawProgramAccount(w.walletPda);
+      const pendingRaw = await rawProgramAccount(w.pendingActionPda);
+      const wallet = await program.account.walletAccount.fetch(w.walletPda, "processed");
+      const pending = await program.account.pendingAction.fetch(w.pendingActionPda, "processed");
+      assert.equal(wallet.sessionEpoch.toString(), "1", "voorwaarde: epoch-verhoging heeft plaatsgevonden");
+
+      const decodedWallet = decodeWalletForInvariant(walletRaw.data);
+      const decodedPending = decodePendingForInvariant(pendingRaw.data);
+      assert.notTypeOf(decodedWallet, "string", String(decodedWallet));
+      assert.notTypeOf(decodedPending, "string", String(decodedPending));
+      if (typeof decodedWallet === "string" || typeof decodedPending === "string") return;
+      assert.deepEqual(
+        {
+          walletLen: walletRaw.data.length,
+          recoverySome: decodedWallet.recoverySome,
+          sessionEpoch: decodedWallet.sessionEpoch.toString(),
+          pendingLen: pendingRaw.data.length,
+          pendingWallet: decodedPending.wallet.toBase58(),
+          pendingEpoch: decodedPending.epoch.toString(),
+        },
+        {
+          walletLen: 264,
+          recoverySome: wallet.recoveryState !== null,
+          sessionEpoch: wallet.sessionEpoch.toString(),
+          pendingLen: 164,
+          pendingWallet: pending.wallet.toBase58(),
+          pendingEpoch: pending.epoch.toString(),
+        }
+      );
+      const walletsByAddress = new Map<string, ProgramAccountBytes | null>([[walletRaw.address, walletRaw]]);
+      assert.deepEqual(findInvariantViolations(program.programId, [pendingRaw], walletsByAddress), []);
+
+      // recovery_state Some: alles erachter schuift 41 bytes op. initiate_recovery
+      // sluit de wachtende actie (sectie 160).
+      await callInitiateRecovery(w.backupAuthority, w.walletPda, dummyNewOwnerPasskey());
+      const walletInRecoveryRaw = await rawProgramAccount(w.walletPda);
+      const walletInRecovery = await program.account.walletAccount.fetch(w.walletPda, "processed");
+      const decodedInRecovery = decodeWalletForInvariant(walletInRecoveryRaw.data);
+      assert.notTypeOf(decodedInRecovery, "string", String(decodedInRecovery));
+      if (typeof decodedInRecovery === "string") return;
+      assert.deepEqual(
+        { recoverySome: decodedInRecovery.recoverySome, sessionEpoch: decodedInRecovery.sessionEpoch.toString() },
+        { recoverySome: walletInRecovery.recoveryState !== null, sessionEpoch: walletInRecovery.sessionEpoch.toString() }
+      );
+      assert.isTrue(decodedInRecovery.recoverySome);
+      assert.isNull(await provider.connection.getAccountInfo(w.pendingActionPda, "processed"));
+    });
+
+    it("[162] de volledige scan over alle accounts die deze validator-run heeft aangemaakt is groen", async () => {
+      // Minstens één wachtende actie, zodat ook het PendingAction-pad een echt account ziet.
+      const w = await createWallet();
+      await callInitiateWithdrawal(
+        w.passkey,
+        w.walletPda,
+        w.pendingActionPda,
+        w.passkeysPda,
+        Keypair.generate().publicKey,
+        new BN(anchor.web3.LAMPORTS_PER_SOL / 4)
+      );
+      const all = await provider.connection.getProgramAccounts(program.programId, { commitment: "processed" });
+      const filtered = await provider.connection.getProgramAccounts(program.programId, {
+        commitment: "processed",
+        filters: [{ memcmp: { offset: 0, encoding: "base64", bytes: PENDING_ACTION_DISCRIMINATOR.toString("base64") } }],
+      });
+      const result = evaluateProgramScan(
+        program.programId,
+        all.map((a) => ({ address: a.pubkey.toBase58(), data: a.account.data, owner: a.account.owner })),
+        filtered.map((a) => a.pubkey.toBase58()),
+        1
+      );
+      assert.deepEqual({ violations: result.violations, censusProblems: result.censusProblems }, { violations: [], censusProblems: [] });
+      assert.isAtLeast(result.pendingCount, 1);
+      assert.include(
+        filtered.map((a) => a.pubkey.toBase58()),
+        w.pendingActionPda.toBase58()
       );
     });
   });

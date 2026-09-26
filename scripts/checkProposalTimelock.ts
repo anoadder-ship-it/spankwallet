@@ -31,8 +31,15 @@ const SQUADS_PROGRAM_ID = new PublicKey("SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj5
 const MULTISIG_PDA = new PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
 const CLOCK_SYSVAR = new PublicKey("SysvarC1ock11111111111111111111111111111111");
 
-// Pas aan per voorstel dat gecontroleerd wordt.
-const TRANSACTION_INDEX = 11n;
+// Pas aan per voorstel dat gecontroleerd wordt, of geef TRANSACTION_INDEX
+// mee als omgevingsvariabele. scripts/preUpgradeChecks.ts (sectie 162) eist
+// die variabele, zodat de wrapper nooit stil een oud voorstelnummer toetst.
+const TRANSACTION_INDEX = (() => {
+  const fromEnv = process.env.TRANSACTION_INDEX;
+  if (fromEnv === undefined) return 11n;
+  if (!/^[0-9]+$/.test(fromEnv)) throw new Error(`TRANSACTION_INDEX "${fromEnv}" is geen niet-negatief geheel getal.`);
+  return BigInt(fromEnv);
+})();
 
 const MULTISIG_DISCRIMINATOR = Buffer.from([224, 116, 121, 186, 68, 161, 79, 236]);
 const PROPOSAL_DISCRIMINATOR = Buffer.from([26, 94, 189, 187, 116, 136, 53, 33]);

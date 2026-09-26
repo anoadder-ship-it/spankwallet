@@ -1,42 +1,61 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import {
-  findInvariantViolations,
-  decodeWalletForInvariant,
+  evaluateProgramScan,
   PENDING_ACTION_DISCRIMINATOR,
-  WALLET_ACCOUNT_DISCRIMINATOR,
   ProgramAccountBytes,
 } from "./lib/recoveryQueueInvariant";
 
-// Leesalleen: getProgramAccounts + getMultipleAccountsInfo, nooit een
-// transactie.
+// Leesalleen: getAccountInfo + getProgramAccounts, nooit een transactie.
 //
-// STATUS.md sectie 161: harde voorwaarde in het upgradevoorstel van upgrade 1.
-// Sectie 160 laat initiate_recovery de wachtrij sluiten; daardoor geldt "zolang
-// recovery_state Some is, is de wachtrij leeg" voor elke recovery die NA de
-// upgrade start. Toestand die de oude binary heeft achtergelaten, valt daar
-// niet onder en wordt hier gecontroleerd. Draaien:
-//   (a) direct vóór het uitvoeren van de upgrade - moet groen zijn;
-//   (b) direct ná het uitvoeren - moet opnieuw groen zijn. Tot het laatste
-//       moment draait de oude binary, en daaronder overleeft een wachtende
-//       actie initiate_recovery nog: (a) alleen dekt het venster tussen (a)
-//       en de deploy niet af.
+// STATUS.md sectie 161/162: harde voorwaarde bij elke upgrade van dit
+// programma, via scripts/preUpgradeChecks.ts (--pre direct vóór het
+// uitvoeren, --post direct erna; zie docs/upgradevoorstel-sjabloon.md).
+// Sectie 160 laat initiate_recovery de wachtrij sluiten; daardoor geldt
+// "zolang recovery_state Some is, is de wachtrij leeg" voor elke recovery die
+// NA de upgrade start. Toestand die de oude binary heeft achtergelaten, valt
+// daar niet onder en wordt hier gecontroleerd. Tot het laatste moment draait
+// de oude binary, en daaronder overleeft een wachtende actie
+// initiate_recovery nog: de run vóór de upgrade alleen dekt het venster tot
+// de deploy niet af.
 //
-// Exit-code: 0 = geen treffers; 1 = minstens één treffer (zie
-// scripts/lib/recoveryQueueInvariant.ts voor de betekenis, fail-closed bij
-// alles wat niet te verifiëren is); anders = de controle zelf faalde.
+// Exit-code: 0 = groen; 1 = minstens één treffer (zie
+// scripts/lib/recoveryQueueInvariant.ts, fail-closed bij alles wat niet te
+// verifiëren is); 2 = de controle zelf is onbetrouwbaar of faalde (o.a. een
+// leeg of onvolledig RPC-antwoord, sectie 162).
 //
-// Bij een treffer (devnet, testwaarde): cancel_action met een passkey van die
-// wallet. cancel_action draagt bewust geen recovery- of disarmed-constraint
-// en sluit elke PendingAction, ook een van de oude layout.
+// Een treffer is DETECTIE, geen herstel (sectie 162, review §161 L-2).
+// - recovery_in_progress (een recovery die onder de oude binary startte, met
+//   een wachtende actie): heeft de eigenaar alleen de backup-sleutel, dan is
+//   er onder de nieuwe binary GEEN herstelpad. cancel_action vereist een
+//   passkey; initiate_recovery kan niet opnieuw (recovery loopt al);
+//   unfreeze_via_backup_authority weigert tijdens een recovery. Het M-1-
+//   scenario blijft voor die wallet open tot de recovery is afgerond (dan
+//   maakt de epoch-verhoging de actie onbruikbaar) of iemand met een passkey
+//   ingrijpt. Structurele fix (cancel_recovery sluit ook de wachtrij) staat
+//   genoteerd voor upgrade 2, niet in deze upgrade.
+// - Alleen wie een geldige passkey van die wallet heeft, kan de actie
+//   weghalen (cancel_action, geen recovery- of disarmed-constraint). Bij een
+//   treffer vóór de upgrade: niet uitvoeren voordat de toestand begrepen is.
 //
-// De twee RPC-rondes zijn niet atomair: een PendingAction die tussen beide
-// ontstaat, ziet dit script pas bij de volgende run. Daarom (a) én (b).
+// Tegencontrole (sectie 162, L-3): de beoordeling gebruikt het ONGEFILTERDE
+// getProgramAccounts-antwoord (wallets en PendingActions uit één
+// momentopname) en eist minstens MIN_WALLET_ACCOUNTS WalletAccounts,
+// evenveel VaultAccounts, en dezelfde PendingActions als een aparte,
+// gefilterde aanroep. Die twee aanroepen zijn niet atomair: een verschil
+// daartussen geeft exit 2, gewoon opnieuw draaien.
 //
 //   RPC_URL=https://api.devnet.solana.com npx ts-node --transpile-only scripts/checkRecoveryQueueInvariant.ts
 
 const PROGRAM_ID = new PublicKey("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
 const RPC_URL = process.env.RPC_URL ?? "https://api.devnet.solana.com";
-const MULTIPLE_ACCOUNTS_BATCH = 100;
+// Aantal WalletAccounts op devnet, gemeten 2026-09-26 (sectie 161/162).
+// WalletAccounts zijn niet te sluiten, dus dit is een ondergrens. Alleen
+// verhogen, en alleen na een eigen meting.
+const MIN_WALLET_ACCOUNTS = 19;
+
+function toBytes(a: { pubkey: PublicKey; account: { data: Buffer; owner: PublicKey } }): ProgramAccountBytes {
+  return { address: a.pubkey.toBase58(), data: a.account.data, owner: a.account.owner };
+}
 
 async function main() {
   const connection = new Connection(RPC_URL, "confirmed");
@@ -45,55 +64,41 @@ async function main() {
     throw new Error(`programma ${PROGRAM_ID.toBase58()} niet gevonden of niet executable op ${RPC_URL}`);
   }
 
-  const pendingResult = await connection.getProgramAccounts(PROGRAM_ID, {
+  const all = await connection.getProgramAccounts(PROGRAM_ID, { withContext: true });
+  const filtered = await connection.getProgramAccounts(PROGRAM_ID, {
     withContext: true,
     filters: [{ memcmp: { offset: 0, encoding: "base64", bytes: PENDING_ACTION_DISCRIMINATOR.toString("base64") } }],
   });
-  const pendingActions: ProgramAccountBytes[] = pendingResult.value.map((a) => ({
-    address: a.pubkey.toBase58(),
-    data: a.account.data,
-    owner: a.account.owner,
-  }));
 
-  const walletKeys = [
-    ...new Set(pendingActions.filter((p) => p.data.length >= 40).map((p) => new PublicKey(p.data.subarray(8, 40)).toBase58())),
-  ].map((k) => new PublicKey(k));
-  const walletsByAddress = new Map<string, ProgramAccountBytes | null>();
-  for (let i = 0; i < walletKeys.length; i += MULTIPLE_ACCOUNTS_BATCH) {
-    const batch = walletKeys.slice(i, i + MULTIPLE_ACCOUNTS_BATCH);
-    const infos = await connection.getMultipleAccountsInfo(batch);
-    batch.forEach((key, j) => {
-      const info = infos[j];
-      walletsByAddress.set(key.toBase58(), info ? { address: key.toBase58(), data: info.data, owner: info.owner } : null);
-    });
+  const result = evaluateProgramScan(
+    PROGRAM_ID,
+    all.value.map(toBytes),
+    filtered.value.map((a) => a.pubkey.toBase58()),
+    MIN_WALLET_ACCOUNTS
+  );
+
+  console.log(`RPC: ${RPC_URL} (ongefilterd op slot ${all.context.slot}, gefilterd op slot ${filtered.context.slot})`);
+  console.log(`Programma-accounts: ${all.value.length}`);
+  console.log(`WalletAccounts: ${result.walletCount} (minimum ${MIN_WALLET_ACCOUNTS}), VaultAccounts: ${result.vaultCount}`);
+  console.log(`PendingAction-accounts: ${result.pendingCount}`);
+  console.log(
+    `Wallets met lopende recovery: ${result.inRecovery.length}${result.inRecovery.length ? " - " + result.inRecovery.join(", ") : ""}`
+  );
+
+  if (result.violations.length > 0) {
+    console.log(`ROOD: ${result.violations.length} treffer(s):`);
+    for (const v of result.violations) {
+      console.log(`  - pending_action ${v.pendingAction}, wallet ${v.wallet ?? "?"}: ${v.reasons.join(" + ")} (${v.detail})`);
+    }
   }
-
-  // Ter informatie (geen treffer): wallets met een lopende recovery. Met een
-  // lege wachtrij voldoen die al aan de invariant (sectie 161: 5MoXqg…).
-  const walletResult = await connection.getProgramAccounts(PROGRAM_ID, {
-    filters: [{ memcmp: { offset: 0, encoding: "base64", bytes: WALLET_ACCOUNT_DISCRIMINATOR.toString("base64") } }],
-  });
-  const inRecovery = walletResult
-    .filter((w) => {
-      const d = decodeWalletForInvariant(w.account.data);
-      return typeof d !== "string" && d.recoverySome;
-    })
-    .map((w) => w.pubkey.toBase58());
-
-  const violations = findInvariantViolations(PROGRAM_ID, pendingActions, walletsByAddress);
-
-  console.log(`RPC: ${RPC_URL} (PendingAction-lijst op slot ${pendingResult.context.slot})`);
-  console.log(`PendingAction-accounts: ${pendingActions.length}`);
-  console.log(`WalletAccounts: ${walletResult.length}, waarvan met lopende recovery: ${inRecovery.length}${inRecovery.length ? " - " + inRecovery.join(", ") : ""}`);
-  if (violations.length === 0) {
-    console.log("GROEN: geen PendingAction bij een wallet met een lopende recovery, geen afwijkende epoch.");
-    return 0;
+  if (result.censusProblems.length > 0) {
+    console.log(`CONTROLE ONBETROUWBAAR: ${result.censusProblems.length} tellingsprobleem/-problemen:`);
+    for (const p of result.censusProblems) console.log(`  - ${p}`);
   }
-  console.log(`ROOD: ${violations.length} treffer(s):`);
-  for (const v of violations) {
-    console.log(`  - pending_action ${v.pendingAction}, wallet ${v.wallet ?? "?"}: ${v.reasons.join(" + ")} (${v.detail})`);
-  }
-  return 1;
+  if (result.violations.length > 0) return 1;
+  if (result.censusProblems.length > 0) return 2;
+  console.log("GROEN: geen PendingAction bij een wallet met een lopende recovery, geen afwijkende epoch, telling consistent.");
+  return 0;
 }
 
 main().then(

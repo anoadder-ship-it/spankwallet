@@ -222,12 +222,11 @@ pub enum SpankWalletError {
     AdvancedActionMustUseQueue,
 
     // STATUS.md sectie 141-vervolg (bronfix, cancel_recovery/
-    // finalize_recovery): defensieve grens, in de praktijk onbereikbaar -
-    // alle 17 bestaande WalletAccounts zijn minstens 231 bytes, ruim boven
-    // de 190 die clear_recovery_state_payload_bytes() nodig heeft. Bestaat
-    // uitsluitend om nooit stilzwijgend buiten de accountgrenzen te
-    // schrijven, mocht een toekomstige, nog kortere account-vorm ooit
-    // bestaan.
+    // finalize_recovery), herzien in sectie 160: defensieve grens, in de
+    // praktijk onbereikbaar - zero_wallet_account_tail() weigert als de
+    // serialisatie langer is dan het account (dan zou Anchor's exit()
+    // sowieso falen). Bestaat uitsluitend om nooit stilzwijgend buiten de
+    // accountgrenzen te schrijven.
     #[msg("WalletAccount is te kort om de recovery_state-payload-regio veilig te nullen")]
     WalletAccountTooShortForRecoveryCleanup,
 

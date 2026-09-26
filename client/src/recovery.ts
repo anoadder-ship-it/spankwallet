@@ -17,6 +17,7 @@ import {
 } from "./challenge";
 import { SPANKWALLET_PROGRAM_ID } from "./programId";
 import { derivePasskeysPda } from "./passkeys";
+import { derivePendingActionPda } from "./thresholdChange";
 
 const INITIATE_RECOVERY_DISCRIMINATOR = Uint8Array.from([
   0x84, 0x94, 0x3c, 0x4a, 0x31, 0xb2, 0xeb, 0xbb,
@@ -93,11 +94,15 @@ export async function buildInitiateRecoveryTransaction(
 
   const data = concatBytes(INITIATE_RECOVERY_DISCRIMINATOR, newOwnerPasskey);
 
+  // Sectie 160: initiate_recovery sluit een eventuele wachtende
+  // PendingAction (rent naar de backup authority, daarom writable). Het
+  // pending_action-account is verplicht, ook als het (nog) niet bestaat.
   const instruction = new TransactionInstruction({
     programId: SPANKWALLET_PROGRAM_ID,
     keys: [
       { pubkey: walletPda, isSigner: false, isWritable: true },
-      { pubkey: backupAuthority.publicKey, isSigner: true, isWritable: false },
+      { pubkey: backupAuthority.publicKey, isSigner: true, isWritable: true },
+      { pubkey: derivePendingActionPda(walletPda), isSigner: false, isWritable: true },
     ],
     data: Buffer.from(data),
   });

@@ -633,27 +633,61 @@ fn consume_action_nonce(wallet: &mut WalletAccount) -> Result<()> {
     Ok(())
 }
 
-/// STATUS.md sectie 141-vervolg (bronfix): moet aangeroepen worden op het
-/// EXACTE moment dat `recovery_state` van `Some` naar `None` gaat
-/// (`cancel_recovery`/`finalize_recovery`) - nooit ergens anders, en nooit
-/// weggelaten bij een toekomstige derde plek die `recovery_state` ooit weer
-/// op `None` zet. Nult expliciet de 41 bytes die de `Some(RecoveryState)`-
-/// payload zou hebben ingenomen, rechtstreeks in de ruwe accountbytes -
-/// Borsh's eigen `Option::None`-serialisatie doet dit NIET vanzelf (schrijft
-/// alleen de 1-byte-tag, laat de oude payload-bytes onaangeroerd). Zonder
-/// deze opruiming blijven die 41 bytes stale data bevatten die een latere,
-/// langere structuurdefinitie stilzwijgend als (foutieve) veldwaarden zou
-/// inlezen - empirisch aangetoond tegen twee echte, corrupte devnet-accounts
-/// (deel 3 van de RC-verificatie, sectie 141). Deze fix repareert die twee
-/// bestaande accounts NIET met terugwerkende kracht (daarvoor is de aparte
-/// migratie-instructie nodig) - hij voorkomt uitsluitend dat het nog een
-/// keer gebeurt, voor elke recovery-cyclus vanaf nu.
-fn clear_recovery_state_payload_bytes(wallet_info: &AccountInfo) -> Result<()> {
-    let start = WalletAccount::RECOVERY_STATE_PAYLOAD_OFFSET;
-    let end = start + RecoveryState::LEN;
-    let mut data = wallet_info.try_borrow_mut_data()?;
-    require!(data.len() >= end, SpankWalletError::WalletAccountTooShortForRecoveryCleanup);
-    data[start..end].fill(0);
+/// STATUS.md sectie 141-vervolg (bronfix), herzien in sectie 160: moet
+/// aangeroepen worden in elke instructie waarin `recovery_state` van `Some`
+/// naar `None` gaat (`cancel_recovery`/`finalize_recovery`), NA alle
+/// wijzigingen aan de struct - nooit weggelaten bij een toekomstige derde
+/// plek die `recovery_state` ooit weer op `None` zet.
+///
+/// Borsh codeert `None` als alleen de tagbyte: alle velden achter
+/// `recovery_state` schuiven 41 bytes naar voren, en Anchor's exit-
+/// serialisatie schrijft alleen tot de nieuwe (kortere) lengte. Zonder
+/// opruiming blijft de oude staart staan - onder meer een kopie van de oude
+/// action_nonce en de oude recovery_nonce_snapshot - en een latere,
+/// langere structuurdefinitie leest die stilzwijgend als veldwaarden
+/// (empirisch aangetoond tegen twee devnet-accounts, sectie 141).
+///
+/// Tot en met sectie 159 nulde deze functie een VAST gebied (de oude
+/// RecoveryState-payload, 149..190). Dat gebied valt binnen de nieuwe
+/// serialisatie en werd door exit() direct weer overschreven - sinds sectie
+/// 159 volledig, de opruiming deed toen niets meer (review sectie 159, L-2).
+/// Nu: bereken de werkelijke serialisatielengte van de huidige struct en
+/// nul alles vanaf daar tot het einde van het account. exit() schrijft
+/// daarna alleen [0, lengte), dus de nullen blijven staan - onafhankelijk
+/// van welke velden er later bijkomen. De lengte hangt alleen af van de
+/// Option-tags, niet van de veldwaarden.
+fn zero_wallet_account_tail(wallet: &Account<WalletAccount>) -> Result<()> {
+    let mut serialized = Vec::with_capacity(WalletAccount::LEN);
+    wallet.try_serialize(&mut serialized)?;
+    let info = wallet.to_account_info();
+    let mut data = info.try_borrow_mut_data()?;
+    require!(
+        data.len() >= serialized.len(),
+        SpankWalletError::WalletAccountTooShortForRecoveryCleanup
+    );
+    data[serialized.len()..].fill(0);
+    Ok(())
+}
+
+/// Sectie 160: sluit een eventuele PendingAction op het (seeds-gebonden)
+/// pending_action-adres, layout-onafhankelijk (sectie 153): alleen
+/// eigenaar = dit programma + het PendingAction-discriminator worden
+/// gecontroleerd, met dezelfde close-semantiek als cancel_action. Bestaat
+/// er geen PendingAction, dan doet dit niets. Gedeeld door
+/// unfreeze_via_backup_authority en initiate_recovery.
+fn close_pending_action_if_present<'info>(
+    pending_info: &AccountInfo<'info>,
+    destination: &AccountInfo<'info>,
+) -> Result<()> {
+    if pending_info.owner == &crate::ID {
+        let is_pending_action = {
+            let data = pending_info.try_borrow_data()?;
+            data.len() >= PendingAction::DISCRIMINATOR.len()
+                && &data[..PendingAction::DISCRIMINATOR.len()] == PendingAction::DISCRIMINATOR
+        };
+        require!(is_pending_action, SpankWalletError::NoPendingAction);
+        close_program_account(pending_info, destination)?;
+    }
     Ok(())
 }
 
@@ -3177,6 +3211,9 @@ pub fn confirm_pending_action(
 //   authority blijft werken, direct ontdooien via de backup authority
 //   weigert. Zie de toelichting bij FreezeViaBackupAuthority en
 //   UnfreezeViaBackupAuthority.
+// - initiate_recovery sluit een eventuele wachtende PendingAction (sectie
+//   160), dus ook een klaargezette Unfreeze: zolang een recovery loopt, is
+//   de wachtrij leeg.
 //
 // Tijdens een bevriezing zijn alle waardepaden en alle directe
 // bevoegdheidsuitbreidingen geblokkeerd (`!wallet.disarmed` op
@@ -3284,19 +3321,25 @@ pub fn freeze_via_backup_authority(ctx: Context<FreezeViaBackupAuthority>) -> Re
 
 #[derive(Accounts)]
 pub struct UnfreezeViaBackupAuthority<'info> {
-    /// Sectie 158/159: weigert tijdens een lopende recovery. Deze instructie
-    /// kan passkeys verwijderen; de blokkade legt de veto-set vast zolang de
-    /// recovery loopt: wie de recovery startte (de backup authority), kan
-    /// tijdens de timelock niet meer veranderen welke passkeys hem mogen
-    /// tegenhouden. Wie de set wil verkleinen, moet dat vóór de recovery
-    /// doen, en dat is dan zichtbaar voordat de timelock begint.
+    /// Sectie 158/159/160: weigert tijdens een lopende recovery. Deze
+    /// instructie kan passkeys verwijderen. De blokkade doet precies één
+    /// ding: zodra een recovery loopt, kan de backup authority de passkey-set
+    /// niet meer via deze route wijzigen - een LATERE, aparte poging tijdens
+    /// de timelock weigert. De set die bij de start van de recovery geldt,
+    /// blijft de set die het veto heeft.
     ///
-    /// Wat de blokkade NIET oplost: wie de backup-sleutel en één passkey
-    /// heeft, kan buiten een recovery al alle andere passkeys verwijderen en
-    /// daarna een recovery starten (de 2-van-3 uit de README). Die
-    /// combinatie houdt deze blokkade niet tegen. Keerzijde: ook een eerlijke
-    /// eigenaar kan tijdens een recovery geen passkey verwijderen; ook dat
-    /// moet vóór initiate_recovery.
+    /// Wat de blokkade NIET doet (gecorrigeerd in sectie 160): de set vóór
+    /// de recovery vastleggen of die wijziging zichtbaar maken vóór de
+    /// timelock begint. De backup authority kan freeze_via_backup_authority,
+    /// deze instructie (alle passkeys op één na verwijderen, zelf gekozen
+    /// welke overblijft) en initiate_recovery in één atomaire transactie
+    /// combineren; dat kon en kan nog steeds. Het verkleinen gebeurt dan op
+    /// hetzelfde moment als de start van de timelock. Ook de combinatie
+    /// backup-sleutel + één passkey (de 2-van-3 uit de README) houdt de
+    /// blokkade niet tegen. Keerzijde: ook een eerlijke eigenaar kan tijdens
+    /// een recovery geen passkey verwijderen; dat moet vóór initiate_recovery.
+    /// Een wachtende PendingAction speelt tijdens een recovery geen rol meer:
+    /// initiate_recovery sluit die (sectie 160).
     ///
     /// De recovery-controle staat vóór de disarmed-controle, zodat de
     /// foutcode niet van de bevriezing afhangt.
@@ -3386,16 +3429,10 @@ pub fn unfreeze_via_backup_authority(
             .ok_or(SpankWalletError::SessionEpochOverflow)?;
     }
 
-    let pending_info = ctx.accounts.pending_action.to_account_info();
-    if pending_info.owner == &crate::ID {
-        let is_pending_action = {
-            let data = pending_info.try_borrow_data()?;
-            data.len() >= PendingAction::DISCRIMINATOR.len()
-                && &data[..PendingAction::DISCRIMINATOR.len()] == PendingAction::DISCRIMINATOR
-        };
-        require!(is_pending_action, SpankWalletError::NoPendingAction);
-        close_program_account(&pending_info, &ctx.accounts.backup_authority.to_account_info())?;
-    }
+    close_pending_action_if_present(
+        &ctx.accounts.pending_action.to_account_info(),
+        &ctx.accounts.backup_authority.to_account_info(),
+    )?;
 
     ctx.accounts.wallet.disarmed = false;
     Ok(())
@@ -4075,10 +4112,45 @@ pub struct InitiateRecovery<'info> {
     )]
     pub wallet: Account<'info, WalletAccount>,
 
-    #[account(address = wallet.backup_authority @ SpankWalletError::InvalidBackupAuthoritySignature)]
+    /// Ontvangt de rent van een eventueel gesloten PendingAction (sectie 160).
+    #[account(
+        mut,
+        address = wallet.backup_authority @ SpankWalletError::InvalidBackupAuthoritySignature
+    )]
     pub backup_authority: Signer<'info>,
+
+    /// CHECK: sectie 160 - het singleton-PDA van de wachtrij; mag leeg zijn.
+    /// Verplicht (geen Option), zodat de aanroeper het sluiten niet kan
+    /// overslaan; seeds garanderen dat dit EXACT de PendingAction van deze
+    /// wallet is. Zie close_pending_action_if_present.
+    #[account(
+        mut,
+        seeds = [b"pending_action", wallet.key().as_ref()],
+        bump,
+    )]
+    pub pending_action: UncheckedAccount<'info>,
 }
 
+/// Sectie 160: sluit een eventuele wachtende PendingAction (elke soort),
+/// rent naar de backup authority. Samen met de recovery_state.is_none()-
+/// constraint op alle zes instructies die een PendingAction aanmaken (en op
+/// confirm_pending_action) geldt daardoor: zolang recovery_state Some is, is
+/// de wachtrij leeg.
+///
+/// Aanleiding (review sectie 159, M-1): een eigenaar die alleen de backup-
+/// sleutel heeft, bevriest; de dief (met de enige passkey) zet een Unfreeze
+/// klaar; de eigenaar start een recovery. Tijdens de recovery kon de
+/// eigenaar die Unfreeze niet meer weghalen (unfreeze_via_backup_authority
+/// weigert, cancel_action vereist een passkey), en na 24u kon de dief
+/// annuleren, ontdooien en uitgeven.
+///
+/// Geen nieuwe bevoegdheid: buiten een recovery kan de backup authority elke
+/// wachtende actie al sluiten (freeze_via_backup_authority +
+/// unfreeze_via_backup_authority in één transactie). Keerzijde, ook al
+/// bestaand: start iemand met de backup-sleutel een recovery, dan vervalt
+/// een wachtende actie van de eigenaar; na cancel_recovery moet die opnieuw
+/// (met een nieuwe timelock). De nonce verandert hier niet; de momentopname
+/// voor cancel_recovery is de nonce van dit moment.
 pub fn initiate_recovery(
     ctx: Context<InitiateRecovery>,
     new_owner_passkey: [u8; PASSKEY_PUBKEY_LEN],
@@ -4092,6 +4164,11 @@ pub fn initiate_recovery(
     });
     // Sectie 159: vaste momentopname voor de cancel_recovery-challenge.
     wallet.recovery_nonce_snapshot = wallet.action_nonce;
+
+    close_pending_action_if_present(
+        &ctx.accounts.pending_action.to_account_info(),
+        &ctx.accounts.backup_authority.to_account_info(),
+    )?;
     Ok(())
 }
 
@@ -4151,7 +4228,7 @@ pub fn cancel_recovery(ctx: Context<CancelRecovery>, client_data_json: Vec<u8>) 
     consume_action_nonce(&mut ctx.accounts.wallet)?;
     ctx.accounts.wallet.recovery_state = None;
     ctx.accounts.wallet.recovery_nonce_snapshot = 0;
-    clear_recovery_state_payload_bytes(&ctx.accounts.wallet.to_account_info())?;
+    zero_wallet_account_tail(&ctx.accounts.wallet)?;
     Ok(())
 }
 
@@ -4217,7 +4294,6 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
     // passkey-set wordt hieronder toch gewist.
     consume_action_nonce(wallet)?;
     wallet.recovery_nonce_snapshot = 0;
-    clear_recovery_state_payload_bytes(&wallet.to_account_info())?;
     // B2 (STATUS.md sectie 76): elke bestaande sessiesleutel wordt hier in
     // één klap ongeldig - zie execute_via_session/transfer_token_via_session/
     // execute_advanced_via_session voor de bijbehorende epoch-check.
@@ -4225,6 +4301,8 @@ pub fn finalize_recovery(ctx: Context<FinalizeRecovery>) -> Result<()> {
         .session_epoch
         .checked_add(1)
         .ok_or(SpankWalletError::SessionEpochOverflow)?;
+    // Sectie 141/160: na de laatste wijziging aan de struct.
+    zero_wallet_account_tail(wallet)?;
 
     // Expliciete bestaanstest i.p.v. Anchors Option<Account<T>>-patroon (zie
     // de CHECK-comment hierboven): owner == crate::ID is alleen waar voor

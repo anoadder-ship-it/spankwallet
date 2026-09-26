@@ -257,51 +257,72 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
     assert.deepEqual(Array.from(wallet.seedKey), seedKey);
   });
 
-  // STATUS.md sectie 141-vervolg (bronfix): empirisch bewijs, niet alleen
-  // beredeneerd, dat cancel_recovery/finalize_recovery de vrijgekomen
-  // RecoveryState-payload-bytes ECHT nullen - niet alleen dat
-  // recovery_state logisch None decodeert (dat zou de kapotte, ongefixte
-  // situatie ook al laten "slagen", want de tag zelf was altijd al correct
-  // 0).
+  // STATUS.md sectie 141-vervolg (bronfix), herzien in sectie 160: bewijs
+  // dat cancel_recovery/finalize_recovery na de overgang Some -> None ALLES
+  // achter de nieuwe (kortere) serialisatie nullen - niet alleen dat
+  // recovery_state logisch None decodeert.
   //
-  // BELANGRIJKE CORRECTIE (empirisch ontdekt tijdens de rood/groen-run,
-  // NIET vooraf voorzien): de eerste versie van deze test beweerde dat het
-  // VOLLEDIGE 41-byte-gebied [149, 190) na de fix nul moet zijn. Dat is
-  // ONJUIST en gaf, mét de fix actief, alsnog een falende (rode) test - de
-  // bronfix nult die 41 bytes wel degelijk, maar Anchor's eigen, normale
-  // exit()-serialisatie schrijft er DAARNA overheen met de echte,
-  // legitieme veldwaarden die daadwerkelijk in dat gebied thuishoren
-  // (recovery_timelock_seconds, deposit_authority-tag, action_nonce,
-  // session_epoch, spend_threshold_lamports, disarmed - stuk voor stuk
-  // echte data, geen stale bytes). Alleen het STUKJE ACHTER het laatste
-  // huidige veld (`disarmed`) - de 7 bytes die GEEN enkel veld van de
-  // huidige structuurdefinitie beslaat, maar wél binnen de historisch
-  // gereserveerde RecoveryState-payload-ruimte valt - hoort na de fix nul
-  // te zijn. Dát is precies de regio die een TOEKOMSTIGE, langere
-  // structuurdefinitie zou lezen als nieuwe velden, en dus precies de
-  // regio die de bronfix moet beschermen.
+  // Achtergrond: Borsh schrijft bij None alleen de tagbyte; de velden
+  // erachter schuiven 41 bytes op en Anchor's exit-serialisatie schrijft
+  // alleen tot de nieuwe lengte. Tot en met sectie 159 nulde de bronfix een
+  // VAST gebied (149..190, de oude RecoveryState-payload). Dat gebied valt
+  // binnen de nieuwe serialisatie en werd dus direct weer overschreven
+  // (sinds sectie 159 volledig: de None-layout loopt tot 191). De oude
+  // staart - 191..232 bij een 264-byte-layout, met o.a. een kopie van de
+  // oude action_nonce en de oude recovery_nonce_snapshot - bleef staan.
+  // Sectie 160 nult daarom vanaf de werkelijke serialisatielengte tot het
+  // einde van het account.
   //
-  // Alle offsets hier zijn bewust letterlijk overgenomen uit state.rs (niet
-  // geïmporteerd) - een toekomstige veldherordening/-toevoeging die deze
-  // constanten laat verschuiven zou dit testbewijs dan ook zelf moeten
-  // bijwerken, geen stille aanname.
+  // Offsets letterlijk uit state.rs (niet geïmporteerd): een toekomstige
+  // veldtoevoeging moet deze test bewust bijwerken.
   //
-  // Sectie 159: sinds recovery_nonce_snapshot (8 bytes, achter `disarmed`)
-  // zijn de 7 bytes hieronder niet meer "buiten elk veld", maar de eerste 7
-  // bytes van dat nieuwe veld. cancel_recovery en finalize_recovery zetten
-  // het op 0, dus de check blijft geldig en dekt nu ook die reset. De
-  // bytes daarna (vanaf 191) vallen buiten deze test, zoals voorheen de
-  // bytes vanaf 190.
-  const RECOVERY_STATE_PAYLOAD_OFFSET = 149; // WalletAccount::RECOVERY_STATE_PAYLOAD_OFFSET
-  const RECOVERY_STATE_PAYLOAD_LEN = 41; // RecoveryState::LEN
-  // Einde van wat de HUIDIGE struct daadwerkelijk beschrijft, vanaf
-  // RECOVERY_STATE_PAYLOAD_OFFSET: recovery_timelock_seconds(8) +
-  // deposit_authority-tag(1) + action_nonce(8) + session_epoch(8) +
-  // spend_threshold_lamports(8) + disarmed(1) = 34 bytes.
-  const CURRENT_STRUCT_FIELDS_LEN_AFTER_TAG = 8 + 1 + 8 + 8 + 8 + 1;
-  const STALE_TAIL_OFFSET = RECOVERY_STATE_PAYLOAD_OFFSET + CURRENT_STRUCT_FIELDS_LEN_AFTER_TAG; // 183
-  const STALE_TAIL_LEN =
-    RECOVERY_STATE_PAYLOAD_LEN - CURRENT_STRUCT_FIELDS_LEN_AFTER_TAG; // 7
+  // None/None-serialisatie (incl. discriminator): 8 + 33 + 32 + 33 + 1 + 1
+  // + 8 + 32 + 1 (recovery_state-tag) + 8 + 1 (deposit_authority-tag) + 8 +
+  // 8 + 8 + 1 + 8 (recovery_nonce_snapshot) = 191.
+  const SERIALIZED_LEN_NONE_NONE = 191;
+  const RECOVERY_NONCE_SNAPSHOT_OFFSET_NONE_NONE = SERIALIZED_LEN_NONE_NONE - 8; // 183
+
+  async function assertTailZeroedAfterRecovery(walletPda: PublicKey, label: string) {
+    const raw = await provider.connection.getAccountInfo(walletPda);
+    const data = raw!.data;
+    const tail = data.subarray(SERIALIZED_LEN_NONE_NONE);
+    const firstNonZero = tail.findIndex((b) => b !== 0);
+    assert.isTrue(
+      tail.length > 0 && firstNonZero === -1,
+      `${label}: alles vanaf byte ${SERIALIZED_LEN_NONE_NONE} tot het einde (${data.length}) hoort 0x00 te zijn, ` +
+        `eerste niet-nul byte op ${firstNonZero === -1 ? "-" : SERIALIZED_LEN_NONE_NONE + firstNonZero}: ` +
+        tail.toString("hex")
+    );
+    // Het laatste veld van de huidige struct (recovery_nonce_snapshot) is 0.
+    assert.equal(
+      data.readBigUInt64LE(RECOVERY_NONCE_SNAPSHOT_OFFSET_NONE_NONE).toString(),
+      "0",
+      `${label}: recovery_nonce_snapshot hoort 0 te zijn na afloop van de recovery`
+    );
+  }
+
+  /// Bevriezen via de backup authority vóór de recovery: verhoogt de nonce
+  /// (en zet disarmed), zodat de oude staart na afloop gegarandeerd
+  /// niet-nul bytes bevat (oude action_nonce, oude momentopname). Zonder dit
+  /// kon de oude staart bij een verse wallet toevallig al nul zijn en mat de
+  /// test niets.
+  async function freezeViaBackup(walletPda: PublicKey, backupAuthority: Keypair) {
+    await program.methods
+      .freezeViaBackupAuthority()
+      .accounts({ wallet: walletPda, backupAuthority: backupAuthority.publicKey })
+      .signers([backupAuthority])
+      .rpc();
+  }
+
+  /// Sanity: direct na initiate_recovery staat er in de oude staart
+  /// (vanaf 191) data - anders meet de nulcontrole erna niets.
+  async function assertTailNonZeroDuringRecovery(walletPda: PublicKey) {
+    const raw = await provider.connection.getAccountInfo(walletPda);
+    assert.isFalse(
+      raw!.data.subarray(SERIALIZED_LEN_NONE_NONE).every((b) => b === 0),
+      "sanity-check: tijdens de recovery hoort er data vanaf byte 191 te staan"
+    );
+  }
 
   // createWallet() hierboven geeft geen bruikbaar TestPasskey-object terug
   // (alleen de rauwe seed_key-bytes) - cancel_recovery moet ondertekend
@@ -357,46 +378,10 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
     return { passkey, backupAuthority, walletPda, vaultPda, passkeysPda };
   }
 
-  async function assertStaleTailZeroedAndCurrentFieldsPlausible(
-    walletPda: PublicKey,
-    label: string
-  ) {
-    const raw = await provider.connection.getAccountInfo(walletPda);
-    const fullRegion = raw!.data.subarray(
-      RECOVERY_STATE_PAYLOAD_OFFSET,
-      RECOVERY_STATE_PAYLOAD_OFFSET + RECOVERY_STATE_PAYLOAD_LEN
-    );
-    const staleTail = raw!.data.subarray(STALE_TAIL_OFFSET, STALE_TAIL_OFFSET + STALE_TAIL_LEN);
-
-    // De eigenlijke bronfix-bewering: het stukje ACHTER de huidige velden,
-    // dat een toekomstige langere structuurdefinitie zou lezen, moet nul
-    // zijn - dit was vóór de fix aantoonbaar niet zo (zie de rode testrun).
-    assert.isTrue(
-      staleTail.every((b) => b === 0),
-      `${label}: de bytes ná de huidige velden (offset ${STALE_TAIL_OFFSET}..${
-        STALE_TAIL_OFFSET + STALE_TAIL_LEN
-      }, buiten het bereik van elk huidig veld) horen 0x00 te zijn ná de bronfix, kreeg: ${staleTail.toString(
-        "hex"
-      )}`
-    );
-
-    // Sanity-check op het OVERIGE deel (149..183): dat hoort NIET leeg te
-    // zijn - dat is waar recovery_timelock_seconds/deposit_authority-tag/
-    // action_nonce/session_epoch/spend_threshold_lamports/disarmed
-    // daadwerkelijk staan, door Anchors eigen exit() teruggeschreven. Puur
-    // ter documentatie/contrast met de stale-tail-check hierboven, geen
-    // strikte inhoudscontrole (die velden worden al apart via
-    // program.account.walletAccount.fetch() gecontroleerd in de tests
-    // zelf).
-    assert.isFalse(
-      fullRegion.subarray(0, CURRENT_STRUCT_FIELDS_LEN_AFTER_TAG).every((b) => b === 0),
-      `${label}: sanity-check - het deel dat de huidige velden beslaat (149..183) hoort niet leeg te zijn`
-    );
-  }
-
-  it("cancel_recovery nult de vrijgekomen RecoveryState-payload-bytes expliciet (bronfix, sectie 141)", async () => {
+  it("cancel_recovery nult alles achter de nieuwe serialisatie tot het einde van het account (bronfix sectie 141, herzien in sectie 160)", async () => {
     const { passkey, backupAuthority, walletPda, passkeysPda } = await createWalletWithPasskey();
     const newOwnerPasskey = dummyNewOwnerPasskey();
+    await freezeViaBackup(walletPda, backupAuthority);
 
     await program.methods
       .initiateRecovery(newOwnerPasskey)
@@ -404,17 +389,7 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       .signers([backupAuthority])
       .rpc();
 
-    // Sanity-check: de payload-regio moet NIET al-nul zijn direct na
-    // initiate_recovery - anders meet deze test niets zinvols.
-    const rawAfterInitiate = await provider.connection.getAccountInfo(walletPda);
-    const regionAfterInitiate = rawAfterInitiate!.data.subarray(
-      RECOVERY_STATE_PAYLOAD_OFFSET,
-      RECOVERY_STATE_PAYLOAD_OFFSET + RECOVERY_STATE_PAYLOAD_LEN
-    );
-    assert.isFalse(
-      regionAfterInitiate.every((b) => b === 0),
-      "sanity-check: de RecoveryState-payload-regio hoort NIET al-nul te zijn direct na initiate_recovery"
-    );
+    await assertTailNonZeroDuringRecovery(walletPda);
 
     // Sectie 158/159: de challenge is gebonden aan deze recovery-poging
     // (momentopname van de nonce bij initiate_recovery), niet aan de live nonce.
@@ -455,15 +430,16 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       (nonceBefore + 1n).toString(),
       "cancel_recovery verhoogt de nonce nog steeds"
     );
-    await assertStaleTailZeroedAndCurrentFieldsPlausible(walletPda, "cancel_recovery");
+    await assertTailZeroedAfterRecovery(walletPda, "cancel_recovery");
   });
 
-  it("finalize_recovery nult de vrijgekomen RecoveryState-payload-bytes expliciet (bronfix, sectie 141)", async () => {
+  it("finalize_recovery nult alles achter de nieuwe serialisatie tot het einde van het account (bronfix sectie 141, herzien in sectie 160)", async () => {
     const timelockSeconds = 3;
     const { backupAuthority, walletPda, passkeysPda } = await createWalletWithPasskey(
       timelockSeconds
     );
     const newOwnerPasskey = dummyNewOwnerPasskey();
+    await freezeViaBackup(walletPda, backupAuthority);
 
     await program.methods
       .initiateRecovery(newOwnerPasskey)
@@ -471,15 +447,7 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
       .signers([backupAuthority])
       .rpc();
 
-    const rawAfterInitiate = await provider.connection.getAccountInfo(walletPda);
-    const regionAfterInitiate = rawAfterInitiate!.data.subarray(
-      RECOVERY_STATE_PAYLOAD_OFFSET,
-      RECOVERY_STATE_PAYLOAD_OFFSET + RECOVERY_STATE_PAYLOAD_LEN
-    );
-    assert.isFalse(
-      regionAfterInitiate.every((b) => b === 0),
-      "sanity-check: de RecoveryState-payload-regio hoort NIET al-nul te zijn direct na initiate_recovery"
-    );
+    await assertTailNonZeroDuringRecovery(walletPda);
 
     const afterInitiate = await program.account.walletAccount.fetch(walletPda);
     await advanceOnChainClockPast(
@@ -496,6 +464,6 @@ describe("spankwallet: recovery-flow (initiate/finalize - initiate en finalize z
     const walletAfterFinalize = await program.account.walletAccount.fetch(walletPda);
     assert.isNull(walletAfterFinalize.recoveryState);
     assert.deepEqual(Array.from(walletAfterFinalize.ownerPasskey), newOwnerPasskey);
-    await assertStaleTailZeroedAndCurrentFieldsPlausible(walletPda, "finalize_recovery");
+    await assertTailZeroedAfterRecovery(walletPda, "finalize_recovery");
   });
 });

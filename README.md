@@ -89,7 +89,7 @@ geen WebAuthn), of permissionless (door wie dan ook aanroepbaar, on-chain-gate d
 | finalize_threshold_change        | Passkey                              | Aangekondigde drempelwijziging afronden, ná de timelock               |
 | add_passkey                     | Een van de al geldige passkeys        | Extra, gelijkwaardige passkey registreren (multi-passkey)           |
 | remove_passkey                  | Een van de al geldige passkeys        | Passkey intrekken (lockout-beschermd: nooit de laatste verwijderen) |
-| initiate_recovery                | Backup authority                     | Recovery starten                                                    |
+| initiate_recovery                | Backup authority                     | Recovery starten; sluit een eventuele wachtende actie (rent naar de backup authority) |
 | cancel_recovery                 | Passkey (owner-veto)                  | Recovery annuleren; de handtekening is gebonden aan precies deze recovery-poging (momentopname van de nonce bij de start, niet de live nonce) |
 | finalize_recovery                | Permissionless (na timelock)          | Recovery afronden: wist alle extra passkeys, maakt bestaande sessiesleutels ongeldig (epoch-verhoging, sluit ze niet), verhoogt de action_nonce |
 | add_session_key                  | Een van de al geldige passkeys        | Tijdelijke session key registreren (scope + slot-gebonden expiry)   |
@@ -130,7 +130,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (121 passing, 112 pending, 0 failing - `npm test`, 2026-09-25)
+tests/                        - Anchor-tests (121 passing, 117 pending, 0 failing - `npm test`, 2026-09-26)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -311,12 +311,24 @@ Zie `desktop/README.md` voor de volledige uitleg (architectuur, passkey-backend,
 - Tijdens een lopende recovery kan de backup authority de wallet bevriezen, maar niet direct
   ontdooien. Bevriezen is nodig omdat elke geldige passkey de recovery kan annuleren en de
   waardepaden daarmee weer opengaan; een eigenaar die alleen nog de backup-sleutel heeft,
-  moet dat kunnen voorkomen. Direct ontdooien kan passkeys verwijderen en blijft daarom
-  geblokkeerd: zo ligt vast welke passkeys de recovery mogen tegenhouden. Dat houdt de
-  combinatie backup-sleutel + één passkey niet tegen (zie hierboven, 2-van-3); die kan de
-  passkey-set vóór een recovery al aanpassen. Wie vermoedt dat een passkey in verkeerde
-  handen is, bevriest vóór of samen met `initiate_recovery`, en verwijdert eventuele
-  passkeys vóór de recovery.
+  kan zo voorkomen dat er in dezelfde transactie als het annuleren wordt uitgegeven. Direct
+  ontdooien kan passkeys verwijderen; de blokkade voorkomt alleen dat de passkey-set ná de
+  start van de recovery nog via die route verandert. Hij legt de set niet vóór de recovery
+  vast: de backup-sleutel kan bevriezen, ontdooien met het verwijderen van alle passkeys op
+  één na (en zelf kiezen welke overblijft) en `initiate_recovery` in één transactie
+  combineren. Ook de combinatie backup-sleutel + één passkey houdt hij niet tegen (zie
+  hierboven, 2-van-3).
+- `initiate_recovery` sluit een eventuele wachtende actie, van elke soort, ook een
+  klaargezette ontdooiing. Omdat geen enkele wachtende actie kan ontstaan zolang een
+  recovery loopt, is de wachtrij tijdens een recovery altijd leeg. Een wachtende actie van
+  de eigenaar vervalt daardoor ook als iemand anders met de backup-sleutel een recovery
+  start; na `cancel_recovery` moet die opnieuw, met een nieuwe timelock.
+- Wat een eigenaar met alleen de backup-sleutel níet kan: winnen van iemand die een geldige
+  passkey heeft. Die kan elke recovery annuleren en in dezelfde transactie een ontdooiing
+  klaarzetten (24u). De eigenaar moet dan binnen die 24u reageren, bijvoorbeeld met een
+  nieuwe `initiate_recovery` (die de ontdooiing weer sluit); zonder reactie ontdooit de
+  passkey-houder na 24u. Bevriezen houdt de waarde vast zolang de eigenaar blijft
+  reageren, niet langer.
 - Elke gevoelige actie bindt zijn volledige, relevante parameters in de ondertekende
   challenge (nooit alleen een deel) - voorkomt dat een geldige handtekening voor iets anders
   hergebruikt kan worden dan waarvoor hij bedoeld was.

@@ -14869,6 +14869,18 @@ de README, sectie 158). Die combinatie houdt deze blokkade niet tegen. Keerzijde
 eerlijke eigenaar kan tijdens een recovery geen passkey verwijderen; dat moet vóór
 `initiate_recovery`.
 
+GECORRIGEERD (sectie 160): hierboven stond dat wie de set wil verkleinen dat vóór de
+recovery moet doen, "en dat is dan zichtbaar voordat de timelock begint". Dat klopte
+niet. De backup authority kan `freeze_via_backup_authority`,
+`unfreeze_via_backup_authority` (alle passkeys op één na verwijderen, zelf gekozen welke
+overblijft) en `initiate_recovery` in één atomaire transactie combineren; dat kon en kan
+nog steeds. Het verkleinen gebeurt dan op hetzelfde moment als de start van de timelock,
+niet ervoor. De blokkade doet alleen dit: een latere, aparte poging om de set via deze
+route te wijzigen ná de start van de recovery weigert. Ook de README-zin dat een
+eigenaar met alleen de backup-sleutel het uitgeven "moet kunnen voorkomen" was te
+breed: bevriezen hield een klaargezette Unfreeze niet tegen (review §159, M-1, zie
+sectie 160).
+
 ### 3. `cancel_recovery` gebonden aan een momentopname van de nonce (L1)
 
 Nieuw veld `WalletAccount.recovery_nonce_snapshot: u64`, achteraan (na `disarmed`).
@@ -14934,6 +14946,150 @@ Groen (2026-09-25): `cargo test` 9 passed; `yarn test:pending-action` 109 passin
 0 failing (1 pending: de rollover-test); `yarn test` 121 passing / 0 failing (112 pending),
 geen stackframe-waarschuwingen; `yarn test:spend-window-rollover` 110 passing / 0 failing.
 Client: `tsc --noEmit` schoon.
+
+Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
+RC-verificatie, dan het upgradevoorstel.
+
+## 160. Recovery: initiate_recovery sluit een wachtende actie, eerlijke onderbouwing van de unfreeze-blokkade, stale-tail-opruiming die echt werkt (2026-09-25)
+
+Reparatieronde na de onafhankelijke review van sectie 159 (bevindingen M-1, L-1, L-2).
+Rood vóór groen: de tests zijn eerst geschreven en gedraaid tegen het ongewijzigde programma
+(df39c2c). Ontwerpkeuze voor M-1 vooraf voorgelegd; gekozen: c.
+
+### 1. `initiate_recovery` sluit een wachtende PendingAction (M-1)
+
+Het probleem (review §159): een eigenaar met alleen de backup-sleutel bevriest; de dief, met
+de enige passkey, zet een Unfreeze klaar; de eigenaar start een recovery. Tijdens de recovery
+kon de eigenaar die Unfreeze niet meer weghalen: `unfreeze_via_backup_authority` weigert
+tijdens een recovery, `freeze_via_backup_authority` laat de wachtrij ongemoeid, `cancel_action`
+vereist een passkey, en zijn eigen recovery kan de eigenaar niet annuleren. Na 24u:
+`cancel_recovery` + `finalize_unfreeze` in één transactie, daarna `execute`.
+
+Overwogen:
+- a. `freeze_via_backup_authority` sluit de wachtende actie. Dicht de exacte volgorde niet: de
+  eigenaar bevroor daar vóór de `initiate_unfreeze` van de dief, en had de klaargezette
+  Unfreeze eerst moeten opmerken om opnieuw te bevriezen. Wijzigt ook de ABI van een
+  bestaande instructie.
+- b. Een nieuwe backup-route om een wachtende actie te annuleren, ook tijdens een recovery.
+  Dezelfde bevoegdheid als a, meer oppervlak, en ook hier moet de eigenaar de actie opmerken.
+- c. (gekozen) `initiate_recovery` sluit een eventuele wachtende actie, van elke soort.
+
+Met c geldt: zolang `recovery_state` Some is, is de wachtrij leeg. Alle zes instructies die
+een PendingAction aanmaken eisen al `recovery_state.is_none()` (net als
+`confirm_pending_action`); het enige gat was een actie van vóór de start, en die sluit
+`initiate_recovery` nu zelf. De exacte aanvalsvolgorde is daarmee dicht zonder dat de
+eigenaar iets hoeft op te merken.
+
+Implementatie: `InitiateRecovery` krijgt een verplicht `pending_action`-account
+(UncheckedAccount, seeds `[b"pending_action", wallet]`, mut) en `backup_authority` wordt mut
+(ontvangt de rent). Het sluiten is layout-onafhankelijk (sectie 153): eigenaar = dit
+programma + PendingAction-discriminator, dan `close_program_account`. Die logica staat nu in
+een gedeelde helper `close_pending_action_if_present`, ook gebruikt door
+`unfreeze_via_backup_authority` (gedrag daar ongewijzigd). De nonce verandert niet in
+`initiate_recovery`; de momentopname voor `cancel_recovery` is de nonce van dat moment. ABI-
+wijziging: `client/src/recovery.ts` geeft het account mee; de testaanroepen via Anchor's
+`.accounts()` lossen het PDA zelf op.
+
+Geen nieuwe bevoegdheid: buiten een recovery kon de backup authority elke wachtende actie al
+sluiten (bevriezen + direct ontdooien in één transactie). H1 blijft dicht (`cancel_recovery`
+hangt aan de momentopname, niet aan de live nonce); I-2 en I-4 (sectie 159-review) zijn
+ongewijzigd.
+
+Keerzijde, ook al bestaand: start iemand met de backup-sleutel een recovery, dan vervalt een
+wachtende actie van de eigenaar; na `cancel_recovery` moet die opnieuw, met een nieuwe
+timelock.
+
+Wat blijft (gedocumenteerd, en getest): de patstelling. De passkey-houder kan elke recovery
+annuleren en in dezelfde transactie een Unfreeze klaarzetten. De eigenaar moet dan binnen 24u
+reageren (bijvoorbeeld met een nieuwe `initiate_recovery`, die de Unfreeze weer sluit); zonder
+reactie ontdooit de passkey-houder na 24u. Een backup-sleutel wint het nooit van een passkey
+die het veto heeft; bevriezen houdt de waarde vast zolang de eigenaar blijft reageren.
+
+Gevolg voor de epoch-check: een wachtende actie met een verouderde `session_epoch` kan via de
+publieke instructies niet meer ontstaan (`finalize_recovery` verhoogt de epoch alleen als de
+wachtrij al leeg is; `unfreeze_via_backup_authority` sluit de wachtrij in dezelfde instructie
+waarin hij de epoch verhoogt). `PendingActionStaleEpoch` blijft staan als tweede
+verdedigingslaag, maar is niet meer met een test te bereiken.
+
+### 2. Eerlijke onderbouwing van de unfreeze-blokkade (L-1)
+
+GECORRIGEERD-blok in sectie 159 punt 2, README en het commentaar bij
+`UnfreezeViaBackupAuthority`. De blokkade doet alleen dit: zodra een recovery loopt, weigert
+een latere, aparte poging om via `unfreeze_via_backup_authority` de passkey-set te wijzigen.
+Hij legt de set niet vóór de recovery vast en maakt een wijziging niet zichtbaar vóór de
+timelock: bevriezen + ontdooien met verwijderen (zelf gekozen welke passkey overblijft) +
+`initiate_recovery` in één atomaire transactie kon en kan nog steeds. Ook de README-zin dat
+een eigenaar met alleen de backup-sleutel het uitgeven "moet kunnen voorkomen" is vervangen
+door wat bevriezen werkelijk doet.
+
+### 3. Stale-tail-opruiming die echt werkt (L-2)
+
+`clear_recovery_state_payload_bytes` nulde een vast gebied (149..190). Anchor's exit-
+serialisatie schrijft daarna de None-layout, die sinds sectie 159 tot 191 loopt: het hele
+genulde gebied werd direct overschreven en de opruiming deed niets. De oude staart (191..232,
+met o.a. een kopie van de oude action_nonce en de oude momentopname) bleef staan.
+
+Vervangen door `zero_wallet_account_tail`: na de laatste wijziging aan de struct de werkelijke
+serialisatielengte berekenen (`try_serialize`) en alles vanaf die lengte tot het einde van het
+account nullen. exit() schrijft alleen [0, lengte), dus de nullen blijven staan - ongeacht
+welke velden er later bijkomen. `WalletAccount::RECOVERY_STATE_PAYLOAD_OFFSET` is vervallen
+(had geen andere gebruikers). In `finalize_recovery` staat de aanroep nu ná de epoch-
+verhoging (de lengte hangt alleen van de Option-tags af, maar zo is de regel "na de laatste
+wijziging" letterlijk waar).
+
+Test herschreven (`tests/recovery.ts`): na `cancel_recovery` en na `finalize_recovery` moet
+alles vanaf byte 191 tot het einde (264) nul zijn, en `recovery_nonce_snapshot` 0. Vóór de
+recovery wordt via de backup authority bevroren, zodat de oude staart gegarandeerd niet-nul
+bytes bevat (nonce 1, disarmed 1); zonder dat kon de staart bij een verse wallet toevallig al
+nul zijn.
+
+### Tests
+
+Rood tegen df39c2c (`yarn test:pending-action`, 2026-09-25): 110 passing / 4 failing, alle
+vier `[160]`, om de bedoelde reden:
+- `[160] M-1` (exacte volgorde van de reviewer): de dief annuleerde, ontdooide en gaf 0,1 SOL
+  uit (`cancelAndUnfreeze: "ok"`, `spend: "ok"`, `recipientBalance: 100000000`).
+- `[160]` elke soort (0-4, ook de sessie-actie): geen enkele gesloten, geen rent naar de
+  backup authority.
+- `[160]` geen nieuwe actie tijdens een recovery: de sessie-actie overleefde
+  `initiate_recovery`.
+- `[160]` patstelling: de dief won na 24u ondanks de nieuwe recovery van de eigenaar.
+- `[160]` zonder wachtende actie: groen (zoals verwacht, gedrag ongewijzigd).
+
+Twee tests crashten in die run in plaats van een diff te tonen (bezet slot / geen lopende
+recovery meer); aangescherpt en gericht opnieuw rood gedraaid tegen df39c2c (`-g \[160\]`):
+1 passing / 4 failing, nu allemaal als nette diff. `tests/recovery.ts` rood tegen df39c2c:
+5 passing / 2 failing - na cancel stond vanaf 191 `f403…01…0101…`, na finalize vanaf 199
+`01…0101…` (oude timelock, oude nonce, oude disarmed, oude momentopname).
+
+Mutant (na de fix, beide `zero_wallet_account_tail`-aanroepen uitgecommentarieerd,
+`TEST_GLOB=tests/recovery.ts`): 5 passing / 2 failing, exact dezelfde staartbytes als in de
+rode run. Bestand daarna teruggezet.
+
+Omgedraaid (gevolg van keuze c, zelfde werkwijze als de §158-tests in sectie 159): tests die
+aannamen dat een wachtende actie `initiate_recovery` overleeft.
+- De vier `5. recovery tijdens pending` (kinds 0-3) en `confirm_pending_action na een
+  voltooide recovery`: verwachtten `PendingActionStaleEpoch` bij het afronden na een
+  voltooide recovery; nu: de actie is direct na `initiate_recovery` al weg.
+- `8b. cancel_action werkt ook tijdens een lopende recovery`: nu `NoPendingAction`, want de
+  wachtrij is al leeg.
+- `BEZET SLOT tijdens een lopende recovery`: `initiate_recovery` maakt het slot vrij (was:
+  `cancel_action`); de sessie kan daarna nog steeds niet opnieuw initiëren.
+- `[158] cancel_recovery is gebonden aan de recovery zelf`: de tweede nonce-ophoging tijdens
+  de recovery is nu bevriezen via de backup authority i.p.v. `cancel_action`; de bewering
+  (een eerder ondertekende cancel landt na twee ophogingen) is ongewijzigd.
+
+Test-hulp: `outcomeOf` herkent nu ook een on-chain fout zonder logs (`{"Custom":N}`, via de
+IDL). Aanleiding: `[159] L1` faalde in de eerste groene run doordat de seconde omsloeg tussen
+simulatie en uitvoering; de fout kwam terug zonder logs en werd niet als
+`WebAuthnChallengeMismatch` herkend, waardoor de herhaallus niet opnieuw probeerde. Geen
+gedragswijziging van het programma.
+
+Groen (2026-09-26): `cargo test` 9 passed; `yarn test` 121 passing / 0 failing (117 pending),
+geen stackframe-waarschuwingen; `yarn test:pending-action` 114 passing / 0 failing (1
+pending: de rollover-test); `yarn test:spend-window-rollover` 115 passing / 0 failing. Client:
+`tsc --noEmit` schoon. Een eerste groene run (vóór het omdraaien) gaf 9 failing: de acht
+omgedraaide tests hierboven plus `[159] L1` (zie test-hulp).
 
 Volgende stap: onafhankelijke review van deze ronde in een verse sessie, dan
 RC-verificatie, dan het upgradevoorstel.

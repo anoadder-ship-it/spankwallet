@@ -15464,10 +15464,19 @@ niet aangenomen:**
   ongewijzigd sinds `0f938ac`, keypair-store ongewijzigd sinds 2026-08-22, de spend-cap-
   proof liep tegen het canonieke programma). Manifest daarom niet aangevuld.
 
-Bewaard: geverifieerde .so op `/tmp/spankwallet-devnet-buffer-verified-63e993a10791.so`;
-vooraf vastgelegd buffer-adres `B51YV7W7uJGFdiNd3HeqMm298gnxc9SWGn1XD3oHr2HP` (keypair
-`/tmp/spankwallet-buffer-keypair-63e993a10791.json`, uit de tweede run). Nog niets naar
-devnet geschreven.
+Bewaard (2026-09-27 verplaatst van `/tmp` naar een blijvende plek buiten de repo, sha256 na
+het verplaatsen opnieuw `33598b…`): geverifieerde .so op
+`~/spankwallet-private-notes/rc-163/spankwallet-devnet-buffer-verified-63e993a10791.so`;
+vooraf vastgelegd buffer-adres `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5` (keypair
+`~/spankwallet-private-notes/rc-163/spankwallet-buffer-keypair-63e993a10791.json`, uit de
+tweede run). Nog niets naar devnet geschreven.
+
+**Correctie (2026-09-27):** hier stond eerst `B51YV7W7uJGFdiNd3HeqMm298gnxc9SWGn1XD3oHr2HP`,
+ten onrechte toegeschreven aan de tweede run. Dat adres kwam uit de eerste run.
+`build-devnet-buffer.sh` maakt het keypair met `solana-keygen new --force` op een vast pad,
+dus de tweede run (de reproduceerbaarheidscheck) overschreef het. De output van die tweede
+run was gefilterd, waardoor de nieuwe adresregel niet gezien werd. De sleutel van
+`B51YV7W7…` bestaat niet meer; het adres is nooit on-chain gebruikt (`AccountNotFound`).
 
 ### 5. Testsuite
 

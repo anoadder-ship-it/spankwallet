@@ -15398,3 +15398,102 @@ Groen (2026-09-26), volledige regressie op de definitieve code:
 
 Volgende stap: RC-verificatie, dan het upgradevoorstel volgens
 `docs/upgradevoorstel-sjabloon.md`.
+
+## 163. RC-verificatie deel 1 voor upgrade 1 (sectie 153-162, `63e993a`): layout zonder migratie bewezen, reproduceerbare build, alle suites op baseline (2026-09-27)
+
+Tegen `63e993a1079188b413d3916bbc971091bea67cf6`, dezelfde discipline als de spend-cap-RC
+(sectie 139/144). Geen wijziging aan het programma, de scripts of de tests.
+
+### 0. Eerst: de layout-vraag (WalletAccount 256 -> 264 bytes, sectie 159)
+
+Vraag: sectie 155 verwijderde `migrate_wallet_account`, sectie 159 voegde
+`recovery_nonce_snapshot` (8 bytes) toe. Leest het nieuwe programma een bestaand 256-byte-
+account correct, faalt het expliciet, of leest het stil iets verkeerds?
+
+**Conclusie: geen migratie nodig, geen realloc nodig.** Bewijs uit de broncode:
+- Geen enkele `realloc`-constraint en geen handmatige `.realloc`/`resize` in `programs/`
+  (`grep realloc`: alleen commentaar). Geen instructie vergelijkt de accountlengte met
+  `WalletAccount::LEN`; `LEN` komt alleen voor als `space` bij `init` (`instructions.rs:160`)
+  en als `Vec`-capaciteit in `zero_wallet_account_tail` (`instructions.rs:660`).
+- Lezen (Anchor 1.1.2): `Account::try_from` (`anchor-lang-1.1.2/src/accounts/account.rs:314-324`)
+  roept de door `#[account]` gegenereerde `try_deserialize` aan
+  (`anchor-attribute-account-1.1.2/src/lib.rs:247-262`). Die controleert alleen de
+  discriminator en doet dan `AnchorDeserialize::deserialize(&mut &buf[8..])`. Borsh leest
+  sequentieel, negeert resterende bytes en kent geen minimumlengte ten opzichte van de
+  struct. Lezen faalt alleen als de gecodeerde inhoud langer is dan het account.
+- Terugschrijven: `exit_with_expected_owner` (`account.rs:255-268`) serialiseert via een
+  `BpfWriter` in de bestaande buffer. Faalt alleen als de serialisatie langer is dan het
+  account; de staart wordt niet genuld.
+- De serialisatielengte hangt af van de Option-tags (`None` = 1 byte): None/None 191 bytes,
+  recovery Some / deposit None 232 bytes (bereikbare worst case; `deposit_authority` wordt
+  nergens Some). Beide passen in 256.
+- Anders dan de RecoveryState-bug van de spend-cap: het nieuwe veld staat achteraan, geen
+  bestaand veld verschuift. Het enige leespunt is `cancel_recovery` (`instructions.rs:4222`),
+  achter `constraint = wallet.recovery_state.is_some()` (`:4188`); `initiate_recovery`
+  schrijft het altijd eerst (`:4173`).
+
+**Devnet-meting (read-only, `getProgramAccounts` met WalletAccount-discriminator, 2026-09-27),
+niet aangenomen:**
+- 19 WalletAccounts, alle 19 exact 256 bytes, alle 19 passen onder de nieuwe struct.
+- `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ` (lopende recovery): het nieuwe veld leest
+  bytes 224..232 = **0**. Een `cancel_recovery` na de upgrade tekent dus over snapshot 0,
+  zoals `state.rs:146-153` beschrijft.
+- **Kanttekening (niet blokkerend):** `3Ape3ge72RkvvnNAfGSww4TwUs8PYfhfxUSU2Bk55pRQ` en
+  `FSGNLavhzEvCtk948Y3jEFw2hEgV7GvPQnutp5ZnKs2R` (de bekende stale-tail-accounts van sectie
+  141) lezen onder de nieuwe layout een willekeurige snapshot uit de oude staart
+  (`9233775345393650525` resp. `368783838364255303`). Onschadelijk: hun `recovery_state` is
+  None en `initiate_recovery` overschrijft het veld voordat iets het leest. Wel geldt de zin
+  "zetten dit veld terug op 0" (`state.rs:141-143`) voor deze twee accounts pas na hun
+  eerste recovery-cyclus onder het nieuwe programma. Een toekomstige invariant-check van de
+  vorm "None => snapshot == 0" zou op deze twee rood worden.
+
+### 1-4. Verse build en byte-verificatie
+
+`scripts/build-devnet-buffer.sh 63e993a…`: verse `git worktree`, eigen `CARGO_TARGET_DIR`,
+`cargo-build-sbf --arch v3`, worktree daarna opgeruimd.
+- 737.080 bytes, sha256=`33598b3ddb179d680cc26e8318ac9b60002808e7044234c472481a00974ae76f`.
+- Reproduceerbaar: een tweede, onafhankelijke run van hetzelfde script gaf dezelfde sha;
+  `cmp` identiek.
+- `declare_id!` op deze commit: al het canonieke adres, geen sync/swap.
+- `verify-no-test-features-in-binary.ts`: exit 0.
+- `verify-program-id-in-binary.ts`: exit 0. `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9`
+  exact 1x (offset 11328); 16 bekende identiteiten (3 keypair-store + 13 manifest) elk 0x.
+- Extra, buiten het manifest: de 6 adressen uit sectie 157 (gesloten OBP-programma's)
+  elk 0x.
+- Wegwerplijst: sinds sectie 144 geen nieuwe spankwallet-wegwerpadressen gebruikt (manifest
+  ongewijzigd sinds `0f938ac`, keypair-store ongewijzigd sinds 2026-08-22, de spend-cap-
+  proof liep tegen het canonieke programma). Manifest daarom niet aangevuld.
+
+Bewaard: geverifieerde .so op `/tmp/spankwallet-devnet-buffer-verified-63e993a10791.so`;
+vooraf vastgelegd buffer-adres `B51YV7W7uJGFdiNd3HeqMm298gnxc9SWGn1XD3oHr2HP` (keypair
+`/tmp/spankwallet-buffer-keypair-63e993a10791.json`, uit de tweede run). Nog niets naar
+devnet geschreven.
+
+### 5. Testsuite
+
+In een aparte, verse worktree op `63e993a` (niet de werkkopie), daarna verwijderd.
+
+| Suite | Resultaat | Baseline (sectie 162) | Binary sha256 |
+|---|---|---|---|
+| `cargo test` | 13 passed / 0 failed | 13 | host |
+| `yarn test` (standaard) | 145 passing / 119 pending / 0 failing, geen stackframe-waarschuwingen | 145 / 119 | `134f943b5397176766c92e07cde9d79235111f8222e2804da5a572f65c43787f` (anchor build, 881.800 bytes) |
+| `yarn test` tegen de RC-.so | 145 passing / 119 pending / 0 failing | 145 / 119 | `33598b3ddb179d680cc26e8318ac9b60002808e7044234c472481a00974ae76f` |
+| `yarn test:pending-action` | 116 passing / 1 pending / 0 failing | 116 / 1 | `da6af4dcdce3a6389fbe0dddf4570f618d2506887f0a0ecbe413bf7cb12cf47a` (met test-features) |
+| `yarn test:spend-window-rollover` | 117 passing / 0 failing | 117 | `d0c6e8951b1add8c8dccf62280a7897904e76114ef215d103b92c151782d7285` (met test-features) |
+
+**Build-afwijking en oplossing.** `anchor build` (in `yarn test` via
+`check-stack-safety.sh` en `anchor test`) bouwt niet met `--arch v3`: de standaard-`yarn
+test` draait dus tegen een andere binary (881.800 bytes) dan de RC (737.080 bytes).
+Opgelost door dezelfde suite nogmaals te draaien met de RC-.so gekopieerd naar
+`target/deploy/spankwallet.so` en `anchor test --skip-build --validator legacy`. Bewijs dat
+precies die bytes geladen zijn: sha vóór en ná de run `33598b…`; `verifyBinaryFresh` meldde
+dezelfde sha; het validator-log toont `--bpf-program …/target/deploy/spankwallet.so`, 0,1 s
+na de kopie. De twee feature-suites kunnen per definitie niet tegen de RC-binary draaien
+(ze vereisen de test-features); hun resultaat geldt voor de broncode van `63e993a`, niet voor
+de bytes `33598b…`.
+
+Omgevingsprobleem tijdens de run (geen testfout): de eerste `yarn test` faalde met
+`Cannot find module '@solana/spl-token'` omdat `client/node_modules` (gitignored) niet in de
+verse worktree stond. Opgelost met een symlink naar de bestaande map; daarna groen.
+
+Volgende stap: RC-verificatie deel 2.

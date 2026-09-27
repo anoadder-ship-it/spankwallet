@@ -50,5 +50,9 @@
   {
     "address": "ERAEjxMgxserGuj8hc6v7LVy6ZaXaVxwDtXFLbsxj8wY",
     "description": "Vroege devnet-deploy-bevestiging (voorzichtigheidshalve op de lijst)."
+  },
+  {
+    "address": "FepMCPkvXFMrYnE1cGtb1WXdskoQacw4fdXPihqafbje",
+    "description": "RC-verificatie deel 2 voor upgrade 1 (STATUS.md sectie 164): vers wegwerpadres voor de live smoke test, build 63e993a met declare_id! tijdelijk op dit adres. Keypair buiten git (~/spankwallet-private-notes/rc-163/throwaway/)."
   }
 ]

@@ -15506,3 +15506,145 @@ Omgevingsprobleem tijdens de run (geen testfout): de eerste `yarn test` faalde m
 verse worktree stond. Opgelost met een symlink naar de bestaande map; daarna groen.
 
 Volgende stap: RC-verificatie deel 2.
+
+## 164. RC-verificatie deel 2 voor upgrade 1: wegwerp-deploy en live smoke test, 31/31 transacties geverifieerd, fase 2 (finalize na 24u) open (2026-09-27)
+
+Doel: de sectie-153-160-wijzigingen live bewijzen op devnet, op een wegwerpprogramma, nooit
+op het canonieke programma en nooit via de voorstel-buffer `F5nh9UdF…` (die is bestemd voor
+de RC-referentiebinary `33598b…`, sectie 163).
+
+### Waarom een aparte build nodig is
+
+Het RC-binary kan niet op een ander adres draaien: Anchor's entrypoint weigert elke
+instructie als `program_id != ID` (`anchor-syn-1.1.2/src/codegen/program/entry.rs:61-62`,
+`DeclaredProgramIdMismatch`), en de `crate::ID`-controles (eigenaarschap, challenge-hash)
+wijzen dan naar het canonieke adres (zelfde bevinding als sectie 140). Daarom een aparte
+build met `declare_id!` tijdelijk op het wegwerpadres - route van sectie 140.
+
+### Wegwerp-build en deploy
+
+- Wegwerpadres: `FepMCPkvXFMrYnE1cGtb1WXdskoQacw4fdXPihqafbje`, vers gegenereerd (vooraf
+  `AccountNotFound` op devnet). Keypair buiten git in
+  `~/spankwallet-private-notes/rc-163/throwaway/`. Toegevoegd aan
+  `scripts/historical-throwaway-program-ids.json` (nu 17 bekende identiteiten; het RC-binary
+  `33598b…` is daartegen opnieuw schoon, en `verify-program-id-in-binary.ts` op de
+  wegwerp-.so tegen het canonieke adres geeft exit 1, zoals bedoeld).
+- Build: verse worktree op `63e993a`, alleen `declare_id!` (`lib.rs`) en `Anchor.toml`
+  gewijzigd (diff van twee regels), `cargo-build-sbf --arch v3`, eigen `CARGO_TARGET_DIR`.
+  737.080 bytes, sha256=`c6ef0eac83290ebfdb2a0c8240b8d53eef53693efdf2f8955ad6c3129d5ed08d`.
+  **Deze sha wijkt per definitie af van `33598b…`: dat is de bedoelde, tijdelijke wijziging
+  aan `declare_id!`, geen inconsistentie.**
+- Verschil met de RC, volledig verklaard: 2.472 afwijkende bytes, allemaal op plekken waar
+  een stuk van het canonieke ID op exact dezelfde positie vervangen is door het
+  overeenkomstige stuk van het wegwerp-ID (1x de volledige 32 bytes, 4x 8 bytes, 618x een
+  ingebakken 4-byte-waarde). Geen enkel ander verschil; geen enkel 4-byte-fragment van het
+  canonieke ID blijft over.
+- Byte-controles: `verify-no-test-features-in-binary.ts` exit 0; `verify-program-id-in-binary.ts`
+  exit 0 (wegwerpadres exact 1x op offset 11328, bekende identiteiten 0x); canoniek adres 0x,
+  `F5nh9UdF…` 0x.
+- Deploy rechtstreeks naar het programma-adres (geen `--buffer`):
+  `3ZGTJ5LA8P9ixiZJV4bQi7xyYbRfYkR5yqwN9eaBNGsGSZswcvDQQzL4imFwfcNSM2exQBvRgpbXVvvtW8vC1GDd`
+  (Finalized). `solana program dump` geeft sha `c6ef0e…`, identiek aan de lokale build.
+  Upgrade authority: operator-sleutel `G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp`.
+  Daarna: `F5nh9UdF…` bestaat nog steeds niet (ongebruikt), het canonieke programma staat
+  ongewijzigd op slot 501303135.
+
+### Smoke test
+
+`scripts/throwawayRc163Proof.ts` (nieuw, zelfde rol als `throwawayB1B7Proof.ts`), gedraaid
+vanuit de wegwerp-worktree. Drie harde grendels:
+1. het programma-ID komt uit een expliciet opgegeven IDL (niet `anchor.workspace` - het
+   incident van sectie 140), moet gelijk zijn aan `THROWAWAY_PROGRAM_ID` en mag niet het
+   canonieke adres uit `scripts/lib/devnet-program-id.sh` zijn;
+2. elke instructie gaat naar het wegwerpprogramma, de secp256r1-precompile of het
+   System-programma, anders wordt er niets verstuurd;
+3. elke transactie wordt na bevestiging opgehaald en `meta.err` moet exact de verwachte
+   uitkomst zijn (null, of precies de verwachte foutcode); de accountsleutels moeten het
+   wegwerpadres bevatten en het canonieke adres niet.
+
+Weigeringen zijn met `skipPreflight` verstuurd, zodat ook die als echte, mislukte
+transactie on-chain staan. Na afloop onafhankelijk opnieuw opgehaald op `finalized`:
+**31/31** met de verwachte uitkomst, telkens `Program FepMCP… invoke` in de logs, het
+canonieke adres nergens. Alle nieuwe WalletAccounts zijn 264 bytes.
+
+**Sessie-route, alleen via de wachtrij** - wallet A
+`EWyGm1tsdgQySg9RtdB7LD53K5Yc8bJhqCt2LS7zNLEc` (2 passkeys P1/P2, System op de allowlist,
+sessie `9Vdy2CFmxmtnPEPDsFtskfR7g1o3wQkXufcKcz3725j8` met alleen `can_execute_advanced`,
+scope [System]; de CPI is een System-assign op een vers doel-account):
+
+| Stap | Uitkomst | Handtekening |
+|---|---|---|
+| A init_wallet | OK | `5v4tKk1UTnihmnMDbR3uzJoQe1VnkE8Qa3hmrQDkc6wm5CAwbKgGKganfHcp5wmVwCBxQJKQdmrTDdRuMdUtrgkS` |
+| A add_passkey (P2, door P1) | OK | `5EAMrmUxrGn9uFifu7EExyLAzkapBSir2tKFMMJfW7XJA5CK6v9etmnpteyi4FrgCQK8pmwtStkvTKK2wLBvf7c3` |
+| A add_allowed_program (System) | OK | `cCsPeCVCDLutgL9xNgMiJz1dTmPo51Mghh6qUyxVAdZs9WkwPPLLthhCETveLALyMP9YrNuGx2VkPd3UnTy8PwV` |
+| A add_session_key | OK | `27P6NYyCTC4S2pZpmjU9tYSSLtAWw7Ngp8fnwLTNe2Rc9822TCC3rTGam5uaobuURGwT7wJcs5VNwYM1rgGDLWxd` |
+| A1 execute_advanced_via_session (instant-CPI) | 6062 SessionAdvancedMustUseQueue; doel-account bestaat niet | `4MpK5ZkrTRMiUaPLGhVy94ZufrpWvLsYFVCZLA3a9FjzfjWF7qYkvMGWPwP6zJsaX1CcarVE7SaXxMgXEaqE2B9L` |
+| A2 initiate_advanced_action_via_session | OK: kind=2, initiator_passkey = sentinel, initiator_session = sessie, confirmed=false, geen CPI, action_nonce ongewijzigd (3) | `2XXv8L5BqQbarqNtLZbQxrnfZBsttUmfWqgG6Ms8mTqNYr4Fg5U4ocHogGkBRGVrQHBDv7gy4tpQ5N7brGVYnYur` |
+| A3 finalize_advanced_action vóór confirm (P2) | 6063 SessionInitiatedActionNeedsConfirmation | `3x8xwEXyW61kJEeZv2LV4gwWGvtNDMZZnZaRkZdDyvTSaDoDPwCRtanJ2jiWryASk5QApDbGEBnaJqHwsrLzMCjk` |
+| A4 confirm_pending_action door P1 | OK: initiator_passkey = P1, confirmed=false, timelock_started_at = 1790520168 (initiated_at 1790520161) | `4wU4TEPsqRfYsEtf5nbGP3hmwYuYPT9CHfrbDWJ8ocnD35a1CcvXvm6Rt5MPBy6JcWF6XcFwhCvKuqrd4tL1ftyb` |
+| A5 tweede confirm (P2) | 6065 PendingActionAlreadyConfirmed | `FFP1g8n3qEBCo2u4bmZzRmWk9oZ8MJFxAxMYNf2UbRFyQDWEgCj9S4f7SCtNc9PMJJqbfRPxeXPJZ2kTfoihidE` |
+| A6 finalize door P1 (de bevestiger) vóór 24u | 6051 PendingActionTimelockNotElapsed | `4E1GbFGrB3hTc7DXwznKeYCAM1SQjPxtkGR3bauwpm8xWbTXRJVXeHtL4ZPWVfHbSnH45wjPmV9jRWrFSAszVX4s` |
+| A7 finalize door P2 vóór 24u | 6051 PendingActionTimelockNotElapsed | `5RnmHyVUi8xgnz8H9XJepwWodKXJhTzjsjkXkucYN2G1uzy9g1adCPJYH3hT5gjp5DDuZPqZe5H6XU5CHeWywEJD` |
+
+**Kern-M-1: initiate_recovery sluit een wachtende actie; pending_action verplicht** - wallet
+B `3z6X82QBZh8w21zvyFGLX15sJSixS9NQdKvC85LjbFfj`:
+
+| Stap | Uitkomst | Handtekening |
+|---|---|---|
+| B init_wallet | OK | `52xy5Juv6ViZZwEEwzM4oaPBcyrauSKQQqezuE4f8VXnLHk3ukirqnSZQyTFag9NZqr535qkgphNSRXWhpEXxsp5` |
+| B1 freeze_via_backup_authority | OK | `2SFKdsBjLhfgY8LSeKDWcoy1GReW9GJhMgkPeqDKXk7WoNuN5eh6aqdtU8n7iyT29gsm8AoR28vNfEfvosHut44u` |
+| B2 initiate_unfreeze door de passkey (de "dief" zet een Unfreeze klaar) | OK: PendingAction `2y157p1P14xZKpig56rbHQKfJMHt9RxkWHhSo8t6b9gk`, kind=4, rent 1.483.360 | `RzwKj7FqcADyKzNYDbyqcdfo4Q2oVCNf8fmiV6JBHoP1Z7heEdWfBCV46fpeyTjiUsdphu9eL8uApbCSQGy3Fon` |
+| B3 initiate_recovery ZONDER pending_action-account | 3005 AccountNotEnoughKeys | `2K156EyE9kJaMu7JZwmuT2RW2qa8GMmXM1zr46zHh6MBaZDLGxkLdkXcRF9wNVMnwufHLcSMU64d5BsjWt6x2uE` |
+| B4 initiate_recovery met een ander adres als pending_action | 2006 ConstraintSeeds; PendingAction bestaat nog | `2UWcVUgtn4Gh5yhBRsWJzkgmYGUB8R3kyqPSCRiyqAHo81PC3iUbPgDvV6YPauqV4SnoDegY3aJ7Ru3e8JcpWtu1` |
+| **B5 initiate_recovery** | **OK: PendingAction gesloten (account bestaat niet meer), backup +1.483.360 lamports (= de rent), recovery_state Some, momentopname 2 = action_nonce bij initiate** | `2f3EAm5svzNTbj2rDdYiewE25XXnt1a89dSZhqqNWWaUvYBrHN64xZQYzspM7to8bVvjhJiNtS9B2X6MDvKisS3s` |
+| B6 freeze_via_backup_authority tijdens recovery (al bevroren, idempotent) | OK | `6RowFFbCtgtq6Db8qfYML98DnoHpYVgBm1DMXpHXcwgFvpDxqFxtSKwHwqtUDYUWhFATXpWc7Vph7tWyzwGMsuh` |
+| B7 unfreeze_via_backup_authority tijdens recovery | 6007 RecoveryAlreadyInProgress | `5YY7CnxJGfBnKo8NzXt5k1iRgMdHb4KgvZs3cbQLe7uN69Mi3T7kaGah3LygvLaZmMymBroVaqpGxQuELssK3Ut4` |
+
+Daarnaast staat `pending_action` in de IDL van deze build als niet-optioneel account bij
+`initiate_recovery` (accounts: `wallet`, `backup_authority`, `pending_action`).
+
+**Bevriezen, ontdooien en cancel_recovery_v3** - wallet C
+`6GdRGNYkXkVT7AXL723VHJhsnkJ9r12etiCDTF1HghL6` en wallet D
+`9YphSQWXcMKUERE4Dm171HDMcNRsTmYaBcYGfb8eRA86`:
+
+| Stap | Uitkomst | Handtekening |
+|---|---|---|
+| C init_wallet | OK | `5TMAHjVkxyYmaLNAKdWaUJssJQYfHqCAEiEyqsLvyfPHDT7Qr4XrhJK2S4q2MFrBdn5s5Jt8sy3mrxs2M9T1z52H` |
+| C1 freeze_via_passkey | OK | `pGod9xgBcNmEiN5ucdeQpRZAhVgiVzmJSXUYbYWdGLk6X8fLHTUCGFjh4wMejn7FYYwGuhsvGQ5cstFZmXv2fim` |
+| C2 tweede freeze_via_passkey (al bevroren) | 6068 WalletAlreadyDisarmed | `5vpCjgxTxwne34ii6cwgh3q8Y3WknR1vHvigPdiy1z8LXAZuykUKjGMLV6sd6uKaJn3F9QynFxAisot9raXx4Fp2` |
+| C3 unfreeze_via_backup_authority BUITEN recovery (controle) | OK | `2UBJ8MtxFasvDR22vrAdAkkSTezhQNygZYjpC9YnQAu8buarKpnaEsemfhd6kyv7iS4QHvB7xAnhSok8iH5KxRz1` |
+| C4 initiate_recovery | OK: momentopname 2 = action_nonce 2 | `9pYipEqGuVuvMcpoc9k7sxqbWAU7533JbsoF1k1LaUwpPDnmiU38D2RhrtezSMT5wGwWEqqB8aEheEqWswxHZpt` |
+| C5 freeze_via_passkey TIJDENS recovery | OK: niet-bevroren -> bevroren, recovery loopt door | `3Emof4msqPACPFEnsUvF5tn3unJavrQgLFJpBZvNJG63bGp5fg8EyarogGcAbLkNRZoqSPbydkW5pqvHP9sireiQ` |
+| C6 unfreeze_via_backup_authority TIJDENS recovery | 6007 RecoveryAlreadyInProgress | `4pkPjkVtB1WPUPQL56A8QYLCbpzTVmbRMnxoUQu6MKAmDcksybqC7HmBSKKnrYzt5cd8SkVkj2Dft8vjUo9KnVum` |
+| C7 cancel_recovery met de LIVE nonce (3) in de challenge | 6002 WebAuthnChallengeMismatch | `4q2cwHPsWpxpmqEhfgCdkXBdABnUEbZWQntBHbowEPwGMo7uuVmozBu3UrT2UvdCubjtrHJVhCy5jkTG33MMZVDd` |
+| C8 cancel_recovery_v3 met de momentopname (2) | OK: recovery_state None, momentopname 0, action_nonce 3 -> 4 | `4GSJmomNrDqEDtiwPQqpDXgJhPgvDr5VZ2DyfdnR1GyD7NdAawgTxaAm6hbaByJ6b7HMEBVCSzJaGw6n2wQNFb2Z` |
+| D init_wallet | OK | `4ZVK4d5MA6TWwMffBdqGTFrhb7KfjaoyDSR78JkZNHJxgqNheiyk4mwAXHg7AuWLPTeE8VpB8TBxfTg269fioH8w` |
+| D1 initiate_recovery | OK | `vDMNVqg7MrDSoZAoY9CnfDrZJqcHSDWeoMKEnpnX9UbtXVCDTx8fomrckQiHDHXU6fjvooboxibNTc3ZMHTkqc7` |
+| D2 freeze_via_backup_authority TIJDENS recovery | OK: niet-bevroren -> bevroren, recovery_state blijft Some | `4QE5arGi7uboteEbDaUbj4zizREkDjQbzeSVKRr2Vij1cqvA2udj4DsCAVentnAQg8cXWAPBZQzBJbBJPu5PKCyU` |
+
+### Open: fase 2 (finalize door P1 en P2)
+
+**Nog niet live bewezen: finalize eist een andere passkey dan de bevestiger
+(`SecondPasskeyMustDifferFromInitiator`, 6048).** In `check_pending_action_finalizable`
+komt de timelock-check vóór de tweede-passkey-check, dus A6 bereikte die controle niet. On
+chain staat wel de toestand die de weigering bepaalt (`initiator_passkey` = P1,
+`confirmed=false`). De productiebuild heeft de echte 24u-timelock; die is **niet
+geforceerd of verkort**. Fase 2 is gepland na **2026-09-28T14:42:48Z**
+(`timelock_started_at` + 86.400 s): finalize door P1 moet weigeren met 6048, finalize door
+P2 moet slagen en de CPI uitvoeren. De benodigde toestand (passkey-sleutels, doel-account,
+CPI-data) staat buiten git in `~/spankwallet-private-notes/rc-163/throwaway/phase2-state.json`.
+
+### Stand na deel 2
+
+- Nog op devnet: het wegwerpprogramma (3,745 SOL rent, nodig voor fase 2; sluiten is een
+  latere, losse stap), wallets B en D in recovery, wallet A met de wachtende actie voor
+  fase 2.
+- Kosten: operator-saldo 83,23 -> 79,45 SOL (programma-rent + accounts + fees; plus 3 losse
+  System-transfers van 0,001 SOL naar de backup-sleutels van B, C en D, zodat die de rent van
+  een gesloten PendingAction kunnen ontvangen - die raken het wegwerpprogramma niet en staan
+  daarom niet in de tabellen).
+- Bewaard buiten git (`~/spankwallet-private-notes/rc-163/throwaway/`): wegwerp-keypair,
+  -.so, -IDL, `proof-results.json` (alle handtekeningen), de run-log en `phase2-state.json`.
+- Werkkopie schoon; de wegwerp-worktree is verwijderd.
+
+Volgende stap: fase 2 na 2026-09-28T14:42:48Z, daarna het wegwerpprogramma sluiten.

@@ -15694,3 +15694,29 @@ expliciet akkoord. Operator-saldo 79,45 SOL. `phase2-results.json` en `phase2-ru
 staan bij de overige bestanden in `~/spankwallet-private-notes/rc-163/throwaway/`.
 
 Volgende stap: het wegwerpprogramma sluiten (na akkoord).
+
+### Aanvulling 2026-09-28: wegwerpprogramma gesloten, deel 2 afgerond
+
+Na expliciet akkoord gesloten met `solana program close FepMCPkvXFMrYnE1cGtb1WXdskoQacw4fdXPihqafbje
+--url https://api.devnet.solana.com --keypair ~/.config/solana/id.json --authority
+~/.config/solana/id.json --recipient G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp
+--bypass-warning` (de standaard-RPC in de solana-config is lokaal, daarom de expliciete URL).
+Vooraf: upgrade authority on chain = `G1qgHz…` = publieke sleutel van het gebruikte keypair;
+bewijsbestanden (`proof-results.json`, `proof-run.log`, `phase2-results.json`,
+`phase2-run.log`, beide scripts, byte-identiek aan git) staan in
+`~/spankwallet-private-notes/rc-163/throwaway/`.
+
+- Handtekening: `2Mp4Cu52ypWPvch7Sbps4hDHfQUkxw2rjUwtdxQ5yCESR8hXGb6gwFFqxMfMQ192gzbnwAR8YgCVpV8hVAnmP9QU`
+  (slot 505216119, finalized, `meta.err` null, log `Closed Program FepMCP…`; canoniek adres
+  niet in de accountsleutels).
+- `solana program show FepMCP…` geeft "has been closed"; ProgramData
+  `ChDm9sNRxtnAP7e2HS6iUTmqddPURCGyyJ45PM9suw9H` bestaat niet meer. Het programma-account
+  zelf blijft als gesloten stub bestaan (loader-gedrag); het adres is niet herbruikbaar.
+- Rent: operator 79,451013075 -> 83,196253315 SOL, +3,74524024 = 3,74524524 (ProgramData)
+  - 0,000005 fee. Klopt exact.
+- Canoniek programma `9ma6vQ…` ongewijzigd op slot 501303135 (authority `89MEwq…`);
+  `F5nh9UdF…` bestaat nog steeds niet.
+
+Deel 2 van de RC-verificatie voor upgrade 1 is hiermee volledig afgerond (33/33
+transacties, wegwerpprogramma gesloten). Nog op devnet onder het gesloten adres: niets
+uitvoerbaars; de wallet-accounts van A-D blijven als inerte data achter.

@@ -15720,3 +15720,178 @@ bewijsbestanden (`proof-results.json`, `proof-run.log`, `phase2-results.json`,
 Deel 2 van de RC-verificatie voor upgrade 1 is hiermee volledig afgerond (33/33
 transacties, wegwerpprogramma gesloten). Nog op devnet onder het gesloten adres: niets
 uitvoerbaars; de wallet-accounts van A-D blijven als inerte data achter.
+
+## 165. RC-verificatie deel 3 voor upgrade 1: harde blokkade-controles tegen de echte devnet-staat, niets blokkeert (2026-09-28)
+
+Alleen lezen: geen transactie, geen simulatie, geen sleutelmateriaal. Doel: bewijzen dat de
+nieuwe code (HEAD, programmacode identiek aan `63e993a`: `git diff 63e993a HEAD -- programs/`
+is leeg) elk bestaand account van het canonieke programma
+`9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` correct leest of veilig weigert.
+
+### Werkwijze
+
+- Dump: `getProgramAccounts` op `finalized`, slot 505218089, 50 accounts (sha256 van de dump
+  `550bedab…a18f`). Een tweede scan op slot 505232771 gaf 0 gewijzigde of nieuwe accounts.
+  Bewaard buiten git in `~/spankwallet-private-notes/rc-163/deel3/`
+  (`gpa-finalized-slot505218089.json`, `rust-decode.tsv`, `decoder/`).
+- Decoder van de nieuwe code: een losse Rust-crate (buiten de repo) die
+  `programs/spankwallet/src/state.rs` letterlijk insluit (`#[path]`, niet overgetypt), met
+  dezelfde `anchor-lang` 1.1.2 en dezelfde `Cargo.lock`. OK/FOUT komt uit
+  `T::try_deserialize` (discriminator + Borsh, het programma-pad); sessies via exact de
+  aanroep van `load_session_account` (`SessionKeyAccount::try_deserialize(&mut &data[..])`).
+  Elk account dat decodeert, serialiseert terug naar exact dezelfde bytes.
+- Kruiscontrole met de bestaande IDL-decoder (`BorshAccountsCoder`, `target/idl`, bewezen
+  gelijk aan de IDL van de `63e993a`-wegwerpbuild op het adres na): 19/19 wallets identiek
+  op `action_nonce`, `session_epoch`, `recovery_nonce_snapshot`, timelock, `disarmed`,
+  threshold en `recovery_state`. Afwijking bij sessies: bevinding 1.
+- Live binary als referentie voor "vóór de upgrade": de eerste 653.256 bytes van de
+  on-chain ProgramData hebben nog steeds sha `4187b809…ce40f` (commit `69a59a4`, sectie 148),
+  de rest is nul.
+
+### a. WalletAccounts: 19, alle 256 bytes, alle foutloos onder de nieuwe struct
+
+| Wallet | action_nonce | session_epoch | timelock (s) | threshold | recovery_state | gelezen bytes | recovery_nonce_snapshot |
+|---|---|---|---|---|---|---|---|
+| `2h6te5Fq…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| **`3Ape3ge7…`** | 0 | 0 | 259200 | 0 | None | 191 | **9233775345393650525** (restbytes) |
+| `3u3uAqkW…` | 0 | 0 | 3600 | 0 | None | 191 | 0 |
+| `4iz9tFLx…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| **`5MoXqgBD…`** | 0 | 0 | 259200 | 0 | **Some** | 232 | 0 (padding) |
+| `61EHnUwR…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `7KfY6nKU…` | 2 | 0 | 259200 | 0 | None | 191 | 0 |
+| `8YDdYQ51…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `8kxv4ZR4…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `9M2m6ioo…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `Bq3eatTT…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `DD5SZ2SA…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `Dsc1UNY1…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `ECYCEqZp…` | 2 | 0 | 259200 | 0 | None | 191 | 0 |
+| `EHGqLUxv…` | 6 | 0 | 259200 | 5000000 | None | 191 | 0 |
+| `FHRnMJLu…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| **`FSGNLavh…`** | 2 | 1 | 5 | 0 | None | 191 | **368783838364255303** (restbytes) |
+| `GMiYVYyE…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+| `HwZrjHc5…` | 0 | 0 | 259200 | 0 | None | 191 | 0 |
+
+Voor alle 19: `deposit_authority` None, `disarmed` false, canonieke wallet-PDA met kloppende
+opgeslagen bump, `wallet_seed_hash` = sha256(`seed_key`), precies één VaultAccount met de
+juiste `vault_bump`. `seed_key` = `owner_passkey` bij alle wallets behalve `FSGNLavh…`
+(afgeronde recovery, verwacht).
+
+De twee historisch-corrupte wallets: snapshotwaarde en staart zijn exact die van de meting in
+sectie 162 (`3Ape3ge7…`: bytes 183..191 `5dcbf205c1f52480`, 2 niet-nul staartbytes `f4 03`;
+`FSGNLavh…`: `47449b74f22e1e05`, 1 niet-nul staartbyte). Het programma leest het veld daar
+nooit zolang er geen recovery loopt: het enige leespunt is `instructions.rs:4222`
+(`cancel_recovery`), ná `recovery_state.ok_or(NoRecoveryInProgress)?` en achter de
+constraint `recovery_state.is_some()`; `initiate_recovery` (`:4173`) schrijft het voordat iets
+het leest; cancel en finalize zetten het op 0 en nullen de staart. Elke andere schrijvende
+instructie serialiseert de restwaarde ongewijzigd terug: onschadelijk, maar een client die het
+veld buiten een recovery toont, ziet onzin.
+
+### b. De lopende recovery op `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ`
+
+| Veld | Waarde |
+|---|---|
+| new_owner_passkey | `026e7ae99855c6a08d1ca5fa07776b72d2bf15f849696d2c5a071542833edce50a` |
+| initiated_at | 1786363820 (2026-08-10T12:10:20Z) |
+| recovery_timelock_seconds | 259.200; verstreken sinds 2026-08-13T12:10:20Z |
+| recovery_nonce_snapshot | 0 (bytes 224..232, padding; alles vanaf 232 nul) |
+| action_nonce / session_epoch | 0 / 0 |
+| PasskeysAccount / PendingAction | geen / geen |
+
+- `finalize_recovery` heeft in de live code (`69a59a4`) en in de nieuwe code geen signer; de
+  timelock is voorbij. Iedereen kan deze recovery nu al afronden naar `026e7a…`, vóór en na
+  de upgrade. De upgrade verandert dat niet; de nieuwe finalize verhoogt daarnaast
+  `action_nonce`, zet de snapshot op 0 en nult de staart.
+- Annuleren na de upgrade kan: `cancel_recovery_v3` tekent `0 ‖ initiated_at ‖
+  new_owner_passkey`; de client leest die 0 on chain uit. 0 is hier ook inhoudelijk de juiste
+  momentopname (`action_nonce` is nu 0, dus bij `initiate_recovery` ook). Er is alleen de
+  owner-passkey (geen PasskeysAccount); of die sleutel nog bestaat, staat nergens vastgelegd.
+- Geen nieuw risico door de upgrade. Het bestaande (permissionless afronden) geldt al 46 dagen.
+
+### c. SessionKeyAccounts: 4
+
+| Sessie | Lengte | Wallet | load_session_account (nieuwe code) | expiry_slot | can_execute_advanced |
+|---|---|---|---|---|---|
+| `BboAeF13…` | 341 | `Bq3eatTT…` | FOUT 3003 AccountDidNotDeserialize | 482743050 | 0 |
+| `G7mHXv7m…` | 341 | `FHRnMJLu…` | FOUT 3003 AccountDidNotDeserialize | 482751268 | 0 |
+| `Hfnv6gvW…` | 341 | `DD5SZ2SA…` | FOUT 3003 AccountDidNotDeserialize | 483285709 | 0 |
+| `Dgw6ayqS…` | 429 | `FSGNLavh…` | OK | 488473294 (verlopen) | false |
+
+Het programma laadt sessies op 8 plekken (3x `load_session_account`, 5x
+`Account<SessionKeyAccount>`), allemaal via `try_deserialize`, nergens met ruwe offsets: de
+drie 341-byte-accounts worden overal geweigerd. De 429-byte-sessie is ~16,7 mln slots
+verlopen en heeft `epoch` 0 tegen `session_epoch` 1 van zijn wallet
+(SessionRevokedByRecovery). Alle vier op hun canonieke session-PDA met kloppende bump.
+
+### d. Overige accounts
+
+| Soort | Aantal | Lengte (= LEN) | Eigenaar | PDA en inhoud |
+|---|---|---|---|---|
+| VaultAccount | 19 | 41 | programma | alle canoniek, `wallet`-veld en bump kloppen |
+| PasskeysAccount | 4 | 307 | programma | alle canoniek; `HwZrjHc5…` owner ingetrokken + 1 extra; `7KfY6nKU…`, `ECYCEqZp…` 1 extra; `FSGNLavh…` 0 extra (gewist bij recovery); lege slots nul |
+| PolicyAccount | 2 | 1066 | programma | alle canoniek; `Dsc1UNY1…` leeg, `HwZrjHc5…` [Token-programma]; lege slots nul |
+| SpendWindow | 1 | 65 | programma | canoniek (`EHGqLUxv…`), cap 12.000.000 = verbruikt 12.000.000 |
+| leeg account `5VT3xfFMyfv9MJGdAT876VFGSbEQqeao9DKcGpkChaDE` | 1 | 0 | programma | geen PDA van enige wallet |
+| PendingAction | 0 | – | – | – |
+
+Alle 50 accounts rentvrij tegen de devnet-minima (`getMinimumBalanceForRentExemption`).
+`5VT3xfFM…` is nog steeds ongevaarlijk: het System::Assign-testaccount uit de stap-9-test
+(sectie 35), 0 bytes, 890.880 lamports. Elk
+`Account<T>` weigert het (geen discriminator), en het zit op geen enkel seeds-adres, dus
+niemand kan het ergens als PDA laten meetellen.
+
+### e. Controlescripts tegen de echte staat
+
+- `scripts/preUpgradeChecks.ts --post`: exit 0 (slot 505232665).
+- `scripts/checkRecoveryQueueInvariant.ts`: exit 0 (slot 505232667).
+- Beide: 50 programma-accounts, 19 WalletAccounts (minimum 19), 19 VaultAccounts,
+  0 PendingActions, 1 wallet in recovery (`5MoXqgBD…`), GROEN.
+
+### Bevindingen
+
+**1. De JS-decoder van Anchor is fail-open voor de oude sessies.** Blokkeert de upgrade niet.
+`@coral-xyz/anchor` 0.31.1 (`BorshAccountsCoder`, dus ook `program.account.sessionKeyAccount`)
+decodeert de drie 341-byte-sessies zonder fout en vult de ontbrekende velden
+(`max_lamports_*`, `spent_*`, `token_mint`, `epoch`) met nullen; het programma weigert ze.
+On chain onschadelijk. Dit is een bestaand gat, niet nieuw door deze upgrade: de 341-byte-
+accounts en deze decoder bestonden al vóór sectie 159. De eigen client
+(`client/src/sessionKeys.ts::readSessionKeyAccount`) leest met vaste offsets en decodeert ze
+niet verkeerd, maar gooit bij 341 bytes een ongecontroleerde RangeError (geen expliciete
+lengtecontrole) en leest `epoch` niet.
+
+**Staande regel:** nooit `program.account.sessionKeyAccount` (of `BorshAccountsCoder`) gebruiken
+voor weergave aan een gebruiker of in tooling. Altijd de eigen decoder met vaste offsets en een
+expliciete lengtecontrole; een account dat niet exact `SessionKeyAccount::LEN` (429) bytes is,
+geldt als "geen geldige sessie".
+
+Vervolgstap: `readSessionKeyAccount` een expliciete lengtecontrole geven (429, anders een
+duidelijke "verouderde, onbruikbare sessie"-uitkomst in plaats van een RangeError) en `epoch`
+laten lezen, zodat de UI een door recovery ingetrokken sessie ook als ingetrokken toont.
+
+**2. `5MoXqgBD…` kan al 46 dagen door iedereen worden afgerond.** Blokkeert de upgrade niet:
+de upgrade verandert niets aan wie kan afronden of annuleren (zie b). Opruimen wordt bewust
+uitgesteld tot ná de upgrade. Reden: de oude code (`69a59a4`) nult bij `finalize_recovery`
+alleen de recovery-payload (`clear_recovery_state_payload_bytes`), niet de staart. Afronden
+onder de oude code zou dus een derde wallet met een corrupte staart opleveren, zoals
+`3Ape3ge7…` (afgeleid, niet gesimuleerd: bytes 183..190 nul, byte 190 = `0x80` uit de oude
+`recovery_timelock_seconds`, dus `recovery_nonce_snapshot` = 9223372036854775808 en staart
+`f4 03`). De nieuwe code nult de staart via `zero_wallet_account_tail`.
+
+**Actiepunt ná de deploy van upgrade 1:** recovery op `5MoXqgBD…` opruimen onder de nieuwe
+code: `cancel_recovery_v3` als de owner-passkey beschikbaar is, anders `finalize_recovery`
+(permissionless). Daarna read-only controleren: `recovery_state` None,
+`recovery_nonce_snapshot` 0, staart vanaf de serialisatie volledig nul,
+`checkRecoveryQueueInvariant.ts` groen met 0 wallets in recovery.
+
+**3. Het devnet-rent-tarief is lager dan aangenomen.** Blokkeert de upgrade niet. Rent-sysvar
+op devnet: 5080 lamports/byte-jaar, drempel 1,0 (burn 50%). Nieuwe wallets van 264 bytes zijn
+daarmee volledig rentvrij bij 1.991.360 lamports (256 bytes: 1.950.720). Het mainnet-tarief is
+niet gecontroleerd.
+
+Vervolgstap: vóór een mainnet-inschatting het mainnet-tarief uit de Rent-sysvar lezen en
+rent-bedragen in UI en documentatie nooit hardcoden.
+
+### Stand
+
+Deel 3 is afgerond: niets blokkeert upgrade 1. Open: het actiepunt voor `5MoXqgBD…` ná de
+deploy, en de client-aanpassing uit bevinding 1.

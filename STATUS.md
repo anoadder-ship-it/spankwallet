@@ -15648,3 +15648,49 @@ CPI-data) staat buiten git in `~/spankwallet-private-notes/rc-163/throwaway/phas
 - Werkkopie schoon; de wegwerp-worktree is verwijderd.
 
 Volgende stap: fase 2 na 2026-09-28T14:42:48Z, daarna het wegwerpprogramma sluiten.
+
+### Aanvulling 2026-09-28: fase 2 uitgevoerd, 6048 live bewezen, 33/33
+
+Uitgevoerd met `scripts/throwawayRc164Phase2.ts` (nieuw): dezelfde drie grendels als
+`throwawayRc163Proof.ts`, plus een vierde - er wordt niets verstuurd zolang de on-chain klok
+(Clock-sysvar) niet minstens 300 s voorbij `timelock_started_at` + 86.400 s is. `MODE=check`
+leest alleen; `MODE=execute` verstuurt F1 en F2. Het script leest de passkey- en
+doel-sleutels uit `phase2-state.json` (buiten git) maar print en bewaart alleen publieke
+velden en handtekeningen.
+
+Vooraf (alleen lezen, finalized): Clock-sysvar 1790610132 (15:42:12Z), 3.564 s voorbij de
+eindtijd 1790606568 (14:42:48Z). Wegwerpprogramma bestaat, `solana program dump` geeft
+opnieuw sha `c6ef0eac…5ed08d`. PendingAction `Di8AToAXA22fYuiq8G1jL9wBmx4U18s2E3owMRUHZBsn`
+ongewijzigd: kind=2, `initiator_passkey` = P1, `confirmed=false`, `timelock_started_at`
+1790520168, epoch 0 = `session_epoch`. Wallet A: `action_nonce` 4, niet bevroren, geen
+recovery; P1 is de geldige owner_passkey, P2 de enige extra passkey. Doel-account
+`GdcVvH37sgZR3s8YhZGUzu6iQKd7pMASSgi7RryW8MK9` bestaat niet. Canoniek programma ongewijzigd
+op slot 501303135, `F5nh9UdF…` bestaat niet.
+
+| Stap | Uitkomst | Handtekening |
+|---|---|---|
+| F1 finalize door P1 (de bevestiger) na 24u | 6048 SecondPasskeyMustDifferFromInitiator (`instructions.rs:1822`); PendingAction- en WalletAccount-bytes identiek aan vóór F1, doel-account bestaat niet | `jSJ1HZC1gGR67ZKfSoDQ8WjzwR1ht7nMTZ6GndXhh8rscr3goMwLNF9qL5hE3BBdYSnUi9fzJ1j8PbDP31MAM1Q` |
+| **F2 finalize door P2 na 24u** | **OK: PendingAction gesloten, CPI uitgevoerd, `action_nonce` 4 -> 5** | `Mu8NFoqz8QSk63tE1uN1TeD5xpS3NPiuZbiyucxuEutAF6DCjGvZ2JmVfZKwwVtERC82rew5x7K8tJrM39cCa9e` |
+
+Onafhankelijk opnieuw opgehaald op `finalized` (`getTransaction`, los van het script): F1
+slot 505206231, `meta.err` = `InstructionError [1, Custom 6048]`; F2 slot 505206244,
+`meta.err` = null. Beide met `Program FepMCP… invoke [1]` in de logs, het canonieke adres
+niet in de accountsleutels.
+
+Bewijs van de CPI uit de transactie zelf: het doel-account is in fase 1 nooit gefund, en een
+Assign op een account met 0 lamports slaagt wel maar laat na de transactie geen account
+achter (daarom geeft het doel-account na F2 nog steeds `AccountNotFound`). Bewust geen extra
+System-transfer gedaan. In F2 staat één inner instruction naar het System-programma, op
+account `GdcVvH…`, met data `01000000 d9b3a4…e1f1` - exact de vastgelegde `cpiDataHex`
+(Assign, nieuwe eigenaar = de 32 bytes van `FepMCP…`) - en de logs tonen
+`Program 11111111111111111111111111111111 invoke [2]` gevolgd door `success`.
+
+Hiermee is `SecondPasskeyMustDifferFromInitiator` live bewezen: de bevestigende passkey telt
+als initiator, en alleen een andere passkey kan de sessie-geïnitieerde actie afronden.
+Totaal deel 2: **33/33** transacties met de verwachte uitkomst.
+
+Stand: het wegwerpprogramma staat nog op devnet (3,745 SOL rent); sluiten gebeurt pas na
+expliciet akkoord. Operator-saldo 79,45 SOL. `phase2-results.json` en `phase2-run.log`
+staan bij de overige bestanden in `~/spankwallet-private-notes/rc-163/throwaway/`.
+
+Volgende stap: het wegwerpprogramma sluiten (na akkoord).

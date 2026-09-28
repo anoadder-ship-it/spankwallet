@@ -15895,3 +15895,61 @@ rent-bedragen in UI en documentatie nooit hardcoden.
 
 Deel 3 is afgerond: niets blokkeert upgrade 1. Open: het actiepunt voor `5MoXqgBD…` ná de
 deploy, en de client-aanpassing uit bevinding 1.
+
+## 166. RC-verificatie deel 4 voor upgrade 1: go/no-go - voorwaardelijk go (2026-09-28)
+
+Oordeel over upgrade 1 (secties 153-162, programmacode `63e993a`), op basis van de
+RC-verificatie in secties 163-165. Alleen lezen; niets naar devnet geschreven.
+
+### Vervulde voorwaarden
+
+| Voorwaarde | Bewijs | Sectie |
+|---|---|---|
+| Bron-integriteit | Programmacode op HEAD identiek aan `63e993a` (`git diff 63e993a HEAD -- programs/` leeg); `declare_id!` is het canonieke adres | 163, 165 |
+| Reproduceerbare build | `build-devnet-buffer.sh`, verse worktree, `--arch v3`: 737.080 bytes, sha `33598b3d…e76f`, twee onafhankelijke runs identiek; bewaarde .so op 2026-09-28 opnieuw `33598b…` | 163 |
+| Byte-controles | `verify-no-test-features-in-binary.ts` en `verify-program-id-in-binary.ts` exit 0; canoniek adres 1x, alle bekende wegwerp- en OBP-adressen 0x | 163 |
+| Regressie | `cargo test` 13/0, `yarn test` 145/0 (ook tegen exact de RC-.so), `test:pending-action` 116/0, `test:spend-window-rollover` 117/0 - alle op baseline | 163 |
+| Layout zonder migratie | 256 -> 264 zonder realloc of migratie, bewezen uit de broncode en tegen de echte accounts | 163, 165 |
+| Live bewijs op een wegwerpadres, inclusief de echte 24u-timelock | 33/33 transacties met de verwachte uitkomst op `FepMCP…` (build `c6ef0eac…`, alleen `declare_id!` anders); `SecondPasskeyMustDifferFromInitiator` (6048) pas na de niet-verkorte 24u; kern-M-1 bewezen; wegwerpprogramma daarna gesloten | 164 |
+| Harde blokkade-controles tegen de echte staat | 19/19 wallets foutloos onder de nieuwe struct, 341-byte-sessies overal geweigerd, alle PDA's en eigenaren kloppen, 0 PendingActions; `preUpgradeChecks.ts --post` en `checkRecoveryQueueInvariant.ts` exit 0 | 165 |
+| Ruimte in ProgramData | ProgramData-capaciteit 754.848 bytes >= RC-binary 737.080 bytes (marge 17.768): geen `extend` nodig (headroom-valkuil, sectie 41 en "Kritieke gotchas") | dit |
+| Upgrade-authority | `89MEwq…` (Squads-vault; multisig `A5iDbqC8…`, 2-van-3, time_lock 259.200 s, gelezen 2026-09-28) | 42, dit |
+
+Niet-blokkerende bevindingen, elk met een vastgelegde vervolgstap (sectie 165): (1) de
+Anchor-JS-decoder is fail-open voor de oude 341-byte-sessies (bestaand gat; staande regel +
+client-aanpassing), (2) `5MoXqgBD…` opruimen ná de deploy onder de nieuwe code, (3) het
+devnet-rent-tarief (mainnet niet gecontroleerd). Los daarvan staat de Alpenglow-notitie
+(sectie 156) voor de volgende ontwerpronde: upgrade 1 wijzigt geen tijd- of slotgrens.
+
+### Oordeel: voorwaardelijk go
+
+De programmabinary `33598b…` is klaar om voorgesteld te worden. Vóór het indienen van het
+voorstel moeten nog gebeuren, in deze volgorde:
+
+1. **Onafhankelijke review van sectie 162, of een expliciet besluit dat die niet nodig is.**
+   Sectie 162 wijzigde geen programmacode, maar wel de scripts die de harde pre-flight-poort
+   vormen (`scripts/preUpgradeChecks.ts`, `scripts/checkRecoveryQueueInvariant.ts`,
+   `scripts/lib/recoveryQueueInvariant.ts`) en tests. In STATUS.md staat geen review van
+   sectie 162 vastgelegd; de afgesproken volgorde vraagt een review door een verse sessie,
+   niet door een sessie die de code bouwde of controleerde (deze sessie viel daar in secties
+   163-165 onder).
+2. **Buffer schrijven op het vooraf vastgelegde adres `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5`**
+   met exact `~/spankwallet-private-notes/rc-163/spankwallet-devnet-buffer-verified-63e993a10791.so`
+   en het bijbehorende buffer-keypair (`--buffer <keypair>`; het README-commando zonder
+   `--buffer` maakt een willekeurig adres en hoort hier dus niet). Daarna `solana program dump`
+   van de buffer: de eerste 737.080 bytes moeten sha `33598b…` geven, de rest nul.
+3. **Buffer-authority overdragen aan de vault `89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`**
+   en on-chain teruglezen.
+4. **Voorstel aanmaken en goedkeuren via `admin/wallet-signer.html`** (2 van de 3 leden). De
+   multisig staat op `transaction_index` 14 (#14 is het afgewezen duplicaat, sectie 150): het
+   nieuwe voorstel wordt naar verwachting #15; het echte nummer noteren zoals de adminpagina
+   het aanmaakt, niet aannemen.
+
+Vóór het **uitvoeren** (kan pas als het voorstel bestaat en de 72u verstreken zijn), volgens
+`docs/upgradevoorstel-sjabloon.md` §2: `TRANSACTION_INDEX=<echte nummer> … preUpgradeChecks.ts
+--pre` exit 0, sessie-bruikbaarheid, voorstel- en bufferstatus on-chain, en
+`findCanonicalProposal()` geeft precies dit voorstel. Direct erna: `--post` exit 0 en de vijf
+verificaties van sectie 95; daarna het actiepunt voor `5MoXqgBD…` uit sectie 165.
+
+Volgende stap: het ingevulde upgradevoorstel volgens het sjabloon, eerst als concept ter
+goedkeuring.

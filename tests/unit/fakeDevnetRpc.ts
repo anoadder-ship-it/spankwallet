@@ -7,7 +7,8 @@ import type { AddressInfo } from "net";
  * scripts/checkRecoveryQueueInvariant.ts en scripts/checkProposalTimelock.ts
  * doen, met een staat die de test zelf kiest (een andere cluster, een
  * achterlopende node, een ander voorstel). Geen enkele aanroep verlaat de
- * machine.
+ * machine. Sectie 168: ook getMultipleAccounts (de voorstelscan uit
+ * admin/upgradeProposalCheck.mjs).
  */
 
 export interface FakeAccount {
@@ -88,6 +89,14 @@ function handle(state: FakeRpcState, method: string, params: any[]): unknown {
       checkMinContextSlot(state, params[1]);
       const a = state.accounts.get(params[0]);
       return { context, value: a ? accountJson(a, params[1]?.dataSlice) : null };
+    }
+    case "getMultipleAccounts": {
+      checkMinContextSlot(state, params[1]);
+      const value = (params[0] as string[]).map((address) => {
+        const a = state.accounts.get(address);
+        return a ? accountJson(a) : null;
+      });
+      return { context, value };
     }
     case "getProgramAccounts": {
       const [programId, config] = params;

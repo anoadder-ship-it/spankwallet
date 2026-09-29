@@ -130,7 +130,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (186 passing, 119 pending, 0 failing - `npm test`, 2026-09-29)
+tests/                        - Anchor-tests (210 passing, 119 pending, 0 failing - `npm test`, 2026-09-29)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -150,7 +150,9 @@ tests/                        - Anchor-tests (186 passing, 119 pending, 0 failin
   unit/                                            - zonder validator: `yarn test:unit` (draait ook mee in `npm test`, sectie 167)
     recoveryQueueInvariant.ts                       - beslislogica van scripts/checkRecoveryQueueInvariant.ts, incl. tegencontrole en lengtes (sectie 161/162; de decoder tegen echte programma-accounts staat in pendingAction.ts)
     preflightLogic.ts                               - genesis-hash, referentieslot en het Squads-voorstel decoderen en toetsen, op echte devnet-bytes (sectie 167)
-    preflightScripts.ts                             - de pre-flight-scripts als subprocess tegen een nep-RPC (fakeDevnetRpc.ts): exit-code en reden per afwijking (sectie 167)
+    preflightScripts.ts                             - de pre-flight-scripts als subprocess tegen een nep-RPC (fakeDevnetRpc.ts): exit-code en reden per afwijking (sectie 167/168)
+    adminPageSelection.ts                           - de eigen code van admin/wallet-signer.html (knop 3/4, getoond TRANSACTION_INDEX) tegen een nep-connectie (sectie 168)
+    squadsScenario.ts                               - gedeelde Squads- en bufferaccounts voor beide, op echte devnet-bytes en de RC-binary (sectie 168)
     unitPathIsPure.ts                               - bewaakt dat niets in tests/unit/ een validator of echte cluster aanspreekt
   sessionKeys.ts                     - session keys, alle 7 instructies
   addSessionKeyBlock.ts               - tijdelijke client-blokkade op execute_advanced-sessies
@@ -226,16 +228,26 @@ in twee delen:
    RPC-timing-races, browsercaching, transactionIndex-verwarring) die de moeite waard
    zijn om te kennen voordat je dit voor het eerst zelf doet.
 3. **Pre-flight, direct vóór het uitvoeren (verplicht, in deze volgorde; STATUS.md sectie
-   94 en 162):**
+   94, 162, 167 en 168):**
    1. `TRANSACTION_INDEX=<n> npx ts-node --transpile-only scripts/preUpgradeChecks.ts --pre`
-      moet eindigen met exit 0 (devnet volgens de genesis-hash; `<n>` is het laatste
-      voorstel en precies de upgrade van dit programma vanaf `EXPECTED_BUFFER` in
-      `scripts/checkProposalTimelock.ts`; timelock verstreken volgens de Clock-sysvar; en de
-      recovery-/wachtrij-invariant groen met een volledig RPC-antwoord van na de laatste
-      deploy). Niet 0: niet uitvoeren.
+      moet eindigen met exit 0. `<n>` is het nummer dat de adminpagina toont bij
+      "TRANSACTION_INDEX voor de pre-flight". Het script controleert:
+      - devnet volgens de genesis-hash (die de RPC zelf opgeeft: geen absolute garantie
+        tegen een simulator die devnet forkt);
+      - `<n>` is het laatste voorstel en het enige goedgekeurde voorstel voor deze buffer,
+        en is precies de upgrade van dit programma vanaf `EXPECTED_BUFFER` in
+        `scripts/checkProposalTimelock.ts` (dezelfde regel als knop 4 van de adminpagina);
+      - de buffer zelf: authority is de vault, en de sha256 van het programma is de RC-build;
+      - de timelock is verstreken volgens de Clock-sysvar;
+      - de recovery-/wachtrij-invariant is groen met een volledig RPC-antwoord. Bij `--pre`
+        is dat alleen begrensd tot ná de vorige deploy: een node die daarna achterloopt,
+        herkent `--pre` niet. De echte versheidsgarantie is `--post`.
+
+      Niet 0: niet uitvoeren.
    2. Sessie-bruikbaarheid.
    3. Voorstel- en bufferstatus on-chain.
-   4. Adminpagina: `findCanonicalProposal()`.
+   4. Adminpagina: het getoonde TRANSACTION_INDEX is `<n>`. Knop 4 weigert als dat niet zo
+      is (sectie 168).
 4. **Direct ná het uitvoeren:** `EXECUTE_SIGNATURE=<handtekening van de uitvoertransactie> npx
    ts-node --transpile-only scripts/preUpgradeChecks.ts --post` (exit 0; de controle leest
    aantoonbaar een staat van ná de deploy, sectie 167), daarna de vijf verificaties van

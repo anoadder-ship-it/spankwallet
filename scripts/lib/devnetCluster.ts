@@ -7,6 +7,12 @@ import { Connection } from "@solana/web3.js";
  * (Anchor.toml) en kan dus een "groene" staat tonen die niets over devnet
  * zegt. De genesis-hash identificeert de cluster, los van de URL.
  *
+ * Grens (review §167, L-2): de hash is wat de RPC ZELF opgeeft. Dat weert
+ * een verkeerde URL of een lokale test-validator, maar is geen absolute
+ * garantie: een simulator die devnet forkt en diens genesis-hash doorgeeft,
+ * of een onbetrouwbare node, komt erdoor. RPC_URL blijft dus een
+ * vertrouwenskeuze (open punt voor upgrade 2, STATUS.md sectie 168).
+ *
  * Devnet-genesis, gelezen via getGenesisHash op 2026-09-29 en vastgelegd in
  * tests/unit/fixtures/devnetSquads20260929.json.
  */

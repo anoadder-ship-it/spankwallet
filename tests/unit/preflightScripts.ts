@@ -2,10 +2,11 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { assert } from "chai";
 import { spawn } from "child_process";
 import { createHash } from "crypto";
-import * as fs from "fs";
 import * as path from "path";
 import { startFakeRpc } from "./fakeDevnetRpc";
 import type { FakeRpcState } from "./fakeDevnetRpc";
+import { fx, LOADER, NOW, OLD_BUFFER, RC_BINARY, squadsAccounts, TIME_LOCK, u64 } from "./squadsScenario";
+import type { BufferOpts, ProposalOpts } from "./squadsScenario";
 
 /**
  * STATUS.md sectie 167 (review §162, M-1/M-2/M-3, L-1/L-2): de echte
@@ -14,39 +15,27 @@ import type { FakeRpcState } from "./fakeDevnetRpc";
  * pure logica: precies de rode reproducties uit de review (een andere
  * cluster, een achterlopende node, een verkeerd voorstelnummer).
  *
- * Basis zijn echte devnet-bytes (fixtures/devnetSquads20260929.json); elke
- * afwijking is een gerichte patch daarop.
+ * Sectie 168 (review §167, M-A/M-B): een tweede goedgekeurd voorstel voor
+ * dezelfde buffer, en een buffer op het juiste adres met de verkeerde inhoud
+ * of authority.
+ *
+ * De Squads- en bufferaccounts komen uit tests/unit/squadsScenario.ts.
  */
 
 // process.cwd(), niet __dirname: zie tests/verifyBinaryFresh.ts (ES-modulescope).
 const ROOT = process.cwd();
 const TS_NODE = path.join(ROOT, "node_modules", ".bin", "ts-node");
-const fx = JSON.parse(fs.readFileSync(path.join(ROOT, "tests", "unit", "fixtures", "devnetSquads20260929.json"), "utf8"));
 
 const DEVNET_GENESIS = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
 const OTHER_GENESIS = Keypair.generate().publicKey.toBase58(); // bv. een lokale test-validator
-const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111";
 const PROGRAM_ID = new PublicKey("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
 const PROGRAM_DATA = "5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq";
-const SQUADS = new PublicKey("SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf");
-const MULTISIG = new PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
-const RC_BUFFER = new PublicKey("F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5");
-const OLD_BUFFER = new PublicKey("HRccWBKjfiLrTAZ9JwnukTkesSqUk2F38cRyDTvV7szK"); // buffer van voorstel #13
-const CLOCK = "SysvarC1ock11111111111111111111111111111111";
-const SYSVAR_OWNER = "Sysvar1111111111111111111111111111111111111";
 // Willekeurige, vaste handtekening: de nep-RPC kent alleen deze.
 const EXECUTE_SIGNATURE = "5TyqfwS8wPU1YCtZ3F6kPc3JWLF7wR3fLJ4B8M3xN6qZ2kR7vYhPq9sD4mX1eT8uWb5cN3aG6jH2kL9pQ7rS4vX";
-const NOW = 1_790_000_000;
-const TIME_LOCK = 259_200;
 
 // --- spankwallet-accounts (zelfde layout als tests/unit/recoveryQueueInvariant.ts) ---
 
 const disc = (name: string) => createHash("sha256").update("account:" + name).digest().subarray(0, 8);
-const u64 = (v: bigint | number) => {
-  const b = Buffer.alloc(8);
-  b.writeBigUInt64LE(BigInt(v));
-  return b;
-};
 
 function walletBytes(recoverySome: boolean): Buffer {
   const body = Buffer.concat([
@@ -111,49 +100,18 @@ function invariantState(o: InvariantOpts): FakeRpcState {
   };
 }
 
-// --- Squads-accounts ---
-
-function txPda(index: number, suffix?: string): string {
-  const seeds = [Buffer.from("multisig"), MULTISIG.toBuffer(), Buffer.from("transaction"), u64(index)];
-  if (suffix) seeds.push(Buffer.from(suffix));
-  return PublicKey.findProgramAddressSync(seeds, SQUADS)[0].toBase58();
-}
-
-interface ProposalOpts {
-  status?: number; // 3 = Approved
-  approvedAt?: number;
-  buffer?: PublicKey;
-  proposalOwner?: string;
-}
+// --- Squads-accounts (tests/unit/squadsScenario.ts) ---
 
 interface TimelockOpts {
   genesisHash?: string;
   latestIndex: number;
+  staleIndex?: number;
   proposals: Record<number, ProposalOpts>;
+  buffer?: BufferOpts;
 }
 
 function timelockState(o: TimelockOpts): FakeRpcState {
-  const accounts = new Map<string, { owner: string; data: Buffer; executable?: boolean }>();
-  const multisig = Buffer.from(fx.multisig, "base64");
-  multisig.writeBigUInt64LE(BigInt(o.latestIndex), 78);
-  accounts.set(MULTISIG.toBase58(), { owner: SQUADS.toBase58(), data: multisig });
-  for (const [key, p] of Object.entries(o.proposals)) {
-    const index = Number(key);
-    const proposal = Buffer.from(fx.proposal13, "base64");
-    proposal.writeBigUInt64LE(BigInt(index), 40);
-    proposal[48] = p.status ?? 3;
-    proposal.writeBigInt64LE(BigInt(p.approvedAt ?? NOW - TIME_LOCK - 3600), 49);
-    accounts.set(txPda(index, "proposal"), { owner: p.proposalOwner ?? SQUADS.toBase58(), data: proposal });
-    const vtx = Buffer.from(fx.vaultTransaction13, "base64");
-    vtx.writeBigUInt64LE(BigInt(index), 72);
-    const at = vtx.indexOf(OLD_BUFFER.toBuffer());
-    (p.buffer ?? RC_BUFFER).toBuffer().copy(vtx, at);
-    accounts.set(txPda(index), { owner: SQUADS.toBase58(), data: vtx });
-  }
-  const clock = Buffer.alloc(40);
-  clock.writeBigUInt64LE(500_000_000n, 0);
-  clock.writeBigInt64LE(BigInt(NOW), 32);
-  accounts.set(CLOCK, { owner: SYSVAR_OWNER, data: clock });
+  const accounts = squadsAccounts(o);
   return { genesisHash: o.genesisHash ?? DEVNET_GENESIS, slot: 500_000_000, honorMinContextSlot: true, accounts, signatureStatuses: new Map() };
 }
 
@@ -284,6 +242,56 @@ describe("pre-flight-scripts tegen een nep-RPC (STATUS.md sectie 167)", function
     it("groen: laatste voorstel, goedgekeurd, timelock verstreken, upgrade van 9ma6 met buffer F5nh9UdF", async () => {
       const state = timelockState({ latestIndex: 15, proposals: { 15: {} } });
       expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "15" }), 0, "geldig voorstel moet groen zijn", /alleen Upgrade van 9ma6\S+ vanaf buffer F5nh9UdF\S+[\s\S]*TIMELOCK VERSTREKEN/);
+    });
+  });
+
+  describe("sectie 168, M-A: precies één goedgekeurd voorstel voor deze buffer, en dat is het laatste", () => {
+    it("#15 goedgekeurd (upgrade + SetAuthority), #16 goedgekeurd en schoon en het laatste: exit 1, #15 genoemd", async () => {
+      const state = timelockState({ latestIndex: 16, proposals: { 15: { extraInstruction: true }, 16: {} } });
+      expectExit(
+        await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }),
+        1,
+        "tweede goedgekeurd voorstel voor deze buffer moet falen",
+        /andere goedgekeurde voorstellen voor deze buffer: #15 \(vereist: precies één, en dat is het laatste voorstel #16\)/
+      );
+    });
+
+    it("een stale maar goedgekeurd voorstel voor deze buffer telt ook mee (Squads voert stale goedgekeurde voorstellen uit)", async () => {
+      const state = timelockState({ latestIndex: 16, staleIndex: 10, proposals: { 3: {}, 16: {} } });
+      expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }), 1, "oud goedgekeurd voorstel moet falen", /andere goedgekeurde voorstellen voor deze buffer: #3 /);
+    });
+
+    it("groen: #15 alleen Active (niet goedgekeurd) naast het goedgekeurde, laatste #16", async () => {
+      const state = timelockState({ latestIndex: 16, proposals: { 15: { status: 1 }, 16: {} } });
+      expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }), 0, "een open, niet-goedgekeurd voorstel blokkeert uitvoeren niet", /TIMELOCK VERSTREKEN/);
+    });
+  });
+
+  describe("sectie 168, M-B: de buffer zelf (loader, tag, authority = vault, sha256, rest nul)", () => {
+    const withBuffer = (buffer: BufferOpts) => timelockState({ latestIndex: 15, proposals: { 15: {} }, buffer });
+    const cases: [string, BufferOpts, RegExp][] = [
+      ["buffer bestaat niet", { absent: true }, /buffer F5nh\S+ bestaat niet/],
+      ["buffer niet van de upgradeable loader", { owner: PublicKey.default.toBase58() }, /buffer F5nh\S+ is niet van de upgradeable loader/],
+      ["geen Buffer-account (tag 3 = ProgramData)", { tag: 3 }, /geen Buffer-account \(tag 3\)/],
+      ["authority None", { authority: null }, /buffer-authority is None, verwacht de vault 89ME\S+/],
+      ["authority een andere sleutel (bv. nog het deploy-keypair)", { authority: OLD_BUFFER }, /buffer-authority HRcc\S+, verwacht de vault 89ME\S+/],
+      [
+        "verkeerde inhoud (één byte anders)",
+        { program: Buffer.concat([RC_BINARY.subarray(0, 1000), Buffer.from([RC_BINARY[1000] ^ 1]), RC_BINARY.subarray(1001)]) },
+        /sha256 van de eerste 737080 bytes na de kop is [0-9a-f]{64}, verwacht 33598b3d\S+/,
+      ],
+      ["te kort", { program: RC_BINARY.subarray(0, 700_000) }, /buffer is 700037 bytes, verwacht minstens 737117/],
+      ["niet-nul byte na het programma", { tail: Buffer.from([0, 0, 7]) }, /niet-nul byte na het programma op offset 737119/],
+    ];
+    for (const [name, buffer, reason] of cases) {
+      it(`${name}: exit 1`, async () => {
+        expectExit(await run(withBuffer(buffer), TIMELOCK, [], { TRANSACTION_INDEX: "15" }), 1, `${name} moet falen`, reason);
+      });
+    }
+
+    it("groen: juiste buffer met nullen na het programma (ruimer gealloceerd)", async () => {
+      const r = await run(withBuffer({ tail: Buffer.alloc(4096) }), TIMELOCK, [], { TRANSACTION_INDEX: "15" });
+      expectExit(r, 0, "juiste buffer moet groen zijn", /Buffer F5nh\S+: authority de vault, sha256 33598b3d\S+ over 737080 bytes, rest nul[\s\S]*TIMELOCK VERSTREKEN/);
     });
   });
 

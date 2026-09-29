@@ -15956,6 +15956,11 @@ goedkeuring.
 
 ## 167. Reparatieronde na de review van sectie 162: alleen devnet, een aantoonbaar verse staat, precies dit voorstel (2026-09-29)
 
+> **Correctie (sectie 168):** "aantoonbaar verse staat" geldt alleen voor `--post`. `--pre`
+> is begrensd tot ná de vorige deploy, niet vers; zie punt 2 hieronder en sectie 168 punt 3.
+> De genesis-hash-controle (punt 1) vertrouwt op wat de RPC opgeeft. De commit-titel van
+> `749c4b8` zegt hetzelfde, maar is al gepusht en blijft staan; deze correctie geldt.
+
 Onafhankelijke review (verse sessie, 2026-09-28) van de pre-flight-poort zoals die na
 secties 161-162 op `main` stond (`6014f61` + `63e993a`): `checkRecoveryQueueInvariant.ts`,
 `lib/recoveryQueueInvariant.ts`, `preUpgradeChecks.ts`, `checkProposalTimelock.ts` en de
@@ -16173,3 +16178,231 @@ buffer-waarden. Er waren alleen de twee plekken in de adminpagina; `EXPECTED_BUF
 gelijk; het bewaarde keypair uit sectie 163 hoort bij `F5nh9UdF…` (`solana-keygen pubkey`);
 op devnet bestaan `F5nh9UdF…` (nog niet geschreven) en `HRcc…` (verbruikt door #13) allebei
 niet; het paginascript doorstaat `node --check`.
+
+## 168. Reparatieronde na de review van sectie 167: knop 4 en de pre-flight kiezen hetzelfde voorstel, en de buffer zelf wordt gecontroleerd (2026-09-29)
+
+Review van sectie 167 (`749c4b8` + `40ccbc7`), 2026-09-29, door een sessie die §167 niet
+bouwde. Oordeel: de genesis-hash, de slot-controle en de decodering van de VaultTransaction
+houden stand, en `BUFFER` is overal consistent. Als harde poort nog niet klaar, om twee
+middelgrote redenen:
+
+- **M-A** de pre-flight en knop 4 kozen elk hun eigen voorstel. Het script eiste "het
+  laatste voorstel, precies de upgrade". De pagina voerde het *laagst genummerde*
+  goedgekeurde voorstel uit waarvan *een* instructie de buffer raakte, ook met extra
+  instructies ernaast. Voorbeeld: #15 goedgekeurd (upgrade + iets anders), #16 goedgekeurd
+  en schoon. De pre-flight geeft groen op 16, en knop 4 voert 15 uit;
+- **M-B** "juiste buffer" betekende alleen het juiste adres. Inhoud (sha256 van de build) en
+  authority (alleen de vault kan nog schrijven) werden niet gecontroleerd.
+
+Plus L-1 (`--pre` is niet aantoonbaar vers, ondanks de titel van §167), L-2 (de
+genesis-hash vertrouwt de RPC), L-3 t/m L-5 en twee info-punten (punt 9). Deze sectie
+lost M-A en M-B op en corrigeert de tekst van L-1/L-2. De rest staat als open punt voor
+upgrade 2. Geen wijziging aan het programma.
+
+**Deze sessie deed de review van §167 én bouwde §168.** Volgens de afgesproken volgorde
+hoort bij §168 een review door een verse sessie.
+
+### 1. M-A: één selectieregel, gedeeld door de pagina en het script
+
+Nieuw `admin/upgradeProposalCheck.mjs` (met typen in `upgradeProposalCheck.d.mts`): de
+decoders voor Multisig, Proposal en VaultTransaction, `upgradeProposalProblems` (uit §167),
+de scan en de selectieregel, zonder imports en zonder `Buffer`. De aanroeper geeft zijn
+eigen `PublicKey`-klasse mee. De module draait ongewijzigd in de browser en in Node:
+`scripts/lib/squadsUpgradeProposal.ts` bindt hem alleen nog aan `@solana/web3.js`. De oude
+TS-decoders zijn weg, dus er is één implementatie. Node laadt de ES-module via
+`require` (vereist Node >= 20.19 / 22.12; hier v24.10.0).
+
+De regel (`selectProposal`), na een scan van **alle** voorstellen `1..transactionIndex`
+(`getMultipleAccounts` per 50 voorstellen, minstens op de slot van de multisig-lezing; ook
+stale voorstellen, want Squads voert die uit):
+- **uitvoeren**: precies één *goedgekeurd* voorstel raakt deze buffer (ruime toets: een
+  Upgrade-instructie van de loader met de buffer als account), dat is het laatste voorstel,
+  het is niet stale, en zijn VaultTransaction is precies de upgrade (strenge toets uit §167);
+- **goedkeuren**: hetzelfde met *open* (Active of Approved);
+- **indienen**: de lijst open voorstellen voor deze buffer (knop 2 weigert zonder
+  bevestigingsvakje, zoals voorheen);
+- elk voorstel dat niet te lezen of te controleren is (vreemde owner, kapotte bytes,
+  proposal zonder transactie) is een probleem, ook als het niet het laatste is. Een
+  config- of batch-transactie (andere discriminator) raakt de buffer niet en telt niet mee.
+
+`scripts/checkProposalTimelock.ts` roept `loadAndSelect(…, "execute")` aan, en eist
+daarnaast dat `TRANSACTION_INDEX` het gekozen voorstel is (de melding "niet het laatste
+voorstel" blijft de eerste). `admin/wallet-signer.html`:
+- `findCanonicalProposal()`, `vaultTxMatchesConfiguredBuffer()`, `isAccountNotFoundError()`
+  en `MAX_PROPOSAL_SCAN` zijn weg. Knoppen 2/3/4 gebruiken `selectUpgradeProposal(purpose)`
+  = `upgradeCheck.loadAndSelect(…)`;
+- knop 4 weigert (met de redenen, "NIET UITVOEREN") tenzij de regel precies één voorstel
+  oplevert, en logt het nummer als het nummer waarmee `preUpgradeChecks.ts --pre` groen
+  moet zijn gegeven. Knop 3 keurt alleen dat voorstel goed. Er komt dus nooit een
+  goedkeuring op een voorstel dat de pre-flight daarna weigert;
+- het nummer staat zichtbaar op de pagina ("TRANSACTION_INDEX voor de pre-flight"), ook
+  zonder verbonden wallet. Het veld toont `16 (Approved)`, of `geen: <redenen>`;
+- `EXPECTED_UPGRADE` staat naast `BUFFER`. Bij het laden controleert de pagina dat
+  `VAULT_PDA` uit de multisig volgt;
+- `admin/https-server.js` serveert `upgradeProposalCheck.mjs` (allowlist; de `.d.mts` niet).
+
+Gevolgen, bewust:
+- een tweede open voorstel voor dezelfde buffer (via het bevestigingsvakje van knop 2)
+  blokkeert knoppen 3 en 4, tot er weer precies één is. Een overbodig Active-voorstel
+  wijs je af met knop 5. Een overbodig **goedgekeurd** voorstel kan de pagina niet
+  weghalen: Squads' `proposalCancel` zit niet in de pagina (open punt, punt 9);
+- een ouder goedgekeurd voorstel voor dezelfde buffer blokkeert ook als het stale is.
+
+### 2. M-B: de buffer zelf
+
+Nieuw `scripts/lib/upgradeBuffer.ts` (`bufferProblems`). `checkProposalTimelock.ts` leest
+`EXPECTED_BUFFER` en eist:
+- eigenaar is de upgradeable loader, tag 1 (Buffer);
+- authority = `Some(vault)`. Dan kan niemand buiten de multisig de inhoud nog wijzigen
+  tussen de controle en het uitvoeren;
+- de sha256 van de eerste `EXPECTED_BUFFER_PROGRAM_LENGTH` (737.080) bytes na de kop van 37
+  bytes is `EXPECTED_BUFFER_PROGRAM_SHA256`
+  (`33598b3ddb179d680cc26e8318ac9b60002808e7044234c472481a00974ae76f`, sectie 163);
+- de rest van de buffer is nul.
+
+Beide constanten staan naast `EXPECTED_BUFFER`. Opnieuw gemeten tegen de bewaarde RC-binary
+(`~/spankwallet-private-notes/rc-163/…-63e993a10791.so`): 737.080 bytes, sha256 `33598b…e76f`.
+
+Testfixture `tests/unit/fixtures/rc163-spankwallet.so.gz` (168.532 bytes, `gzip -9 -n`) is
+diezelfde binary. Een groene test van deze controle vraagt een buffer waarvan de hash echt
+`33598b…` is. De binary onthult niets extra's: dezelfde bytes staan publiek on-chain zodra
+de buffer geschreven is. Het alternatief, een test-override van de verwachte hash in het
+script, zou een omzeilknop in een veiligheidspoort zijn. Lopen fixture en constante ooit
+uiteen, dan faalt de groene buffertest (en elke andere groene scripttest).
+
+### 3. Tekstcorrecties L-1 en L-2
+
+- **L-1**: `--pre` garandeert geen verse staat. De gelezen staat is alleen begrensd tot ná
+  de vorige deploy; de echte versheidsgarantie is `--post`. Aangepast in
+  `checkRecoveryQueueInvariant.ts`, `preUpgradeChecks.ts`, README (pre-flight) en
+  `docs/upgradevoorstel-sjabloon.md` §2. De titel van §167 heeft een correctienoot. De
+  commit-titel van `749c4b8` is al gepusht en blijft staan; deze sectie corrigeert hem;
+- **L-2**: de genesis-hash is wat de RPC zelf opgeeft. De controle weert een verkeerde URL
+  of een lokale test-validator, maar is geen absolute garantie tegen een simulator die
+  devnet forkt en diens hash doorgeeft. Vermeld in `devnetCluster.ts`,
+  `checkProposalTimelock.ts`, `checkRecoveryQueueInvariant.ts`, `preUpgradeChecks.ts`,
+  README en het sjabloon.
+
+### 4. Rood vóór groen
+
+Nieuwe tests, eerst tegen de ongewijzigde code gedraaid (`yarn test:unit`: 65 passing,
+20 failing), daarna tegen de fix:
+- `tests/unit/preflightScripts.ts`: het script als subprocess tegen de nep-RPC (die nu ook
+  `getMultipleAccounts` kent);
+- `tests/unit/adminPageSelection.ts`: de **eigen code van de pagina**. Alle functies en
+  eenvoudige constanten op het hoogste niveau worden uit `wallet-signer.html` gelezen en
+  uitgevoerd met de gevendorde `web3.mjs` en `multisig.mjs` (dezelfde bestanden als de
+  browser), tegen een nep-connectie over dezelfde accounts. Alleen
+  `multisig.transactions.*` (versturen) is vervangen door een opname;
+- beide bouwen hun accounts via `tests/unit/squadsScenario.ts`.
+
+| Scenario | Oude code | Na de fix |
+|---|---|---|
+| Script: #15 goedgekeurd (upgrade + SetAuthority), #16 goedgekeurd, schoon, laatste | exit 0, TIMELOCK VERSTREKEN | exit 1, "andere goedgekeurde voorstellen voor deze buffer: #15" |
+| Pagina, knop 4, zelfde toestand | **voert #15 uit** | weigert, verstuurt niets |
+| Pagina, knop 4: #15 goedgekeurd, #16 (laatste) Active | **voert #15 uit** | weigert: #16 is niet Approved |
+| Pagina, knop 3: #15 en #16 allebei Active | **keurt #15 goed** | weigert: "andere open voorstellen … #15" |
+| Script: goedgekeurd #3, stale (`staleTransactionIndex` 10), naast #16 | exit 0 | exit 1, #3 genoemd |
+| Pagina: getoond TRANSACTION_INDEX | bestaat niet | `16 (Approved)`, of `geen: <reden>` |
+| Script, buffer: ontbreekt / niet van de loader / tag 3 / authority None / authority `HRcc…` / één byte anders / te kort / niet-nul na het programma | exit 0 (8x) | exit 1, elk met de eigen reden |
+| Controles die groen moeten blijven: #15 Active + #16 goedgekeurd (script en knop 4 → #16), alleen #16 Active (knop 3 → #16), juiste buffer met 4096 nul-bytes erna | – | groen |
+
+Structureel (ook rood vóór de fix): de pagina laadt de module en de server serveert hem;
+`findCanonicalProposal`, `vaultTxMatchesConfiguredBuffer` en `MAX_PROPOSAL_SCAN` komen niet
+meer in het paginascript voor. Een consistentietest (groen vóór en na) eist dat `BUFFER`,
+programma-ID, ProgramData en multisig in de pagina gelijk zijn aan de constanten van het
+script.
+
+De eerste rode run van de paginatests faalde om de verkeerde reden: de eigen `log()` van de
+pagina riep `document.createElement` aan, en de stub had die niet. De stub is uitgebreid
+(niet de pagina aangepast), daarna faalden ze om de juiste reden: `de pagina verstuurde
+[{"kind":"execute","transactionIndex":"#15"}]`.
+
+**Mutatiecontrole:** met de eis "andere kandidaten" en de sha256-eis tijdelijk uitgeschakeld
+faalden precies de zes bijbehorende tests (drie van de pagina, drie van het script). De
+bestanden zijn daarna teruggezet.
+
+### 5. Live, read-only tegen devnet (2026-09-29)
+
+Alleen lezen, geen transactie. `loadAndSelect` over de echte voorstellen #1-#14:
+
+| Buffer / doel | Uitkomst |
+|---|---|
+| `F5nh…` / indienen | geen open voorstel, geen problemen (knop 2 blijft bruikbaar) |
+| `F5nh…` / uitvoeren | geen: #14 staat op Rejected, en #14 raakt `HRcc…` i.p.v. `F5nh…` |
+| `HRcc…` / indienen | geen open voorstel, geen problemen |
+| `HRcc…` / uitvoeren | geen: #14 staat op Rejected |
+
+Alle 14 historische voorstellen (ook de oude Active #1-4, 6, 7, 9) zijn zonder probleem
+gelezen. `TRANSACTION_INDEX=14 checkProposalTimelock.ts`: exit 1 met beide redenen,
+"NIET UITVOEREN".
+
+Server: de nieuwe `https-server.js` tijdelijk op poort 18766 gestart. `upgradeProposalCheck.mjs`
+geeft 200, `text/javascript`, identiek aan het bestand; `.d.mts` geeft 404; de pagina bevat
+het nieuwe veld. **Op poort 8766 draait nog een server die vóór deze wijziging gestart is
+(oude allowlist): die geeft 404 op de module, en de pagina weigert dan te laden. Opnieuw
+starten vóór gebruik** (admin/README stap 3). Niet gedaan in een echte browser met een
+wallet; de pagina toont het nummer ook zonder wallet, dus openen is genoeg om het te zien.
+
+### 6. Documentatie
+
+README (pre-flight, testlijst), `admin/README.md` (stap 1 en 3-4),
+`docs/upgradevoorstel-sjabloon.md` (§1 stap 5-6, §2, §3) en de scriptcommentaren beschrijven
+de gedeelde regel, de buffercontrole, het getoonde nummer en de grenzen uit punt 3.
+
+### 7. Regressie
+
+| Suite | Uitkomst | Baseline (sectie 167) |
+|---|---|---|
+| `cargo test` | 13/0 | 13/0 |
+| `yarn test` | 210 passing, 119 pending, 0 failing | 186/119/0; verschil = 22 nieuwe tests + 2 purity-guardtests (één per nieuw bestand in `tests/unit/`) |
+| `yarn test:pending-action` | 116/0 (1 pending) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 | 117/0 |
+| `yarn test:unit` | 85/0 | 61/0 (+24, idem) |
+
+Typecontrole: `tsc --noEmit --strict` over de gewijzigde scripts en `tests/unit/`: schoon.
+`node --check` op het paginascript, de gedeelde module en de server: schoon. Van de
+bestaande tests is alleen `preflightScripts.ts` aangepast: de accountopbouw is verhuisd naar
+`squadsScenario.ts`, zonder inhoudelijke wijziging van de bestaande gevallen.
+
+### 8. Voor upgrade 1, vóór het voorstel
+
+- de buffer schrijven, de authority overdragen aan de vault, en daarna controleert de poort
+  inhoud en authority zelf (sectie 166 punt 2-3 blijft het handmatige bewijs);
+- de server op poort 8766 opnieuw starten (punt 5);
+- review van §168 door een verse sessie.
+
+### 9. Open punten voor upgrade 2 (niet nu gebouwd)
+
+Uit de review van §167 (let op: andere L-nummers dan in de review van §162, punt 10 van
+§167):
+- **L-3** takken zonder test op scriptniveau: status anders dan Approved/Active,
+  `Proposal.multisig` of index verkeerd, VaultTransaction met een vreemde owner of
+  ontbrekend, multisig met een vreemde owner. In `preflightLogic.ts` controleren veel
+  gevallen alleen `isNotEmpty`, niet de specifieke reden;
+- **L-4** `tests/unit/unitPathIsPure.ts` is een tekstfilter: hij leest niet recursief
+  (terwijl de spec `tests/unit/**/*.ts` wel recursief is), volgt geen imports of gestarte
+  scripts, en is met `fetch(` of `new web3.Connection(` te omzeilen;
+- **L-5** de glob-fix van §167 is lokaal: niets controleert dat `yarn test` de hele suite
+  laadt. Een `TEST_GLOB` die nog in de shell staat, laat `yarn test` stil een deel draaien,
+  met exit 0. Voorstel: een root-hook die de geladen bestanden met
+  `git ls-files 'tests/**/*.ts'` vergelijkt, tenzij de run expliciet gedeeltelijk is;
+- **I-1** de eis "laatste voorstel" maakt de poort blokkeerbaar: elk nieuw voorstel na de
+  goedkeuring (ook een config-transactie) laat haar weigeren. Dat is fail-closed, maar zet
+  druk om de poort te omzeilen;
+- **I-2** "beide stappen lezen van dezelfde node" (§167 punt 1) klopt niet voor
+  `api.devnet.solana.com`, dat verzoeken over meerdere nodes verdeelt. De controles blijven
+  sluitend (een verschil geeft exit 2), maar het commentaar klopt niet;
+- restant van L-1/L-2 in code: `--pre` een onafhankelijke ondergrens geven (bijvoorbeeld
+  de Clock-sysvar tegen de lokale klok, of een tweede RPC), en een allowlist of
+  expliciete vlag voor `RPC_URL`.
+
+Nieuw uit deze sectie:
+- de pagina kan een overbodig goedgekeurd voorstel niet annuleren (`proposalCancel`), en
+  zo'n voorstel blokkeert knop 4;
+- de pagina weet niet of de pre-flight gedraaid heeft. Ze toont en logt het nummer, maar
+  vraagt het niet op. Een invoerveld "TRANSACTION_INDEX waarmee de pre-flight groen gaf",
+  dat gelijk moet zijn, zou de binding expliciet maken;
+- `tests/unit/adminPageSelection.ts` haalt functies met een eenvoudige tokenizer uit de
+  pagina. Een wijziging die de extractie breekt, faalt luid (syntaxfout of ontbrekende
+  functie), niet stil.

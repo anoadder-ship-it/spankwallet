@@ -59,6 +59,8 @@ const ALLOWED_FILES = {
   // bestand bewust WEL gecommit en WEL in deze allowlist staat (geen
   // echte secret, een verse kloon moet zonder extra stap werken).
   "config.js": { file: "config.js", contentType: "text/javascript" },
+  // STATUS.md sectie 168: voorstelselectie, gedeeld met scripts/checkProposalTimelock.ts.
+  "upgradeProposalCheck.mjs": { file: "upgradeProposalCheck.mjs", contentType: "text/javascript" },
   // STATUS.md sectie 146: los gevendorde buffer@6.0.3-polyfill (window.Buffer),
   // vereist door @sqds/multisig/@solana/web3.js maar sinds de esm.sh->esbuild-
   // vendoring van sectie 107/109 niet meer automatisch aanwezig in de browser.

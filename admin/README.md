@@ -20,7 +20,9 @@ is `client/` de juiste plek.
    "Deployen naar devnet"-sectie: `anchor build` (IDL/types) gevolgd door
    `cargo-build-sbf --arch v3` (het daadwerkelijke binary), dan `solana program write-buffer`
    en de buffer-authority overdragen aan de vault-PDA. Werk de `BUFFER`-constante in
-   `wallet-signer.html` bij naar het nieuwe buffer-adres.
+   `wallet-signer.html` bij naar het nieuwe buffer-adres, en `EXPECTED_BUFFER` (plus lengte
+   en sha256 van de binary) in `scripts/checkProposalTimelock.ts`
+   (docs/upgradevoorstel-sjabloon.md §1 stap 5).
 2. **Genereer een self-signed certificaat** (eenmalig, of opnieuw als het verlopen is -
    standaard 7 dagen geldig):
    ```
@@ -31,11 +33,20 @@ is `client/` de juiste plek.
    `key.pem`/`cert.pem` zijn bewust gitignored (`admin/*.pem`) - nooit committen, altijd
    lokaal opnieuw genereren.
 3. **Start de server:** `node admin/https-server.js` (poort 8766, bindt op `0.0.0.0` zodat
-   andere apparaten op hetzelfde LAN erbij kunnen).
+   andere apparaten op hetzelfde LAN erbij kunnen). De allowlist wordt bij het starten
+   gelezen: na een wijziging aan de bestandenlijst (sectie 168: `upgradeProposalCheck.mjs`)
+   de server opnieuw starten.
 4. **Elke signer bezoekt** `https://<jouw-LAN-IP>:8766/wallet-signer.html` op zijn eigen
    apparaat (self-signed-certificaatwaarschuwing accepteren), verbindt zijn wallet (knop 1,
    of knop 1b voor Solflare-mobiel via het deep-link-protocol), en doorloopt
-   voorstellen/goedkeuren/uitvoeren (knoppen 2-4) zoals de pagina zelf aangeeft.
+   voorstellen/goedkeuren/uitvoeren (knoppen 2-4) zoals de pagina zelf aangeeft. Welk
+   voorstel knoppen 3/4 raken, en welk nummer bij `TRANSACTION_INDEX` van de pre-flight
+   hoort, komt uit `upgradeProposalCheck.mjs`, dezelfde module als
+   `scripts/checkProposalTimelock.ts` (sectie 168): alleen het laatste voorstel, als het het
+   enige open (knop 3) of goedgekeurde (knop 4) voorstel voor deze buffer is en precies de
+   upgrade. Anders weigert de knop met de reden. Een overbodig voorstel dat nog Active is,
+   wijs je af met knop 5; een overbodig goedgekeurd voorstel kan deze pagina niet
+   annuleren (open punt, STATUS.md sectie 168).
 5. **Geen enkele private key verlaat ooit een apparaat** - alle drie de ondertekenpaden
    (Wallet Standard, Mobile Wallet Adapter, Solflare-deep-link) laten de wallet-extensie of
    -app zelf ondertekenen. Dit was een expliciete eis bij de echte migratie (in

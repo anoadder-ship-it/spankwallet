@@ -54,7 +54,9 @@ import {
 //
 // Cluster en versheid (sectie 167, review §162 M-1/M-2), vóór de scan:
 // - de genesis-hash moet die van devnet zijn (exit 2 anders); RPC_URL kan
-//   dus een andere devnet-node kiezen, nooit een lokale test-validator;
+//   dus een andere devnet-node kiezen, nooit een lokale test-validator. De
+//   hash komt van de RPC zelf: geen absolute garantie tegen een simulator
+//   die devnet forkt (review §167 L-2, zie scripts/lib/devnetCluster.ts);
 // - referentieslot: bij --pre de last_deploy_slot uit de ProgramData, bij
 //   --post de slot van de uitvoertransactie (EXECUTE_SIGNATURE), die gelijk
 //   moet zijn aan de last_deploy_slot die dezelfde node teruggeeft. Beide
@@ -62,7 +64,8 @@ import {
 //   en hun context.slot wordt zelf nagekeken); anders exit 2. Zo dekt --post
 //   aantoonbaar het venster tot en met de deploy. --pre is daarmee alleen
 //   begrensd tot na de vorige deploy: een node die daarna achterloopt, wordt
-//   door --pre niet herkend. Dat restrisico dekt --post.
+//   door --pre niet herkend. --pre garandeert dus GEEN verse staat; de echte
+//   versheidsgarantie is --post (review §167 L-1, STATUS.md sectie 168).
 //
 //   npx ts-node --transpile-only scripts/checkRecoveryQueueInvariant.ts --pre
 //   EXECUTE_SIGNATURE=<handtekening van de uitvoertransactie> npx ts-node --transpile-only scripts/checkRecoveryQueueInvariant.ts --post

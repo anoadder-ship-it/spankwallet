@@ -28,32 +28,50 @@ L-1), op basis van de pre-flight uit sectie 94 en de verificaties uit sectie 95.
    devnet", stap 1).
 5. Het buffer-adres vastleggen op beide plekken die het voorstel toetsen:
    `EXPECTED_BUFFER` in `scripts/checkProposalTimelock.ts` (sectie 167) en `BUFFER` in
-   `admin/wallet-signer.html` (admin/README stap 1). Commit vóór het voorstel.
+   `admin/wallet-signer.html` (admin/README stap 1); `tests/unit/adminPageSelection.ts`
+   faalt als ze verschillen. Leg ook de lengte en sha256 van de binary vast als
+   `EXPECTED_BUFFER_PROGRAM_LENGTH` en `EXPECTED_BUFFER_PROGRAM_SHA256` (sectie 168), en
+   vervang `tests/unit/fixtures/rc163-spankwallet.so.gz` door de nieuwe binary. Commit vóór
+   het voorstel.
 6. Voorstel aanmaken en goedkeuren via `admin/wallet-signer.html` (twee van de drie leden).
+   Knop 3 keurt alleen het laatste voorstel goed, en alleen als het het enige open voorstel
+   voor deze buffer is en precies de upgrade (sectie 168).
 
 ## 2. Pre-flight, direct vóór het uitvoeren (volgorde verplicht)
 
 1. `TRANSACTION_INDEX=<n> npx ts-node --transpile-only scripts/preUpgradeChecks.ts --pre`
    moet eindigen met exit 0. Dit draait na elkaar, en stopt bij de eerste fout:
-   - `scripts/checkProposalTimelock.ts`: devnet (genesis-hash); `<n>` is het laatste
-     voorstel, niet stale, en de VaultTransaction is precies de upgrade van dit programma
-     vanaf `EXPECTED_BUFFER` met de vault als authority en spill; de 72u-timelock is
-     verstreken, gemeten tegen de Clock-sysvar (secties 94, 167);
+   - `scripts/checkProposalTimelock.ts` (secties 94, 167, 168):
+     - devnet volgens de genesis-hash. Die hash geeft de RPC zelf op: de controle weert een
+       verkeerde URL of een lokale test-validator, maar is geen absolute garantie tegen een
+       simulator die devnet forkt;
+     - `<n>` is het laatste voorstel, niet stale, en het enige goedgekeurde voorstel dat
+       deze buffer raakt (alle voorstellen 1..`<n>` gelezen, ook stale). De regel komt uit
+       `admin/upgradeProposalCheck.mjs`, dezelfde module als knop 4;
+     - de VaultTransaction is precies de upgrade van dit programma vanaf `EXPECTED_BUFFER`,
+       met de vault als authority en spill;
+     - de buffer zelf: van de loader, authority de vault, en de sha256 van de eerste
+       `EXPECTED_BUFFER_PROGRAM_LENGTH` bytes na de kop is de RC-build; de rest is nul;
+     - de 72u-timelock is verstreken, gemeten tegen de Clock-sysvar;
    - `scripts/checkRecoveryQueueInvariant.ts --pre`: devnet; geen wachtende actie bij een
-     wallet met een lopende recovery, geen afwijkende epoch, en een volledig RPC-antwoord,
-     gelezen na de laatste deploy (secties 161-162, 167).
+     wallet met een lopende recovery, geen afwijkende epoch, en een volledig RPC-antwoord
+     (secties 161-162, 167). Versheid is hier alleen begrensd tot ná de vorige deploy: een
+     node die daarna achterloopt, herkent `--pre` niet. De echte versheidsgarantie is `--post`
+     (§4).
 
    Niet 0: niet uitvoeren.
 2. Sessie-bruikbaarheid (sectie 94/95).
 3. Voorstel- en bufferstatus on-chain herbevestigd.
-4. Adminpagina: `findCanonicalProposal()` geeft precies één open kandidaat, dit voorstel.
+4. Adminpagina: "TRANSACTION_INDEX voor de pre-flight" toont `<n>` (sectie 168).
 
 Houd de tijd tussen stap 1 en het uitvoeren zo kort mogelijk: tot het uitvoeren draait de
 oude binary. Bij twijfel stap 1 opnieuw.
 
 ## 3. Uitvoeren
 
-Knop 4 op `admin/wallet-signer.html`. Uitvoertransactie noteren.
+Knop 4 op `admin/wallet-signer.html`. De knop past dezelfde regel toe als stap 1 en weigert
+als het voorstel dat hij zou uitvoeren niet `<n>` is (sectie 168). Uitvoertransactie
+noteren.
 
 ## 4. Direct ná het uitvoeren
 

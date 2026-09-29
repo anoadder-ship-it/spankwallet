@@ -1,16 +1,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import { DEVNET_RPC_URL, exitUnlessDevnet } from "./lib/devnetCluster";
-import {
-  APPROVED_TAG,
-  decodeMultisigHeader,
-  decodeProposalHeader,
-  decodeVaultTransaction,
-  PROPOSAL_STATUS_NAMES,
-  proposalPda,
-  SQUADS_PROGRAM_ID,
-  transactionPda,
-  upgradeProposalProblems,
-} from "./lib/squadsUpgradeProposal";
+import { loadAndSelect, vaultPda } from "./lib/squadsUpgradeProposal";
+import { bufferProblems } from "./lib/upgradeBuffer";
 
 // Stap 1 van de pre-flight vóór "4. Uitvoeren" - MOET vóór de andere drie
 // stappen (sessie-check, voorstel/buffer-check, adminpagina-check) en MOET
@@ -36,7 +27,10 @@ import {
 // het toetst, niet alleen dat "een" voorstel uitvoerbaar is.
 // - M-1: eerst de genesis-hash; alleen devnet (exit 2 bij een andere cluster).
 //   RPC_URL mag een andere devnet-node kiezen, dezelfde variabele als
-//   checkRecoveryQueueInvariant.ts, zodat beide stappen dezelfde node lezen.
+//   checkRecoveryQueueInvariant.ts. De controle vertrouwt op wat de RPC
+//   antwoordt: ze weert een verkeerde URL of een lokale test-validator, maar
+//   is geen absolute garantie tegen een simulator die devnet forkt en diens
+//   genesis-hash doorgeeft (review §167, L-2).
 // - M-3: TRANSACTION_INDEX moet het LAATSTE voorstel zijn
 //   (multisig.transactionIndex), niet verouderd (> staleTransactionIndex),
 //   en de VaultTransaction moet precies de upgrade van PROGRAM_ID vanaf
@@ -46,11 +40,21 @@ import {
 // - L-1: geen standaardvoorstel meer; zonder TRANSACTION_INDEX exit 2.
 // - L-2: owner-controle op het multisig-, proposal- en transactie-account.
 //
+// STATUS.md sectie 168 (review §167):
+// - M-A: dezelfde selectie als knop 3/4 van admin/wallet-signer.html, uit
+//   dezelfde module (admin/upgradeProposalCheck.mjs): alle voorstellen
+//   1..transactionIndex worden gelezen (ook stale), en precies één
+//   goedgekeurd voorstel mag deze buffer raken - het laatste. Een groen
+//   script gaat zo over precies het voorstel dat knop 4 uitvoert.
+// - M-B: de buffer zelf wordt gelezen: van de loader, authority = de vault,
+//   sha256 van het programma = de RC-build, rest nul (scripts/lib/upgradeBuffer.ts).
+//
 // Geen @sqds/multisig-dependency nodig (bewust, zelfde reden als
 // checkWorstCaseAccountSafety.ts: geen anchor-build, geen nieuwe dependency
-// in het hoofdproject) - de layouts staan in scripts/lib/squadsUpgradeProposal.ts,
+// in het hoofdproject) - de layouts staan in admin/upgradeProposalCheck.mjs,
 // overgenomen uit @sqds/multisig's GEGENEREERDE beet-structuurdefinities en
-// getest tegen echte devnet-accounts.
+// getest tegen echte devnet-accounts. Vereist Node >= 20.19 / 22.12 (require
+// van een ES-module).
 //
 //   TRANSACTION_INDEX=<n> npx ts-node --transpile-only scripts/checkProposalTimelock.ts
 //
@@ -64,9 +68,15 @@ const PROGRAM_ID = new PublicKey("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9")
 const PROGRAM_DATA = new PublicKey("5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq");
 const VAULT_INDEX = 0;
 // Per upgrade bijwerken, in dezelfde commit als de STATUS-sectie die de
-// buffer vastlegt. Upgrade 1: sectie 163 (build 33598b…, keypair uit de
-// tweede run).
+// buffer vastlegt, en gelijk aan BUFFER in admin/wallet-signer.html
+// (tests/unit/adminPageSelection.ts bewaakt dat). Upgrade 1: sectie 163
+// (reproduceerbare build van commit 63e993a, keypair uit de tweede run).
 const EXPECTED_BUFFER = new PublicKey("F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5");
+// Sectie 168 (M-B): wat er in die buffer moet staan. Lengte en sha256 van
+// de RC-binary uit sectie 163 (`scripts/build-devnet-buffer.sh 63e993a…`, twee
+// onafhankelijke runs identiek; tests/unit/fixtures/rc163-spankwallet.so.gz).
+const EXPECTED_BUFFER_PROGRAM_LENGTH = 737_080;
+const EXPECTED_BUFFER_PROGRAM_SHA256 = "33598b3ddb179d680cc26e8318ac9b60002808e7044234c472481a00974ae76f";
 
 function usage(message: string): never {
   console.error(`checkProposalTimelock: ${message}`);
@@ -80,22 +90,17 @@ const TRANSACTION_INDEX = (() => {
   return BigInt(fromEnv);
 })();
 
-function requireSquadsOwner(name: string, address: PublicKey, owner: PublicKey) {
-  if (!owner.equals(SQUADS_PROGRAM_ID)) {
-    throw new Error(`${name} ${address.toBase58()} is niet van het Squads-programma (owner ${owner.toBase58()}).`);
-  }
-}
-
 async function main() {
   const connection = new Connection(RPC_URL, "confirmed");
   await exitUnlessDevnet(connection, RPC_URL);
 
-  // --- Multisig-account ---
-  const multisigInfo = await connection.getAccountInfo(MULTISIG_PDA);
-  if (!multisigInfo) throw new Error(`Multisig-account ${MULTISIG_PDA.toBase58()} niet gevonden.`);
-  requireSquadsOwner("Multisig-account", MULTISIG_PDA, multisigInfo.owner);
-  const multisig = decodeMultisigHeader(multisigInfo.data);
-  if (typeof multisig === "string") throw new Error(`Multisig-account: ${multisig}`);
+  // --- Multisig en alle voorstellen: dezelfde scan en regel als knop 3/4 ---
+  const selection = await loadAndSelect(connection, {
+    multisigAddress: MULTISIG_PDA,
+    expected: { multisig: MULTISIG_PDA, vaultIndex: VAULT_INDEX, programId: PROGRAM_ID, programData: PROGRAM_DATA, buffer: EXPECTED_BUFFER },
+    purpose: "execute",
+  });
+  const { multisig } = selection;
   console.log(
     `Multisig: threshold=${multisig.threshold}, timeLock=${multisig.timeLockSeconds}s (${(multisig.timeLockSeconds / 3600).toFixed(2)}u), ` +
       `transactionIndex=${multisig.transactionIndex}, staleTransactionIndex=${multisig.staleTransactionIndex}`
@@ -107,57 +112,40 @@ async function main() {
         `NIET UITVOEREN: controleer welk voorstel bedoeld is.`
     );
   }
-  if (TRANSACTION_INDEX <= multisig.staleTransactionIndex) {
-    throw new Error(`Voorstel #${TRANSACTION_INDEX} is stale (staleTransactionIndex = ${multisig.staleTransactionIndex}).`);
-  }
-
-  // --- Proposal-account ---
-  const proposalAddress = proposalPda(MULTISIG_PDA, TRANSACTION_INDEX);
-  console.log(`\nProposal #${TRANSACTION_INDEX} PDA = ${proposalAddress.toBase58()}`);
-  const proposalInfo = await connection.getAccountInfo(proposalAddress);
-  if (!proposalInfo) throw new Error(`Proposal-account ${proposalAddress.toBase58()} niet gevonden.`);
-  requireSquadsOwner("Proposal-account", proposalAddress, proposalInfo.owner);
-  const proposal = decodeProposalHeader(proposalInfo.data);
-  if (typeof proposal === "string") throw new Error(`Proposal-account: ${proposal}`);
-  if (!proposal.multisig.equals(MULTISIG_PDA)) {
-    throw new Error(`Proposal.multisig (${proposal.multisig.toBase58()}) komt niet overeen met verwachte multisig (${MULTISIG_PDA.toBase58()}).`);
-  }
-  if (proposal.transactionIndex !== TRANSACTION_INDEX) {
-    throw new Error(`Proposal.transactionIndex (${proposal.transactionIndex}) komt niet overeen met verwachte index (${TRANSACTION_INDEX}).`);
-  }
-  const statusName = PROPOSAL_STATUS_NAMES[proposal.statusTag];
-  if (proposal.statusTag !== APPROVED_TAG || proposal.statusTimestamp === null) {
+  if (selection.problems.length > 0 || !selection.target) {
     throw new Error(
-      `Proposal #${TRANSACTION_INDEX} staat op status "${statusName}", niet "Approved". ` +
-        `Timelock-check niet van toepassing - uitvoeren nu sowieso niet mogelijk.`
-    );
-  }
-  const approvedAtUnix = proposal.statusTimestamp; // i64, seconden sinds epoch
-  console.log(`Proposal #${TRANSACTION_INDEX}: status=${statusName}, goedgekeurd op unix=${approvedAtUnix} (${new Date(Number(approvedAtUnix) * 1000).toISOString()})`);
-
-  // --- VaultTransaction: is dit precies de bedoelde upgrade? ---
-  const transactionAddress = transactionPda(MULTISIG_PDA, TRANSACTION_INDEX);
-  const transactionInfo = await connection.getAccountInfo(transactionAddress);
-  if (!transactionInfo) throw new Error(`VaultTransaction-account ${transactionAddress.toBase58()} niet gevonden.`);
-  requireSquadsOwner("VaultTransaction-account", transactionAddress, transactionInfo.owner);
-  const vaultTransaction = decodeVaultTransaction(transactionInfo.data);
-  if (typeof vaultTransaction === "string") throw new Error(`VaultTransaction-account: ${vaultTransaction}`);
-  const problems = upgradeProposalProblems(vaultTransaction, {
-    multisig: MULTISIG_PDA,
-    transactionIndex: TRANSACTION_INDEX,
-    vaultIndex: VAULT_INDEX,
-    programId: PROGRAM_ID,
-    programData: PROGRAM_DATA,
-    buffer: EXPECTED_BUFFER,
-  });
-  if (problems.length > 0) {
-    throw new Error(
-      `Voorstel #${TRANSACTION_INDEX} is niet precies de upgrade van ${PROGRAM_ID.toBase58()} vanaf buffer ${EXPECTED_BUFFER.toBase58()}:\n  - ` +
-        problems.join("\n  - ") +
+      `Voorstel #${TRANSACTION_INDEX} is niet het enige uitvoerbare voorstel voor precies de upgrade van ${PROGRAM_ID.toBase58()} ` +
+        `vanaf buffer ${EXPECTED_BUFFER.toBase58()}:\n  - ` +
+        selection.problems.join("\n  - ") +
         `\nNIET UITVOEREN.`
     );
   }
-  console.log(`VaultTransaction #${TRANSACTION_INDEX}: alleen Upgrade van ${PROGRAM_ID.toBase58()} vanaf buffer ${EXPECTED_BUFFER.toBase58()}, authority en spill de vault.`);
+  const target = selection.target;
+  if (target.index !== TRANSACTION_INDEX || target.statusTimestamp === null) {
+    throw new Error(`Interne fout: selectie gaf voorstel #${target.index}, verwacht #${TRANSACTION_INDEX}.`);
+  }
+  const approvedAtUnix = target.statusTimestamp; // i64, seconden sinds epoch
+  console.log(`Proposal #${TRANSACTION_INDEX}: status=${target.statusName}, goedgekeurd op unix=${approvedAtUnix} (${new Date(Number(approvedAtUnix) * 1000).toISOString()})`);
+  console.log(
+    `VaultTransaction #${TRANSACTION_INDEX}: alleen Upgrade van ${PROGRAM_ID.toBase58()} vanaf buffer ${EXPECTED_BUFFER.toBase58()}, authority en spill de vault; ` +
+      `geen ander goedgekeurd voorstel voor deze buffer (voorstellen 1..${multisig.transactionIndex} gelezen).`
+  );
+
+  // --- De buffer zelf: inhoud en authority ---
+  const vault = vaultPda(MULTISIG_PDA, VAULT_INDEX);
+  const bufferInfo = await connection.getAccountInfo(EXPECTED_BUFFER);
+  const bufferIssues = bufferProblems(bufferInfo && { owner: bufferInfo.owner, data: bufferInfo.data }, {
+    address: EXPECTED_BUFFER,
+    authority: vault,
+    programLength: EXPECTED_BUFFER_PROGRAM_LENGTH,
+    programSha256: EXPECTED_BUFFER_PROGRAM_SHA256,
+  });
+  if (bufferIssues.length > 0) {
+    throw new Error(`Buffer ${EXPECTED_BUFFER.toBase58()} is niet de verwachte RC-build:\n  - ${bufferIssues.join("\n  - ")}\nNIET UITVOEREN.`);
+  }
+  console.log(
+    `Buffer ${EXPECTED_BUFFER.toBase58()}: authority de vault, sha256 ${EXPECTED_BUFFER_PROGRAM_SHA256} over ${EXPECTED_BUFFER_PROGRAM_LENGTH} bytes, rest nul.`
+  );
 
   // --- Actuele on-chain tijd: Clock-sysvar, NIET Date.now() / getBlockTime() ---
   const clockInfo = await connection.getAccountInfo(CLOCK_SYSVAR);

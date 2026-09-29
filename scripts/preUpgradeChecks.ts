@@ -17,8 +17,14 @@ import * as path from "path";
 //
 // Sectie 167 (review §162): de invariant-stap krijgt de modus mee; --post
 // vereist EXECUTE_SIGNATURE (de uitvoertransactie), zodat de controle
-// aantoonbaar een staat van ná de deploy leest. Beide stappen weigeren een
-// andere cluster dan devnet (genesis-hash).
+// aantoonbaar een staat van ná de deploy leest. --pre is alleen begrensd tot
+// ná de vorige deploy, geen versheidsgarantie (sectie 168). Beide stappen
+// weigeren een andere cluster dan devnet volgens de genesis-hash die de RPC
+// opgeeft (geen absolute garantie tegen een devnet-fork-simulator).
+//
+// Sectie 168 (review §167): stap 1 toetst ook dat geen ander goedgekeurd
+// voorstel deze buffer raakt (dezelfde regel als knop 4 van de adminpagina)
+// en de buffer zelf (authority de vault, sha256 = de RC-build).
 //
 // Leesalleen; stuurt nooit een transactie.
 //
@@ -38,7 +44,7 @@ interface Step {
 }
 
 const TIMELOCK: Step = {
-  name: "timelock verstreken, laatste voorstel, precies deze upgrade",
+  name: "timelock verstreken, enige goedgekeurde en laatste voorstel, precies deze upgrade en buffer",
   script: "scripts/checkProposalTimelock.ts",
   args: [],
 };

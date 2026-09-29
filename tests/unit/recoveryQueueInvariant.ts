@@ -6,7 +6,7 @@ import {
   findInvariantViolations,
   ProgramAccountBytes,
   ProgramScanResult,
-} from "../scripts/lib/recoveryQueueInvariant";
+} from "../../scripts/lib/recoveryQueueInvariant";
 
 /**
  * STATUS.md sectie 161: unittest (geen validator) van de decodeer- en

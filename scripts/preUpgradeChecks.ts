@@ -15,10 +15,15 @@ import * as path from "path";
 //           (de timelock-check hoort hier niet: het voorstel staat dan op
 //           Executed, en dat script faalt daar terecht op.)
 //
+// Sectie 167 (review §162): de invariant-stap krijgt de modus mee; --post
+// vereist EXECUTE_SIGNATURE (de uitvoertransactie), zodat de controle
+// aantoonbaar een staat van ná de deploy leest. Beide stappen weigeren een
+// andere cluster dan devnet (genesis-hash).
+//
 // Leesalleen; stuurt nooit een transactie.
 //
 //   TRANSACTION_INDEX=<n> npx ts-node --transpile-only scripts/preUpgradeChecks.ts --pre
-//   npx ts-node --transpile-only scripts/preUpgradeChecks.ts --post
+//   EXECUTE_SIGNATURE=<handtekening> npx ts-node --transpile-only scripts/preUpgradeChecks.ts --post
 //
 // Exit-code: 0 = alle stappen groen; anders de exit-code van de eerste
 // stap die faalde (of 2 bij een fout in de aanroep zelf).
@@ -29,10 +34,19 @@ const TS_NODE = path.join(ROOT, "node_modules", ".bin", "ts-node");
 interface Step {
   name: string;
   script: string;
+  args: string[];
 }
 
-const TIMELOCK: Step = { name: "timelock van het voorstel verstreken", script: "scripts/checkProposalTimelock.ts" };
-const INVARIANT: Step = { name: "recovery-/wachtrij-invariant", script: "scripts/checkRecoveryQueueInvariant.ts" };
+const TIMELOCK: Step = {
+  name: "timelock verstreken, laatste voorstel, precies deze upgrade",
+  script: "scripts/checkProposalTimelock.ts",
+  args: [],
+};
+const invariant = (mode: string): Step => ({
+  name: "recovery-/wachtrij-invariant",
+  script: "scripts/checkRecoveryQueueInvariant.ts",
+  args: [mode],
+});
 
 function fail(message: string): never {
   console.error(`preUpgradeChecks: ${message}`);
@@ -49,14 +63,17 @@ function main(): number {
     if (!process.env.TRANSACTION_INDEX) {
       fail("--pre vereist TRANSACTION_INDEX (het nummer van het voorstel dat uitgevoerd gaat worden)");
     }
-    steps = [TIMELOCK, INVARIANT];
+    steps = [TIMELOCK, invariant(mode)];
   } else {
-    steps = [INVARIANT];
+    if (!process.env.EXECUTE_SIGNATURE) {
+      fail("--post vereist EXECUTE_SIGNATURE (de handtekening van de uitvoertransactie)");
+    }
+    steps = [invariant(mode)];
   }
 
   for (const [i, step] of steps.entries()) {
     console.log(`\n=== ${mode} stap ${i + 1}/${steps.length}: ${step.name} (${step.script}) ===`);
-    const run = spawnSync(TS_NODE, ["--transpile-only", step.script], { cwd: ROOT, stdio: "inherit", env: process.env });
+    const run = spawnSync(TS_NODE, ["--transpile-only", step.script, ...step.args], { cwd: ROOT, stdio: "inherit", env: process.env });
     if (run.error) fail(`${step.script} kon niet gestart worden: ${run.error.message}`);
     const code = run.status ?? 1;
     if (code !== 0) {

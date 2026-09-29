@@ -1,4 +1,16 @@
 import { Connection, PublicKey } from "@solana/web3.js";
+import { DEVNET_RPC_URL, exitUnlessDevnet } from "./lib/devnetCluster";
+import {
+  APPROVED_TAG,
+  decodeMultisigHeader,
+  decodeProposalHeader,
+  decodeVaultTransaction,
+  PROPOSAL_STATUS_NAMES,
+  proposalPda,
+  SQUADS_PROGRAM_ID,
+  transactionPda,
+  upgradeProposalProblems,
+} from "./lib/squadsUpgradeProposal";
 
 // Stap 1 van de pre-flight vóór "4. Uitvoeren" - MOET vóór de andere drie
 // stappen (sessie-check, voorstel/buffer-check, adminpagina-check) en MOET
@@ -20,90 +32,132 @@ import { Connection, PublicKey } from "@solana/web3.js";
 // dat het de timelock toetst bij uitvoering, dus de enige "actuele tijd" die
 // er echt toe doet.
 //
+// STATUS.md sectie 167 (review §162): het script bewijst nu ook WELK voorstel
+// het toetst, niet alleen dat "een" voorstel uitvoerbaar is.
+// - M-1: eerst de genesis-hash; alleen devnet (exit 2 bij een andere cluster).
+//   RPC_URL mag een andere devnet-node kiezen, dezelfde variabele als
+//   checkRecoveryQueueInvariant.ts, zodat beide stappen dezelfde node lezen.
+// - M-3: TRANSACTION_INDEX moet het LAATSTE voorstel zijn
+//   (multisig.transactionIndex), niet verouderd (> staleTransactionIndex),
+//   en de VaultTransaction moet precies de upgrade van PROGRAM_ID vanaf
+//   EXPECTED_BUFFER zijn, met de vault als authority en spill. Squads voert
+//   een goedgekeurde vault-transactie ook uit als hij stale is, dus
+//   "verlopen" is geen vangnet; dit script wel.
+// - L-1: geen standaardvoorstel meer; zonder TRANSACTION_INDEX exit 2.
+// - L-2: owner-controle op het multisig-, proposal- en transactie-account.
+//
 // Geen @sqds/multisig-dependency nodig (bewust, zelfde reden als
 // checkWorstCaseAccountSafety.ts: geen anchor-build, geen nieuwe dependency
-// in het hoofdproject) - alle byte-offsets hieronder zijn rechtstreeks
-// overgenomen uit @sqds/multisig's GEGENEREERDE beet-structuurdefinities
-// (node_modules/@sqds/multisig/src/generated/accounts/{Multisig,Proposal}.ts),
-// niet aangenomen. PDA-seeds idem, overgenomen uit src/pda.ts.
+// in het hoofdproject) - de layouts staan in scripts/lib/squadsUpgradeProposal.ts,
+// overgenomen uit @sqds/multisig's GEGENEREERDE beet-structuurdefinities en
+// getest tegen echte devnet-accounts.
+//
+//   TRANSACTION_INDEX=<n> npx ts-node --transpile-only scripts/checkProposalTimelock.ts
+//
+// Exit-code: 0 = uitvoerbaar voorstel voor precies deze upgrade; 1 = niet
+// (of fout); 2 = verkeerde aanroep of een andere cluster dan devnet.
 
-const SQUADS_PROGRAM_ID = new PublicKey("SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf");
+const RPC_URL = process.env.RPC_URL ?? DEVNET_RPC_URL;
 const MULTISIG_PDA = new PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
 const CLOCK_SYSVAR = new PublicKey("SysvarC1ock11111111111111111111111111111111");
+const PROGRAM_ID = new PublicKey("9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9");
+const PROGRAM_DATA = new PublicKey("5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq");
+const VAULT_INDEX = 0;
+// Per upgrade bijwerken, in dezelfde commit als de STATUS-sectie die de
+// buffer vastlegt. Upgrade 1: sectie 163 (build 33598b…, keypair uit de
+// tweede run).
+const EXPECTED_BUFFER = new PublicKey("F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5");
 
-// Pas aan per voorstel dat gecontroleerd wordt, of geef TRANSACTION_INDEX
-// mee als omgevingsvariabele. scripts/preUpgradeChecks.ts (sectie 162) eist
-// die variabele, zodat de wrapper nooit stil een oud voorstelnummer toetst.
+function usage(message: string): never {
+  console.error(`checkProposalTimelock: ${message}`);
+  process.exit(2);
+}
+
 const TRANSACTION_INDEX = (() => {
   const fromEnv = process.env.TRANSACTION_INDEX;
-  if (fromEnv === undefined) return 11n;
-  if (!/^[0-9]+$/.test(fromEnv)) throw new Error(`TRANSACTION_INDEX "${fromEnv}" is geen niet-negatief geheel getal.`);
+  if (fromEnv === undefined || fromEnv === "") usage("TRANSACTION_INDEX ontbreekt (het nummer van het voorstel dat uitgevoerd gaat worden).");
+  if (!/^[0-9]+$/.test(fromEnv)) usage(`TRANSACTION_INDEX "${fromEnv}" is geen niet-negatief geheel getal.`);
   return BigInt(fromEnv);
 })();
 
-const MULTISIG_DISCRIMINATOR = Buffer.from([224, 116, 121, 186, 68, 161, 79, 236]);
-const PROPOSAL_DISCRIMINATOR = Buffer.from([26, 94, 189, 187, 116, 136, 53, 33]);
-
-// ProposalStatus-dataEnum-tag-volgorde (types/ProposalStatus.ts, 1-byte tag,
-// index = volgorde in het variants-array dat aan beet.dataEnum() wordt
-// gegeven): Draft=0, Active=1, Rejected=2, Approved=3, Executing=4,
-// Executed=5, Cancelled=6. Alleen Draft/Active/Rejected/Approved/Executed/
-// Cancelled hebben een { timestamp: i64 } payload; Executing heeft geen payload.
-const STATUS_NAMES = ["Draft", "Active", "Rejected", "Approved", "Executing", "Executed", "Cancelled"];
-const APPROVED_TAG = 3;
-
-function u64le(n: bigint): Buffer {
-  const b = Buffer.alloc(8);
-  b.writeBigUInt64LE(n);
-  return b;
+function requireSquadsOwner(name: string, address: PublicKey, owner: PublicKey) {
+  if (!owner.equals(SQUADS_PROGRAM_ID)) {
+    throw new Error(`${name} ${address.toBase58()} is niet van het Squads-programma (owner ${owner.toBase58()}).`);
+  }
 }
 
 async function main() {
-  const connection = new Connection("https://api.devnet.solana.com", "confirmed");
+  const connection = new Connection(RPC_URL, "confirmed");
+  await exitUnlessDevnet(connection, RPC_URL);
 
-  // --- Multisig-account: timeLock rechtstreeks decoderen ---
+  // --- Multisig-account ---
   const multisigInfo = await connection.getAccountInfo(MULTISIG_PDA);
   if (!multisigInfo) throw new Error(`Multisig-account ${MULTISIG_PDA.toBase58()} niet gevonden.`);
-  if (!multisigInfo.data.subarray(0, 8).equals(MULTISIG_DISCRIMINATOR)) {
-    throw new Error("Multisig-account discriminator komt niet overeen - verkeerd account of programma-layout gewijzigd.");
-  }
-  // Layout: disc(8) + createKey(32) + configAuthority(32) + threshold(u16,2) + timeLock(u32,4) + ...
-  const threshold = multisigInfo.data.readUInt16LE(72);
-  const timeLockSeconds = multisigInfo.data.readUInt32LE(74);
-  console.log(`Multisig: threshold=${threshold}, timeLock=${timeLockSeconds}s (${(timeLockSeconds / 3600).toFixed(2)}u)`);
-
-  // --- Proposal-PDA afleiden en account rechtstreeks decoderen ---
-  const [proposalPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("multisig"), MULTISIG_PDA.toBytes(), Buffer.from("transaction"), u64le(TRANSACTION_INDEX), Buffer.from("proposal")],
-    SQUADS_PROGRAM_ID
+  requireSquadsOwner("Multisig-account", MULTISIG_PDA, multisigInfo.owner);
+  const multisig = decodeMultisigHeader(multisigInfo.data);
+  if (typeof multisig === "string") throw new Error(`Multisig-account: ${multisig}`);
+  console.log(
+    `Multisig: threshold=${multisig.threshold}, timeLock=${multisig.timeLockSeconds}s (${(multisig.timeLockSeconds / 3600).toFixed(2)}u), ` +
+      `transactionIndex=${multisig.transactionIndex}, staleTransactionIndex=${multisig.staleTransactionIndex}`
   );
-  console.log(`\nProposal #${TRANSACTION_INDEX} PDA = ${proposalPda.toBase58()}`);
 
-  const proposalInfo = await connection.getAccountInfo(proposalPda);
-  if (!proposalInfo) throw new Error(`Proposal-account ${proposalPda.toBase58()} niet gevonden.`);
-  if (!proposalInfo.data.subarray(0, 8).equals(PROPOSAL_DISCRIMINATOR)) {
-    throw new Error("Proposal-account discriminator komt niet overeen - verkeerd account of programma-layout gewijzigd.");
+  if (TRANSACTION_INDEX !== multisig.transactionIndex) {
+    throw new Error(
+      `TRANSACTION_INDEX ${TRANSACTION_INDEX} is niet het laatste voorstel (multisig.transactionIndex = ${multisig.transactionIndex}). ` +
+        `NIET UITVOEREN: controleer welk voorstel bedoeld is.`
+    );
   }
-  // Layout: disc(8) + multisig(32) + transactionIndex(u64,8) + status(tag u8 + payload) + ...
-  const proposalMultisig = new PublicKey(proposalInfo.data.subarray(8, 40));
-  if (!proposalMultisig.equals(MULTISIG_PDA)) {
-    throw new Error(`Proposal.multisig (${proposalMultisig.toBase58()}) komt niet overeen met verwachte multisig (${MULTISIG_PDA.toBase58()}).`);
+  if (TRANSACTION_INDEX <= multisig.staleTransactionIndex) {
+    throw new Error(`Voorstel #${TRANSACTION_INDEX} is stale (staleTransactionIndex = ${multisig.staleTransactionIndex}).`);
   }
-  const proposalTxIndex = proposalInfo.data.readBigUInt64LE(40);
-  if (proposalTxIndex !== TRANSACTION_INDEX) {
-    throw new Error(`Proposal.transactionIndex (${proposalTxIndex}) komt niet overeen met verwachte index (${TRANSACTION_INDEX}).`);
-  }
-  const statusTag = proposalInfo.data.readUInt8(48);
-  const statusName = STATUS_NAMES[statusTag] ?? `onbekend(${statusTag})`;
 
-  if (statusTag !== APPROVED_TAG) {
+  // --- Proposal-account ---
+  const proposalAddress = proposalPda(MULTISIG_PDA, TRANSACTION_INDEX);
+  console.log(`\nProposal #${TRANSACTION_INDEX} PDA = ${proposalAddress.toBase58()}`);
+  const proposalInfo = await connection.getAccountInfo(proposalAddress);
+  if (!proposalInfo) throw new Error(`Proposal-account ${proposalAddress.toBase58()} niet gevonden.`);
+  requireSquadsOwner("Proposal-account", proposalAddress, proposalInfo.owner);
+  const proposal = decodeProposalHeader(proposalInfo.data);
+  if (typeof proposal === "string") throw new Error(`Proposal-account: ${proposal}`);
+  if (!proposal.multisig.equals(MULTISIG_PDA)) {
+    throw new Error(`Proposal.multisig (${proposal.multisig.toBase58()}) komt niet overeen met verwachte multisig (${MULTISIG_PDA.toBase58()}).`);
+  }
+  if (proposal.transactionIndex !== TRANSACTION_INDEX) {
+    throw new Error(`Proposal.transactionIndex (${proposal.transactionIndex}) komt niet overeen met verwachte index (${TRANSACTION_INDEX}).`);
+  }
+  const statusName = PROPOSAL_STATUS_NAMES[proposal.statusTag];
+  if (proposal.statusTag !== APPROVED_TAG || proposal.statusTimestamp === null) {
     throw new Error(
       `Proposal #${TRANSACTION_INDEX} staat op status "${statusName}", niet "Approved". ` +
         `Timelock-check niet van toepassing - uitvoeren nu sowieso niet mogelijk.`
     );
   }
-  const approvedAtUnix = proposalInfo.data.readBigInt64LE(49); // i64 LE, seconden sinds epoch
+  const approvedAtUnix = proposal.statusTimestamp; // i64, seconden sinds epoch
   console.log(`Proposal #${TRANSACTION_INDEX}: status=${statusName}, goedgekeurd op unix=${approvedAtUnix} (${new Date(Number(approvedAtUnix) * 1000).toISOString()})`);
+
+  // --- VaultTransaction: is dit precies de bedoelde upgrade? ---
+  const transactionAddress = transactionPda(MULTISIG_PDA, TRANSACTION_INDEX);
+  const transactionInfo = await connection.getAccountInfo(transactionAddress);
+  if (!transactionInfo) throw new Error(`VaultTransaction-account ${transactionAddress.toBase58()} niet gevonden.`);
+  requireSquadsOwner("VaultTransaction-account", transactionAddress, transactionInfo.owner);
+  const vaultTransaction = decodeVaultTransaction(transactionInfo.data);
+  if (typeof vaultTransaction === "string") throw new Error(`VaultTransaction-account: ${vaultTransaction}`);
+  const problems = upgradeProposalProblems(vaultTransaction, {
+    multisig: MULTISIG_PDA,
+    transactionIndex: TRANSACTION_INDEX,
+    vaultIndex: VAULT_INDEX,
+    programId: PROGRAM_ID,
+    programData: PROGRAM_DATA,
+    buffer: EXPECTED_BUFFER,
+  });
+  if (problems.length > 0) {
+    throw new Error(
+      `Voorstel #${TRANSACTION_INDEX} is niet precies de upgrade van ${PROGRAM_ID.toBase58()} vanaf buffer ${EXPECTED_BUFFER.toBase58()}:\n  - ` +
+        problems.join("\n  - ") +
+        `\nNIET UITVOEREN.`
+    );
+  }
+  console.log(`VaultTransaction #${TRANSACTION_INDEX}: alleen Upgrade van ${PROGRAM_ID.toBase58()} vanaf buffer ${EXPECTED_BUFFER.toBase58()}, authority en spill de vault.`);
 
   // --- Actuele on-chain tijd: Clock-sysvar, NIET Date.now() / getBlockTime() ---
   const clockInfo = await connection.getAccountInfo(CLOCK_SYSVAR);
@@ -115,7 +169,7 @@ async function main() {
   console.log(`\nClock-sysvar: slot=${chainSlot}, unix_timestamp=${chainUnixNow} (${new Date(Number(chainUnixNow) * 1000).toISOString()})`);
 
   // --- Vergelijking ---
-  const executableAtUnix = approvedAtUnix + BigInt(timeLockSeconds);
+  const executableAtUnix = approvedAtUnix + BigInt(multisig.timeLockSeconds);
   console.log(`\nUitvoerbaar vanaf (goedkeuring + timeLock): unix=${executableAtUnix} (${new Date(Number(executableAtUnix) * 1000).toISOString()})`);
 
   if (chainUnixNow < executableAtUnix) {

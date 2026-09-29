@@ -15953,3 +15953,208 @@ verificaties van sectie 95; daarna het actiepunt voor `5MoXqgBD…` uit sectie 1
 
 Volgende stap: het ingevulde upgradevoorstel volgens het sjabloon, eerst als concept ter
 goedkeuring.
+
+## 167. Reparatieronde na de review van sectie 162: alleen devnet, een aantoonbaar verse staat, precies dit voorstel (2026-09-29)
+
+Onafhankelijke review (verse sessie, 2026-09-28) van de pre-flight-poort zoals die na
+secties 161-162 op `main` stond (`6014f61` + `63e993a`): `checkRecoveryQueueInvariant.ts`,
+`lib/recoveryQueueInvariant.ts`, `preUpgradeChecks.ts`, `checkProposalTimelock.ts` en de
+tests. Oordeel: de beslislogica houdt stand (geen staat gevonden die bij een volledig,
+eerlijk devnet-antwoord ten onrechte groen geeft), maar als harde poort nog niet klaar, om
+drie redenen daaromheen:
+
+- **M-1** de poort kon een andere cluster lezen: de invariant-check volgde `RPC_URL`, de
+  timelock-check niet. Een lokale test-validator heeft hetzelfde programma-ID en genoeg
+  wallets; `--pre` kon dan groen zijn zonder dat devnet gecontroleerd was;
+- **M-2** geen eis aan de versheid van de gelezen staat: `--post` moet het venster tot en
+  met de deploy afdekken, maar een achterlopende node kon een staat van vóór de deploy
+  teruggeven;
+- **M-3** `TRANSACTION_INDEX` was niet gebonden aan de inhoud: elk goedgekeurd voorstel
+  met verstreken timelock gaf groen, ook een ander dan het bedoelde (typefout, of een van
+  de oude Active-voorstellen #1-4, 6, 7, 9 als dat ooit goedgekeurd wordt). Squads voert
+  een goedgekeurde vault-transactie ook uit als hij stale is: "verlopen" is geen vangnet.
+
+Plus L-1 t/m L-5 en ontbrekende tests. Deze sectie lost M-1, M-2, M-3, L-1 en L-2 op; L-3,
+L-4, L-5 en de rest van de tests staan als open punt voor upgrade 2 (punt 9), met akkoord
+van de reviewer. Geen wijziging aan het programma: alleen scripts, tests, `Anchor.toml` en
+documentatie.
+
+### 1. M-1: alleen devnet, op de genesis-hash
+
+Nieuw `scripts/lib/devnetCluster.ts`. De eerste RPC-aanroep van beide scripts is
+`getGenesisHash()`; alles behalve devnet (`EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`,
+gelezen 2026-09-29) geeft exit 2 met "CLUSTER GEWEIGERD", vóór er iets anders gelezen
+wordt. `checkProposalTimelock.ts` volgt daardoor nu ook `RPC_URL` (standaard devnet):
+beide stappen lezen van dezelfde node, en welke node dat ook is, het moet devnet zijn.
+
+### 2. M-2: de scan moet na een bekende referentieslot gelezen zijn
+
+Nieuw `scripts/lib/programDeploySlot.ts`. `checkRecoveryQueueInvariant.ts` krijgt een
+verplichte modus (`--pre` of `--post`, anders exit 2; de wrapper geeft hem mee):
+
+- **referentieslot**: de `last_deploy_slot` uit de ProgramData-kop van `9ma6…` (eigenaar,
+  tags en lengte gecontroleerd). Bij `--post` bovendien `EXECUTE_SIGNATURE`: de
+  uitvoertransactie moet bij deze node bekend zijn, geslaagd, minstens `confirmed`, en
+  precies op de `last_deploy_slot` staan die dezelfde node teruggeeft. Een node die de
+  deploy nog niet gezien heeft, geeft een oudere `last_deploy_slot` en valt zo af, ook als
+  hij de handtekening wel kent;
+- beide `getProgramAccounts`-aanroepen krijgen `minContextSlot = referentie + 1`, en hun
+  `context.slot` wordt daarna zelf gecontroleerd (strikt groter), zodat ook een node die
+  `minContextSlot` negeert geen oude staat als groen kan laten tellen;
+- elke afwijking: exit 2 ("CONTROLE ONBETROUWBAAR").
+
+Eerlijk restrisico: `--pre` is zo alleen begrensd tot ná de vorige deploy (nu slot
+501.303.135). Een node die daarna achterloopt, herkent `--pre` niet; zonder een tweede,
+onafhankelijke bron is dat binnen één node niet te zien. `--post` dekt dat venster wel
+aantoonbaar af, en is daarom verplicht.
+
+`preUpgradeChecks.ts --post` weigert nu zonder `EXECUTE_SIGNATURE` (exit 2, vóór er iets
+draait).
+
+### 3. M-3: precies het laatste voorstel, en precies deze upgrade
+
+Nieuw `scripts/lib/squadsUpgradeProposal.ts`: begrensde decoders voor Multisig, Proposal
+en VaultTransaction (layouts uit @sqds/multisig 2.1.4, `src/generated/…`; PDA-seeds uit
+`src/pda.ts`), getest tegen de echte accounts. `checkProposalTimelock.ts` eist nu, in
+deze volgorde:
+
+1. `TRANSACTION_INDEX` == `multisig.transactionIndex` (het laatste voorstel) en
+   `> staleTransactionIndex`;
+2. het Proposal-account: van Squads, juiste multisig en index, status Approved;
+3. het VaultTransaction-account: van Squads, exact en volledig gedecodeerd (bytes over =
+   afwijking), en **precies één** instructie: `Upgrade` (`03000000`) van de upgradeable
+   loader, met als accounts programdata `5bqc…`, programma `9ma6…`, buffer
+   `EXPECTED_BUFFER` (upgrade 1: `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5`, sectie
+   163), spill de vault, rent, clock, authority de vault; de vault als enige
+   ondertekenaar; geen ephemeral signers, geen address lookup tables;
+4. pas dan de timelock tegen de Clock-sysvar (ongewijzigd).
+
+Alles daarbuiten is een afwijking, ook als het onschuldig zou kunnen zijn. De eisen volgen
+de vorm die `admin/wallet-signer.html` bouwt en die #11, #13 en #14 on-chain hebben (alle
+drie 346 bytes, identieke structuur, 2026-09-29 gelezen). `EXPECTED_BUFFER` is per upgrade
+bij te werken; het sjabloon heeft daar een eigen stap voor (1.5).
+
+### 4. L-1 en L-2
+
+- L-1: geen standaardvoorstel meer (was #11). Zonder of met een lege `TRANSACTION_INDEX`:
+  exit 2.
+- L-2: owner-controle (Squads-programma) op het multisig-, proposal- en
+  VaultTransaction-account.
+
+### 5. Licht testpad zonder validator
+
+`yarn test:unit` (`.mocharc.unit.yml`, spec `tests/unit/**/*.ts`) draait zonder de
+bewakers uit `.mocharc.yml` (binary-versheid, validatortype), die voor tests op een
+validator bedoeld zijn. Dat is alleen verantwoord zolang niets in `tests/unit/` een
+validator of cluster aanspreekt: `tests/unit/unitPathIsPure.ts` weigert elk bestand daar
+dat Anchor of de validator-helpers importeert, een vast RPC-adres noemt of zelf een
+`Connection` maakt. Dezelfde bestanden draaien ook mee in `yarn test`, mét de bewakers.
+
+- `tests/unit/recoveryQueueInvariant.ts`: verplaatst uit `tests/` (inhoud ongewijzigd,
+  alleen het importpad);
+- `tests/unit/preflightLogic.ts`: de drie libs op **echte devnet-bytes**
+  (`tests/unit/fixtures/devnetSquads20260929.json`: genesis-hash, programma-account,
+  ProgramData-kop, multisig, proposal #13, VaultTransactions #11 en #13, ongewijzigd en
+  read-only gelezen). Groen-anker: het echt uitgevoerde voorstel #13 keurt de toets goed
+  tegen zijn eigen buffer `HRcc…`, en wordt afgewezen op de buffer, en alleen daarop,
+  zodra `F5nh9UdF…` verwacht wordt;
+- `tests/unit/preflightScripts.ts` + `fakeDevnetRpc.ts`: de échte scripts als subprocess
+  tegen een lokale nep-JSON-RPC, per afwijking exit-code **en** reden (exit 2 is ook wat
+  een crash geeft; de code alleen bewijst niets).
+
+Dit lost de "ontbrekende tests"-bevinding deels op: de timelock-check, de wrapper en de
+bedrading van de invariant-check hebben nu tests.
+
+### 6. Rood vóór groen
+
+Eerst de nieuwe scenario-tests tegen de ongewijzigde scripts van `825b664`. Voor de
+timelock-check alleen de URL-regel tijdelijk op `RPC_URL` gezet (die volgde het script
+niet, en las anders het echte devnet: een "rood" om de verkeerde reden), daarna
+teruggezet.
+
+| Scenario (nep-RPC) | Oud | Nieuw |
+|---|---|---|
+| Invariant `--pre`, andere cluster, schone staat | GROEN, exit 0 | exit 2, CLUSTER GEWEIGERD |
+| Timelock, andere cluster, verder geldig voorstel | TIMELOCK VERSTREKEN, exit 0 | exit 2, CLUSTER GEWEIGERD |
+| `--post`, node zag de deploy niet (`last_deploy_slot` 1000, uitvoerslot 2000) | GROEN, exit 0 | exit 2 |
+| `--post`, context.slot == uitvoerslot, node negeert `minContextSlot` | GROEN, exit 0 | exit 2 |
+| `--post`, onbekende uitvoertransactie / geen `EXECUTE_SIGNATURE` | GROEN, exit 0 | exit 2 |
+| `--pre`, context.slot == `last_deploy_slot` | GROEN, exit 0 | exit 2 |
+| Timelock `TRANSACTION_INDEX=13`, #15 is het laatste | TIMELOCK VERSTREKEN, exit 0 | exit 1, niet het laatste voorstel |
+| Timelock #15 met de buffer van #13 | TIMELOCK VERSTREKEN, exit 0 | exit 1, `buffer: HRcc…, verwacht F5nh…` |
+| Timelock, proposal-account niet van Squads | TIMELOCK VERSTREKEN, exit 0 | exit 1 |
+| Timelock zonder `TRANSACTION_INDEX` | toetste stil #11 | exit 2 |
+| Wrapper `--pre` met #13 terwijl #15 het laatste is | stap 1 groen | exit 1, stap 2 draait niet |
+
+Groen blijft groen: `--pre` na de laatste deploy, `--post` na de uitvoerslot, de wrapper
+`--pre` van begin tot eind (beide stappen, dezelfde node), en een treffer (recovery +
+wachtende actie) blijft exit 1. `yarn test:unit`: 61 passing.
+
+### 7. Bijvangst: `yarn test` draaide stil alleen `tests/unit/`
+
+De eerste regressierun gaf voor `yarn test` exit 0 in 20 seconden, met 61 tests in plaats
+van de hele suite. Oorzaak: `Anchor.toml` gaf `${TEST_GLOB:-tests/**/*.ts}` zonder
+aanhalingstekens aan de shell. Zonder `globstar` leest bash `**` als `*`. Tot nu toe matchte
+`tests/*/*.ts` niets en kwam het patroon letterlijk bij mocha, die het wél recursief
+uitbreidt. Met de submap `tests/unit/` matcht het wel: de shell breidt uit tot alleen die
+bestanden, en de rest van de suite viel weg, zonder fout. Opgelost door het patroon tussen
+aanhalingstekens te zetten (mocha breidt uit); commentaar in `Anchor.toml`. Een latente val:
+elke toekomstige submap in `tests/` had hetzelfde gedaan. `TEST_GLOB=…`-runs
+(`test:pending-action`, `test:spend-window-rollover`) raakte dit niet.
+
+### 8. Live, read-only tegen devnet (2026-09-29)
+
+Alleen lezen, geen transactie.
+
+| Aanroep | Uitkomst |
+|---|---|
+| `checkRecoveryQueueInvariant.ts --pre` | exit 0: referentieslot 501.303.135, gelezen op 505.475.537; 50 programma-accounts, 19/19 wallets en vaults, 0 PendingActions, 1 wallet in recovery (`5MoXqgBD…`) |
+| idem `--post`, `EXECUTE_SIGNATURE` = de uitvoertransactie van de laatste deploy (`3asvBNTB…`, slot 501.303.135, finalized) | exit 0: slot gelijk aan `last_deploy_slot` |
+| `--pre` met `RPC_URL` = mainnet-beta | exit 2, CLUSTER GEWEIGERD |
+| `checkProposalTimelock.ts` zonder index | exit 2 |
+| `TRANSACTION_INDEX=13` | exit 1: niet het laatste voorstel (`transactionIndex` 14) |
+| `TRANSACTION_INDEX=14` | exit 1: status Rejected |
+| `RPC_URL` = testnet | exit 2, CLUSTER GEWEIGERD |
+| `preUpgradeChecks.ts --post` zonder / met de handtekening | exit 2 / exit 0 |
+| `preUpgradeChecks.ts --pre` met #14 | exit 1 in stap 1, stap 2 draait niet |
+
+Een groene `--pre` tegen het echte devnet kan pas als voorstel #15 bestaat, goedgekeurd is
+en de 72u verstreken zijn.
+
+### 9. Regressie
+
+| Suite | Uitkomst | Baseline (sectie 163) |
+|---|---|---|
+| `cargo test` | 13/0 | 13/0 |
+| `yarn test` (glob tussen aanhalingstekens) | 186 passing, 119 pending, 0 failing | 145/119/0; verschil = +61 in `tests/unit/` min de 20 verplaatste tests uit `tests/recoveryQueueInvariant.ts` |
+| `yarn test:pending-action` | 116/0 (1 pending) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 | 117/0 |
+| `yarn test:unit` | 61/0 | nieuw |
+
+De eerste `yarn test`-run (vóór de fix van punt 7) gaf exit 0 met alleen de 61 tests uit
+`tests/unit/`; die telt niet. Geen enkele test in de suite is gewijzigd behalve het
+importpad van de verplaatste test.
+
+### 10. Open punten
+
+Voor upgrade 2 (akkoord van de reviewer; niet nu gebouwd):
+- **L-3** dubbele adressen in het RPC-antwoord tellen mee (één wallet + vault 19x herhaald
+  gaf groen met telling 19/19): dubbele adressen als tellingsprobleem weigeren;
+- **L-4** de ondergrens `MIN_WALLET_ACCOUNTS = 19` wordt zwakker zodra devnet groeit: een
+  tegencontrole op de aantallen PasskeysAccount en PolicyAccount toevoegen;
+- **L-5** accounts van het programma met een onbekende discriminator worden stil
+  overgeslagen: als tellingsprobleem melden;
+- **tests**: ongeldige recovery-/deposit-tag, een wallet met een verkeerde owner waar een
+  PendingAction naar verwijst, een 124-byte-PendingAction bij recovery Some, en de L-3/L-5-
+  gevallen zodra die gebouwd zijn.
+
+Voor upgrade 1, vóór het voorstel (aanvulling op sectie 166):
+- `BUFFER` in `admin/wallet-signer.html` staat nog op `HRcc…` (buffer van #13). Die moet op
+  `F5nh9UdF…`, anders bouwt de pagina een voorstel dat `checkProposalTimelock.ts` nu terecht
+  afwijst (sjabloon stap 1.5);
+- de oude Active-voorstellen (#1-4, 6, 7, 9) kunnen de poort niet meer passeren (alleen het
+  laatste nummer telt), maar ze kunnen nog steeds goedgekeurd en uitgevoerd worden. Opruimen
+  (annuleren of afwijzen) is hygiëne, geen voorwaarde;
+- **sectie 167 zelf is door de sessie gebouwd die ook de review van 162 deed.** Volgens de
+  afgesproken volgorde (sectie 166 punt 1) hoort er een review door een verse sessie bij,
+  of een expliciet besluit dat die niet nodig is.

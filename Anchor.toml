@@ -13,7 +13,11 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 ${TEST_GLOB:-tests/**/*.ts}"
+# Glob tussen aanhalingstekens (STATUS.md sectie 167): mocha moet hem
+# uitbreiden, niet de shell. Zonder globstar leest de shell `**` als `*`;
+# zodra er een submap in tests/ staat (tests/unit/), matcht `tests/*/*.ts`
+# en draaide alleen die submap - de rest van de suite viel stil weg, exit 0.
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"${TEST_GLOB:-tests/**/*.ts}\""
 
 [hooks]
 

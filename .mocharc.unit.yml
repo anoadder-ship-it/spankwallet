@@ -1,0 +1,9 @@
+# STATUS.md sectie 167: licht testpad voor pure logica en de pre-flight-
+# scripts tegen een nep-RPC, zonder validator. Bewust ZONDER de require-
+# bewakers uit .mocharc.yml (binary-versheid, validatortype): die gelden voor
+# tests die het programma op een validator draaien, en precies die horen
+# niet in tests/unit/ (tests/unit/unitPathIsPure.ts bewaakt dat). De
+# bestanden in tests/unit/ vallen ook onder tests/**/*.ts, dus `yarn test`
+# draait ze daarnaast mét die bewakers.
+spec: tests/unit/**/*.ts
+timeout: 120000

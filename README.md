@@ -130,7 +130,7 @@ client/                      - Vite/TS-testpagina (passkey + Phantom), 20 testst
   src/executeAdvanced.ts          - execute_advanced (CPI naar toegestane programma's)
   src/passkeys.ts                 - multi-passkey (add/remove_passkey)
   src/sessionKeys.ts               - session keys, alle 7 instructies
-tests/                        - Anchor-tests (145 passing, 119 pending, 0 failing - `npm test`, 2026-09-26)
+tests/                        - Anchor-tests (186 passing, 119 pending, 0 failing - `npm test`, 2026-09-29)
   spankwallet.ts                 - init_wallet
   policy.ts                       - programma-allowlist + execute_advanced
   passkeys.ts                      - multi-passkey + finalize_recovery-wipe
@@ -147,7 +147,11 @@ tests/                        - Anchor-tests (145 passing, 119 pending, 0 failin
   migrateWalletAccountValidator.ts             - eigen test-validator met vooraf geplaatste accounts (gebruikt door cancelActionLegacyLayout.ts)
   cancelActionLegacyLayout.ts                   - cancel_action op een PendingAction in de oude 124-byte-layout
   staleEpochFixture.ts                           - PendingActionStaleEpoch in finalize/confirm, via genesis-fixtures (sectie 161)
-  recoveryQueueInvariant.ts                       - beslislogica van scripts/checkRecoveryQueueInvariant.ts, incl. tegencontrole en lengtes (sectie 161/162; de decoder tegen echte programma-accounts staat in pendingAction.ts)
+  unit/                                            - zonder validator: `yarn test:unit` (draait ook mee in `npm test`, sectie 167)
+    recoveryQueueInvariant.ts                       - beslislogica van scripts/checkRecoveryQueueInvariant.ts, incl. tegencontrole en lengtes (sectie 161/162; de decoder tegen echte programma-accounts staat in pendingAction.ts)
+    preflightLogic.ts                               - genesis-hash, referentieslot en het Squads-voorstel decoderen en toetsen, op echte devnet-bytes (sectie 167)
+    preflightScripts.ts                             - de pre-flight-scripts als subprocess tegen een nep-RPC (fakeDevnetRpc.ts): exit-code en reden per afwijking (sectie 167)
+    unitPathIsPure.ts                               - bewaakt dat niets in tests/unit/ een validator of echte cluster aanspreekt
   sessionKeys.ts                     - session keys, alle 7 instructies
   addSessionKeyBlock.ts               - tijdelijke client-blokkade op execute_advanced-sessies
   uint8ArrayByteFidelity.ts           - bytegetrouwheid WebAuthn/Web-Crypto-tekenpad (sectie 78)
@@ -224,14 +228,18 @@ in twee delen:
 3. **Pre-flight, direct vóór het uitvoeren (verplicht, in deze volgorde; STATUS.md sectie
    94 en 162):**
    1. `TRANSACTION_INDEX=<n> npx ts-node --transpile-only scripts/preUpgradeChecks.ts --pre`
-      moet eindigen met exit 0 (timelock verstreken volgens de Clock-sysvar, en de
-      recovery-/wachtrij-invariant groen met een volledig RPC-antwoord). Niet 0: niet
-      uitvoeren.
+      moet eindigen met exit 0 (devnet volgens de genesis-hash; `<n>` is het laatste
+      voorstel en precies de upgrade van dit programma vanaf `EXPECTED_BUFFER` in
+      `scripts/checkProposalTimelock.ts`; timelock verstreken volgens de Clock-sysvar; en de
+      recovery-/wachtrij-invariant groen met een volledig RPC-antwoord van na de laatste
+      deploy). Niet 0: niet uitvoeren.
    2. Sessie-bruikbaarheid.
    3. Voorstel- en bufferstatus on-chain.
    4. Adminpagina: `findCanonicalProposal()`.
-4. **Direct ná het uitvoeren:** `npx ts-node --transpile-only scripts/preUpgradeChecks.ts --post`
-   (exit 0), daarna de vijf verificaties van STATUS.md sectie 95.
+4. **Direct ná het uitvoeren:** `EXECUTE_SIGNATURE=<handtekening van de uitvoertransactie> npx
+   ts-node --transpile-only scripts/preUpgradeChecks.ts --post` (exit 0; de controle leest
+   aantoonbaar een staat van ná de deploy, sectie 167), daarna de vijf verificaties van
+   STATUS.md sectie 95.
 
 Het volledige draaiboek per upgrade staat in `docs/upgradevoorstel-sjabloon.md`.
 

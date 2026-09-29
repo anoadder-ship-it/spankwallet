@@ -16158,3 +16158,18 @@ Voor upgrade 1, vóór het voorstel (aanvulling op sectie 166):
 - **sectie 167 zelf is door de sessie gebouwd die ook de review van 162 deed.** Volgens de
   afgesproken volgorde (sectie 166 punt 1) hoort er een review door een verse sessie bij,
   of een expliciet besluit dat die niet nodig is.
+
+**Aanvulling (2026-09-29): buffer-adres in de adminpagina.** `admin/wallet-signer.html`
+bijgewerkt voor upgrade 1: `BUFFER` en het getoonde adres `HRcc…` -> `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5`,
+het label "huidige voorgestelde upgrade" (stond nog op de spend-cap-upgrade) en de on-chain
+`memo` van het voorstel (stond nog op "B1-B7 statische-audit-fixes, sectie 76/77", twee
+upgrades terug). Het commentaar bij `BUFFER` zegt nu eerlijk dat de buffer bij het invullen
+nog niet geschreven was; `checkBufferExists()` weigert tot dan een voorstel te bouwen.
+Doorzocht: `admin/`, `scripts/`, `docs/`, `README.md` op `HRcc…` en op hardgecodeerde
+buffer-waarden. Er waren alleen de twee plekken in de adminpagina; `EXPECTED_BUFFER` in
+`scripts/checkProposalTimelock.ts` stond al goed. Bewust niet gewijzigd: `HRcc…` in
+`tests/unit/` (de echte buffer van voorstel #13 in de fixture) en in eerdere STATUS-secties
+(historie). Read-only bevestigd: `BUFFER`-constante, getoond adres en `EXPECTED_BUFFER` zijn
+gelijk; het bewaarde keypair uit sectie 163 hoort bij `F5nh9UdF…` (`solana-keygen pubkey`);
+op devnet bestaan `F5nh9UdF…` (nog niet geschreven) en `HRcc…` (verbruikt door #13) allebei
+niet; het paginascript doorstaat `node --check`.

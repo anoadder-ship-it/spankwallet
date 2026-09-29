@@ -42,11 +42,13 @@ is `client/` de juiste plek.
    voorstellen/goedkeuren/uitvoeren (knoppen 2-4) zoals de pagina zelf aangeeft. Welk
    voorstel knoppen 3/4 raken, en welk nummer bij `TRANSACTION_INDEX` van de pre-flight
    hoort, komt uit `upgradeProposalCheck.mjs`, dezelfde module als
-   `scripts/checkProposalTimelock.ts` (sectie 168): alleen het laatste voorstel, als het het
-   enige open (knop 3) of goedgekeurde (knop 4) voorstel voor deze buffer is en precies de
-   upgrade. Anders weigert de knop met de reden. Een overbodig voorstel dat nog Active is,
-   wijs je af met knop 5; een overbodig goedgekeurd voorstel kan deze pagina niet
-   annuleren (open punt, STATUS.md sectie 168).
+   `scripts/checkProposalTimelock.ts` (sectie 168/169): alleen het laatste voorstel, als het
+   open (knop 3) of goedgekeurd (knop 4) is en precies de upgrade, en **geen enkel ander
+   voorstel op Approved of Executing staat, welke inhoud ook** (sectie 169). Knop 3 eist
+   daarnaast dat er geen ander Active-voorstel voor deze buffer is. Anders weigert de knop
+   met de reden. Een overbodig voorstel dat nog Active is, wijs je af met knop 5; een
+   overbodig goedgekeurd voorstel annuleer je buiten deze pagina (Squads `proposalCancel`)
+   en voer je nooit uit om het weg te krijgen (open punt, STATUS.md sectie 168/169).
 5. **Geen enkele private key verlaat ooit een apparaat** - alle drie de ondertekenpaden
    (Wallet Standard, Mobile Wallet Adapter, Solflare-deep-link) laten de wallet-extensie of
    -app zelf ondertekenen. Dit was een expliciete eis bij de echte migratie (in

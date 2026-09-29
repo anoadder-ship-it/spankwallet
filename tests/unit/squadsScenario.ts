@@ -45,7 +45,7 @@ export function txPda(index: number, suffix?: string): string {
 }
 
 export interface ProposalOpts {
-  status?: number; // 1 = Active, 3 = Approved
+  status?: number; // 1 = Active, 3 = Approved, 4 = Executing (zonder timestamp), 5 = Executed
   approvedAt?: number;
   buffer?: PublicKey;
   proposalOwner?: string;
@@ -55,6 +55,18 @@ export interface ProposalOpts {
    * dus de oude selectie van de adminpagina telde hem als "dit voorstel".
    */
   extraInstruction?: boolean;
+  /**
+   * Extra bytes achter de Upgrade-opcode (03000000). De loader leest zijn
+   * instructie met limited_deserialize (bincode, allow_trailing_bytes), dus
+   * dit blijft een geldige Upgrade (review §168, scenario B).
+   */
+  upgradeDataSuffix?: Buffer;
+  /**
+   * Geen VaultTransaction maar een Batch (review §168, M-2: de losse
+   * transacties staan in aparte accounts die de scan niet leest) of een
+   * ConfigTransaction (hier: SetTimeLock 0).
+   */
+  kind?: "batch" | "config";
 }
 
 // VaultTransaction #13 (346 bytes): accountKeys-vec op offset 90 (7 sleutels),
@@ -71,6 +83,58 @@ function withSetAuthority(vtx: Buffer): Buffer {
     Buffer.from([4, 0, 0, 0, 4, 0, 0, 0]), // data: SetAuthority (u32-LE 4)
   ]);
   return Buffer.concat([out.subarray(0, out.length - 4), setAuthority, out.subarray(out.length - 4)]);
+}
+
+/** De enige instructie van #13 met `suffix` achter de Upgrade-opcode. */
+function withUpgradeDataSuffix(vtx: Buffer, suffix: Buffer): Buffer {
+  if (vtx.readUInt32LE(INSTRUCTIONS_OFFSET) !== 1) throw new Error("fixture: onverwachte VaultTransaction-layout");
+  const accountsLen = vtx.readUInt32LE(INSTRUCTIONS_OFFSET + 5);
+  const dataLenAt = INSTRUCTIONS_OFFSET + 5 + 4 + accountsLen;
+  if (vtx.readUInt32LE(dataLenAt) !== 4 || vtx.readUInt32LE(dataLenAt + 4) !== 3) throw new Error("fixture: geen Upgrade-instructie");
+  const out = Buffer.from(vtx);
+  out.writeUInt32LE(4 + suffix.length, dataLenAt);
+  return Buffer.concat([out.subarray(0, dataLenAt + 8), suffix, out.subarray(dataLenAt + 8)]);
+}
+
+// Discriminators en layouts uit @sqds/multisig 2.1.4 (admin/vendor/multisig.mjs).
+const BATCH_DISCRIMINATOR = Buffer.from([156, 194, 70, 44, 22, 88, 137, 44]);
+const CONFIG_TRANSACTION_DISCRIMINATOR = Buffer.from([94, 8, 4, 35, 113, 139, 139, 112]);
+
+/** Batch: multisig, creator, index, bump, vault_index, vault_bump, size (u32), executed_transaction_index (u32). */
+function batchAccount(index: number): Buffer {
+  return Buffer.concat([
+    BATCH_DISCRIMINATOR,
+    MULTISIG.toBuffer(),
+    VAULT.toBuffer(), // creator: maakt niet uit
+    u64(index),
+    Buffer.from([255, 0, 255]),
+    Buffer.from([1, 0, 0, 0]), // één transactie in de batch
+    Buffer.from([0, 0, 0, 0]),
+  ]);
+}
+
+/** ConfigTransaction: multisig, creator, index, bump, actions = [SetTimeLock { time_lock: 0 }]. */
+function configAccount(index: number): Buffer {
+  return Buffer.concat([
+    CONFIG_TRANSACTION_DISCRIMINATOR,
+    MULTISIG.toBuffer(),
+    VAULT.toBuffer(),
+    u64(index),
+    Buffer.from([255]),
+    Buffer.from([1, 0, 0, 0, 3, 0, 0, 0, 0]),
+  ]);
+}
+
+/** Proposal #13 met een andere status; Executing heeft geen timestamp (de rest schuift op). */
+function proposalAccount(index: number, status: number, timestamp: number): Buffer {
+  const proposal = Buffer.from(fx.proposal13, "base64");
+  proposal.writeBigUInt64LE(BigInt(index), 40);
+  proposal[48] = status;
+  if (status !== 4) {
+    proposal.writeBigInt64LE(BigInt(timestamp), 49);
+    return proposal;
+  }
+  return Buffer.concat([proposal.subarray(0, 49), proposal.subarray(57), Buffer.alloc(8)]);
 }
 
 export interface BufferOpts {
@@ -95,6 +159,21 @@ export function bufferAccount(o: BufferOpts = {}): FakeAccount | null {
   return { owner: o.owner ?? LOADER, data: Buffer.concat([header, o.program ?? RC_BINARY, o.tail ?? Buffer.alloc(0)]) };
 }
 
+/**
+ * De echte stand op devnet op 2026-09-29 (STATUS.md sectie 169, read-only
+ * gelezen): Active #1-4, 6, 7, 9 (oude buffers), Executed #5, 10, 11, 13,
+ * Cancelled #8, Rejected #12 en #14. Plus `latest` als schoon, goedgekeurd
+ * voorstel voor deze buffer. Geen enkel ander voorstel is Approved of
+ * Executing, dus deze stand moet groen blijven.
+ */
+export function devnetLikeProposals(latest: number): Record<number, ProposalOpts> {
+  const status: Record<number, number> = { 1: 1, 2: 1, 3: 1, 4: 1, 5: 5, 6: 1, 7: 1, 8: 6, 9: 1, 10: 5, 11: 5, 12: 2, 13: 5, 14: 2 };
+  const proposals: Record<number, ProposalOpts> = {};
+  for (const [index, s] of Object.entries(status)) proposals[Number(index)] = { status: s, buffer: OLD_BUFFER };
+  proposals[latest] = {};
+  return proposals;
+}
+
 export interface SquadsOpts {
   latestIndex: number;
   /** multisig.staleTransactionIndex (standaard 0, zoals op devnet). */
@@ -112,15 +191,17 @@ export function squadsAccounts(o: SquadsOpts): Map<string, FakeAccount> {
   accounts.set(MULTISIG.toBase58(), { owner: SQUADS.toBase58(), data: multisig });
   for (const [key, p] of Object.entries(o.proposals)) {
     const index = Number(key);
-    const proposal = Buffer.from(fx.proposal13, "base64");
-    proposal.writeBigUInt64LE(BigInt(index), 40);
-    proposal[48] = p.status ?? 3;
-    proposal.writeBigInt64LE(BigInt(p.approvedAt ?? NOW - TIME_LOCK - 3600), 49);
+    const proposal = proposalAccount(index, p.status ?? 3, p.approvedAt ?? NOW - TIME_LOCK - 3600);
     accounts.set(txPda(index, "proposal"), { owner: p.proposalOwner ?? SQUADS.toBase58(), data: proposal });
+    if (p.kind === "batch" || p.kind === "config") {
+      accounts.set(txPda(index), { owner: SQUADS.toBase58(), data: p.kind === "batch" ? batchAccount(index) : configAccount(index) });
+      continue;
+    }
     let vtx: Buffer = Buffer.from(fx.vaultTransaction13, "base64");
     vtx.writeBigUInt64LE(BigInt(index), 72);
     const at = vtx.indexOf(OLD_BUFFER.toBuffer());
     (p.buffer ?? RC_BUFFER).toBuffer().copy(vtx, at);
+    if (p.upgradeDataSuffix) vtx = withUpgradeDataSuffix(vtx, p.upgradeDataSuffix);
     if (p.extraInstruction) vtx = withSetAuthority(vtx);
     accounts.set(txPda(index), { owner: SQUADS.toBase58(), data: vtx });
   }

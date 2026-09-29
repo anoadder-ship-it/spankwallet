@@ -16406,3 +16406,207 @@ Nieuw uit deze sectie:
 - `tests/unit/adminPageSelection.ts` haalt functies met een eenvoudige tokenizer uit de
   pagina. Een wijziging die de extractie breekt, faalt luid (syntaxfout of ontbrekende
   functie), niet stil.
+
+## 169. Reparatieronde na de review van sectie 168: geen enkel ander uitvoerbaar voorstel, welke inhoud ook (2026-09-29)
+
+Review van sectie 168 (`ffb396b`), 2026-09-29, door een sessie die §168 niet bouwde. Oordeel:
+M-B (de buffercontrole) houdt stand; de gedeelde module maakt pagina en script identiek in
+gedrag. Als harde poort nog niet klaar, om twee middelgrote redenen:
+
+- **M-1** de regel "precies één goedgekeurd voorstel *raakt deze buffer*" herkende een
+  concurrerend voorstel op inhoud, en die herkenning miste geldige varianten. Lokaal
+  aangetoond met de gedeelde module (#15 goedgekeurd, #16 schoon en het laatste → groen op
+  #16):
+  - **B**: een Upgrade met één extra byte achter de opcode (`03000000 00`). De loader
+    (`solana-bpf-loader-program` 4.2.2) leest zijn instructie met `limited_deserialize`,
+    en die staat op `allow_trailing_bytes()`: dit is een geldige Upgrade;
+  - **C**: een Upgrade van hetzelfde programma vanaf een andere buffer. Iedereen kan een
+    buffer schrijven en de authority op de vault zetten;
+  - niet aangetoond maar met dezelfde oorzaak: de buffer via een lookup-table, een CPI,
+    `Write`/`SetAuthority`/`Close` op de buffer;
+- **M-2** een Batch (of Config) werd overgeslagen. De losse transacties van een batch
+  staan in aparte accounts die de scan niet leest.
+
+Plus L-1, L-2, I-1 en I-2 (zie punt 7 en 8). Deze sectie lost M-1, M-2 en I-1 op. Geen
+wijziging aan het programma.
+
+**Deze sessie deed de review van §168 én bouwde §169.** Volgens de afgesproken volgorde
+hoort bij §169 een review door een verse sessie.
+
+### 1. Devnet-stand vóór de fix (read-only, 2026-09-29)
+
+Alle voorstellen 1..14 van multisig `A5iD…` gelezen (`loadProposalEntries`, genesis-hash
+gecontroleerd), vóór er iets gewijzigd was. `transactionIndex` 14, `staleTransactionIndex` 0,
+threshold 2, timelock 259.200 s.
+
+| Status | Voorstellen |
+|---|---|
+| Active | #1-4, #6, #7, #9 (oude buffers `7jvi…`, `BDnD…`) |
+| Executed | #5, #10, #11, #13 |
+| Cancelled | #8 |
+| Rejected | #12, #14 |
+| **Approved / Executing** | **geen** |
+
+Alle 14 zijn VaultTransactions met één Upgrade-instructie. Er is dus geen overgebleven
+voorstel dat de nieuwe regel blokkeert. De Active-restanten blokkeren niet (punt 2); ze
+kunnen pas uitgevoerd worden na goedkeuring plus 72 uur, en vanaf de goedkeuring blokkeren
+ze knop 3 en 4.
+
+### 2. De regel (`admin/upgradeProposalCheck.mjs`, `selectProposal`)
+
+Niet meer op inhoud herkennen, maar op status:
+- **uitvoeren (knop 4, pre-flight)**: het laatste voorstel is Approved, niet stale en
+  precies de upgrade (strenge toets uit §167), en **geen enkel ander voorstel staat op
+  Approved of Executing**, welke inhoud ook (VaultTransaction, Batch, Config, of iets dat
+  niet te decoderen is: dat laatste was al een probleem, fail-closed);
+- **goedkeuren (knop 3)**: het laatste voorstel is Active of Approved, dezelfde eis over
+  andere voorstellen, en daarnaast geen ander **Active**-voorstel voor deze buffer (de
+  duplicaatcontrole na #6/#7, bewust behouden: hij kan alleen extra weigeren, nooit iets
+  groen maken dat de brede regel rood maakt);
+- **indienen (knop 2)**: ongewijzigd.
+
+`EXECUTABLE_TAGS = [Approved, Executing]` (Executing = een batch halverwege). Het resultaat
+heeft een nieuw veld `blockers` (andere voorstellen op Approved/Executing). `touchesBuffer`
+blijft alleen voor de duplicaatmelding (knop 2/3) en is gedocumenteerd als "geen
+veiligheidsgrens". De melding:
+`andere goedgekeurde of lopende voorstellen (Approved/Executing), ongeacht de inhoud: #15
+(Approved) (vereist: geen enkel, naast het laatste voorstel #16; een overbodig voorstel
+eerst annuleren, niet uitvoeren)`.
+
+Gevolgen, bewust:
+- elk ander goedgekeurd voorstel blokkeert knop 3 en 4, ook een onschuldig ogende
+  config-transactie. Dat is de bedoeling: een uitvoerbaar voorstel naast dit ene kan de
+  upgrade altijd beïnvloeden (de buffer wijzigen of verbruiken, het programma opnieuw
+  upgraden, de timelock of de leden wijzigen);
+- zo'n voorstel weghalen kan alleen met Squads `proposalCancel`, en dat zit niet in de
+  pagina (open punt uit §168). Nooit uitvoeren om het weg te krijgen;
+- een Executing-batch is niet te annuleren. Zolang er een is, blijft de poort dicht.
+
+### 3. I-1: de statusmelding bij verbinden
+
+`logCurrentProposalStatus()` beweerde "Knoppen 3/4 weigeren zolang er meer dan een [open
+voorstel] is", maar knop 4 weigerde niet bij een extra Active-voorstel. Nu:
+- een aparte waarschuwing voor elk voorstel in `blockers`: "Knop 3 en knop 4 weigeren
+  zolang er naast het laatste voorstel ook maar één ander voorstel Approved of Executing
+  is, wat er ook in staat. Voer het NIET uit; annuleer het eerst";
+- bij meerdere open voorstellen voor deze buffer: "Knop 3 weigert zolang er meer dan één
+  open voorstel voor deze buffer is; … Knop 4 weigert zodra een ander dan het laatste
+  voorstel Approved is";
+- de teksten van knop 2 (weigering en bevestigingsvakje) en de commentaren bij
+  `selectUpgradeProposal`/`buildApproveTx` zeggen hetzelfde.
+
+### 4. Rood vóór groen
+
+Nieuwe tests, eerst tegen de ongewijzigde code (`yarn test:unit`: 88 passing, 18 failing),
+daarna tegen de fix (106/0). Fixtures in `tests/unit/squadsScenario.ts`:
+- `upgradeDataSuffix`: extra bytes achter de Upgrade-opcode;
+- `kind: "batch"` / `"config"`: een Batch- of ConfigTransaction-account met de echte
+  discriminator en layout uit de gevendorde `@sqds/multisig` 2.1.4 (de config: `SetTimeLock
+  0`);
+- status 4 (Executing) zonder timestamp, zoals de echte layout;
+- `devnetLikeProposals(n)`: de devnet-stand uit punt 1 plus een schoon voorstel `n`.
+
+| Scenario (#16 schoon en het laatste, tenzij anders) | Oude code | Na de fix |
+|---|---|---|
+| B: #15 Approved, Upgrade met één extra byte | script exit 0; knop 4 **voert #16 uit**; knop 3 **keurt #16 goed** | script exit 1; knop 3/4 weigeren, versturen niets |
+| C: #15 Approved, Upgrade vanaf een andere buffer | idem | idem |
+| #15 Approved Batch | idem | idem |
+| #15 Executing Batch | idem | idem |
+| #15 Approved ConfigTransaction (SetTimeLock 0) | idem | idem |
+| Script: stale Approved #3 (andere buffer), `staleTransactionIndex` 10 | exit 0 | exit 1, #3 genoemd |
+| I-1: #15 Approved (andere buffer): melding bij verbinden | "Open voorstel voor deze buffer: #16" | waarschuwing "#15 (Approved) … knop 3 en knop 4 weigeren" |
+| I-1: #15 en #16 Active | "Knoppen 3/4 weigeren zolang er meer dan een is" | "Knop 3 weigert zolang …" |
+| Groen moet blijven: devnet-stand + schone #15 (script, knop 4 → #15; met #15 Active: knop 3 → #15) | groen | groen |
+
+De rode tests faalden om de juiste reden: `de pagina verstuurde [{"kind":"execute",
+"transactionIndex":"#16"}]` (en `approve`), en het script gaf exit 0. De bestaande tests
+van §168 toetsen hetzelfde gedrag; alleen hun verwachte meldingstekst is bijgewerkt (vier
+reguliere expressies).
+
+**Mutatiecontrole** (op een kopie, daarna teruggezet en met `cmp` gecontroleerd):
+- de `blockers`-eis uitgeschakeld: 21 tests falen;
+- Executing uit `EXECUTABLE_TAGS` gehaald: precies de drie Executing-tests falen.
+
+### 5. Live, read-only tegen devnet, na de fix
+
+`loadAndSelect` voor `F5nh…` over de echte voorstellen #1-#14:
+
+| Doel | Uitkomst |
+|---|---|
+| indienen | geen kandidaten, geen blockers, geen problemen (knop 2 blijft bruikbaar) |
+| goedkeuren | geen: #14 is Rejected en raakt `HRcc…`; geen blockers |
+| uitvoeren | geen: idem |
+
+`TRANSACTION_INDEX=14 checkProposalTimelock.ts`: exit 1 met beide redenen, "NIET UITVOEREN".
+Geen transactie verstuurd.
+
+### 6. Documentatie
+
+README (pre-flight), `admin/README.md` (stap 3-4), `docs/upgradevoorstel-sjabloon.md` (§1
+stap 6, §2), `scripts/checkProposalTimelock.ts` en `scripts/preUpgradeChecks.ts` (commentaar,
+uitvoer en stapnaam) en `admin/upgradeProposalCheck.d.mts` (`blockers`, `EXECUTING_TAG`,
+`EXECUTABLE_TAGS`) beschrijven de nieuwe regel.
+
+### 7. Niet blokkerend voor dit voorstel: L-1 en L-2 uit de review van §168
+
+(Let op: dit zijn de L-nummers uit de review van §168, niet die van §167; die laatste zijn in
+§168 punt 3 als tekst gecorrigeerd en staan in §168 punt 9.)
+
+- **L-1** knop 4 controleert de buffer zelf niet; alleen de pre-flight doet dat;
+- **L-2** de pre-flight leest de buffer los van de voorstelscan (eigen aanroep, zonder
+  `minContextSlot` gekoppeld aan de slot van de scan).
+
+Waarom dat voor upgrade 1 geen gat is:
+1. de pre-flight eist buffer-authority = de vault. Daarna kan alleen een door de multisig
+   **uitgevoerd** voorstel de buffer nog wijzigen, sluiten of verbruiken;
+2. na §169 bestaat er op het moment van de pre-flight geen enkel ander uitvoerbaar
+   (Approved/Executing) voorstel;
+3. een nieuw voorstel na de pre-flight verhoogt `transactionIndex`. Dan is #N niet meer het
+   laatste en weigert knop 4, welke inhoud het nieuwe voorstel ook heeft;
+4. een al bestaand Active-voorstel dat na de pre-flight goedgekeurd wordt, wordt een blocker
+   (knop 4 weigert) en kan zelf pas 72 uur na die goedkeuring uitgevoerd worden. Het venster
+   tussen pre-flight en knop 4 is minuten.
+
+Restrisico: een RPC-node die bij de pre-flight zo ver achterloopt dat hij een goedkeuring
+van meer dan 72 uur geleden nog niet ziet. Dat is dezelfde vertrouwensgrens als L-2 van §167
+(de RPC). `--post` controleert de invariant ná de deploy, maar niet de buffer-inhoud; de
+gedeployde code controleer je na afloop met `solana program dump` van het programma tegen
+de sha256 (dezelfde methode als §166 punt 2 voor de buffer). Open voor upgrade 2: de buffercontrole ook in de pagina (vereist sha256 in de
+browser, `crypto.subtle`) en in één momentopname met de scan.
+
+**I-2** (pagina en script lezen via verschillende RPC's; knop 4 bindt niet aan het
+ingetypte `TRANSACTION_INDEX`) blijft ook open. Een verschil leidt tot een weigering, niet tot
+een ander voorstel: de pagina voert alleen het laatste voorstel uit, en alleen als het
+precies de upgrade is en er geen ander uitvoerbaar voorstel bestaat.
+
+### 8. Regressie
+
+| Suite | Uitkomst | Baseline (sectie 168) |
+|---|---|---|
+| `cargo test` | 13/0 | 13/0 |
+| `yarn test` | 231 passing, 119 pending, 0 failing | 210/119/0; verschil = 21 nieuwe tests (7 script, 14 pagina) |
+| `yarn test:pending-action` | 116/0 (1 pending) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 | 117/0 |
+| `yarn test:unit` | 106/0 | 85/0 (+21, idem) |
+
+Typecontrole: strikte `tsc --noEmit` over `checkProposalTimelock.ts`, `preUpgradeChecks.ts` en
+de drie gewijzigde bestanden in `tests/unit/`: schoon. `node --check` op de gedeelde module
+en het paginascript: schoon. Geen nieuw bestand in `tests/unit/`, dus geen nieuwe
+purity-guardtest.
+
+### 9. Voor upgrade 1, vóór het voorstel
+
+Ongewijzigd uit §168 punt 8: de buffer schrijven en de authority aan de vault geven; de
+server op poort 8766 opnieuw starten (hij moet de nieuwe `upgradeProposalCheck.mjs`
+serveren); review van §169 door een verse sessie. Nieuw: vlak vóór knop 3 opnieuw
+nagaan (de pagina toont het bij verbinden) dat geen van de Active-restanten #1-4, 6, 7, 9
+intussen goedgekeurd is.
+
+### 10. Open punten voor upgrade 2
+
+Uit §168 punt 9 (ongewijzigd), plus:
+- `proposalCancel` in de pagina: een overbodig goedgekeurd voorstel blokkeert nu knop 3 en
+  4 ongeacht de inhoud, dus de weg om het op te ruimen wordt belangrijker;
+- de Active-restanten #1-4, 6, 7, 9 opruimen (afwijzen met knop 5). Ze zijn onschuldig
+  zolang ze Active blijven, maar één goedkeuring maakt ze een blocker;
+- L-1, L-2 en I-2 uit punt 7.

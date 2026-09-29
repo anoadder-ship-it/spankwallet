@@ -234,8 +234,9 @@ in twee delen:
       "TRANSACTION_INDEX voor de pre-flight". Het script controleert:
       - devnet volgens de genesis-hash (die de RPC zelf opgeeft: geen absolute garantie
         tegen een simulator die devnet forkt);
-      - `<n>` is het laatste voorstel en het enige goedgekeurde voorstel voor deze buffer,
-        en is precies de upgrade van dit programma vanaf `EXPECTED_BUFFER` in
+      - `<n>` is het laatste voorstel, geen enkel ander voorstel staat op Approved of
+        Executing (welke inhoud ook; sectie 169), en `<n>` is precies de upgrade van dit
+        programma vanaf `EXPECTED_BUFFER` in
         `scripts/checkProposalTimelock.ts` (dezelfde regel als knop 4 van de adminpagina);
       - de buffer zelf: authority is de vault, en de sha256 van het programma is de RC-build;
       - de timelock is verstreken volgens de Clock-sysvar;

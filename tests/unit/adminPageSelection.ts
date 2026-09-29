@@ -2,8 +2,8 @@ import { assert } from "chai";
 import * as fs from "fs";
 import * as path from "path";
 import type { FakeAccount } from "./fakeDevnetRpc";
-import { squadsAccounts } from "./squadsScenario";
-import type { SquadsOpts } from "./squadsScenario";
+import { devnetLikeProposals, OLD_BUFFER, squadsAccounts } from "./squadsScenario";
+import type { ProposalOpts, SquadsOpts } from "./squadsScenario";
 
 /**
  * STATUS.md sectie 168 (review §167, M-A): welk voorstel de knoppen 3 en 4
@@ -176,7 +176,7 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
       const page = await loadPage({ latestIndex: 16, proposals: { 15: { extraInstruction: true }, 16: {} } });
       const reason = await rejection(page.fns.buildSquadsExecuteTx());
       assert.deepEqual(page.sent, [], `de pagina verstuurde ${JSON.stringify(page.sent, (_, v) => (typeof v === "bigint" ? `#${v}` : v))}`);
-      assert.match(reason, /andere goedgekeurde voorstellen voor deze buffer: #15 \(vereist: precies één, en dat is het laatste voorstel #16\)/);
+      assert.match(reason, /andere goedgekeurde of lopende voorstellen \(Approved\/Executing\), ongeacht de inhoud: #15 \(Approved\) \(vereist: geen enkel, naast het laatste voorstel #16/);
     });
 
     it("#15 goedgekeurd, #16 (het laatste) nog Active: weigert, want de pre-flight eist dat het laatste voorstel het goedgekeurde is", async () => {
@@ -218,7 +218,63 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
     it("geen uitvoerbaar voorstel: geen nummer, wel de reden", async () => {
       const page = await loadPage({ latestIndex: 16, proposals: { 15: {}, 16: {} } });
       await page.fns.showPreflightTransactionIndex();
-      assert.match(page.elements["transaction-index-display"]?.textContent ?? "", /^geen: .*andere goedgekeurde voorstellen voor deze buffer: #15/);
+      assert.match(page.elements["transaction-index-display"]?.textContent ?? "", /^geen: .*andere goedgekeurde of lopende voorstellen \(Approved\/Executing\), ongeacht de inhoud: #15 \(Approved\)/);
+    });
+  });
+
+  describe("sectie 169 (review §168 M-1/M-2): een ander voorstel Approved of Executing blokkeert, ongeacht de inhoud", () => {
+    const OTHER = /andere goedgekeurde of lopende voorstellen \(Approved\/Executing\), ongeacht de inhoud: #15 \((Approved|Executing)\)/;
+    const others: [string, ProposalOpts][] = [
+      ["B: Upgrade met één extra byte", { upgradeDataSuffix: Buffer.from([0]) }],
+      ["C: Upgrade vanaf een andere buffer", { buffer: OLD_BUFFER }],
+      ["goedgekeurde Batch", { kind: "batch" }],
+      ["Batch in uitvoering", { kind: "batch", status: 4 }],
+      ["goedgekeurde ConfigTransaction", { kind: "config" }],
+    ];
+    for (const [name, other] of others) {
+      it(`knop 4: #15 ${name}, #16 schoon en het laatste: weigert, voert niets uit`, async () => {
+        const page = await loadPage({ latestIndex: 16, proposals: { 15: other, 16: {} } });
+        const reason = await rejection(page.fns.buildSquadsExecuteTx());
+        assert.deepEqual(page.sent, [], `de pagina verstuurde ${JSON.stringify(page.sent, (_, v) => (typeof v === "bigint" ? `#${v}` : v))}`);
+        assert.match(reason, OTHER);
+      });
+
+      it(`knop 3: #15 ${name}, #16 Active en het laatste: weigert, keurt niets goed`, async () => {
+        const page = await loadPage({ latestIndex: 16, proposals: { 15: other, 16: { status: 1 } } });
+        const reason = await rejection(page.fns.buildApproveTx());
+        assert.deepEqual(page.sent, [], `de pagina verstuurde ${JSON.stringify(page.sent, (_, v) => (typeof v === "bigint" ? `#${v}` : v))}`);
+        assert.match(reason, OTHER);
+      });
+    }
+
+    it("groen: de echte devnet-stand plus een schone, goedgekeurde #15: knop 4 voert precies #15 uit", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: devnetLikeProposals(15) });
+      await page.fns.buildSquadsExecuteTx();
+      assert.deepEqual(page.sent, [{ kind: "execute", transactionIndex: 15n }]);
+    });
+
+    it("groen: de echte devnet-stand plus #15 Active: knop 3 keurt precies #15 goed", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { ...devnetLikeProposals(15), 15: { status: 1 } } });
+      await page.fns.buildApproveTx();
+      assert.deepEqual(page.sent, [{ kind: "approve", transactionIndex: 15n }]);
+    });
+  });
+
+  describe("sectie 169 (review §168 I-1): de statusmelding bij verbinden klopt met wat knop 3/4 doen", () => {
+    it("een ander goedgekeurd voorstel (andere buffer) wordt gemeld als blokkade voor knop 3 en 4", async () => {
+      const page = await loadPage({ latestIndex: 16, proposals: { 15: { buffer: OLD_BUFFER }, 16: {} } });
+      await page.fns.logCurrentProposalStatus();
+      const logs = page.logs.join("\n");
+      assert.match(logs, /#15 \(Approved\)[^\n]*knop 3 en knop 4 weigeren/i);
+      assert.match(page.elements["transaction-index-display"]?.textContent ?? "", /^geen: .*ongeacht de inhoud: #15 \(Approved\)/);
+    });
+
+    it("twee Active-duplicaten: alleen knop 3 weigert (een Active-voorstel is niet uitvoerbaar)", async () => {
+      const page = await loadPage({ latestIndex: 16, proposals: { 15: { status: 1 }, 16: { status: 1 } } });
+      await page.fns.logCurrentProposalStatus();
+      const logs = page.logs.join("\n");
+      assert.notInclude(logs, "Knoppen 3/4 weigeren zolang er meer dan een is");
+      assert.match(logs, /Knop 3 weigert zolang er meer dan één open voorstel voor deze buffer is/);
     });
   });
 

@@ -8,12 +8,24 @@
 // laatste voorstel); een groene pre-flight kon zo over een ander voorstel
 // gaan dan het voorstel dat knop 4 uitvoerde.
 //
-// Regel (uitvoeren): precies EEN goedgekeurd voorstel raakt deze buffer, en
-// dat is het laatste voorstel (multisig.transactionIndex), niet stale, en
-// zijn VaultTransaction is precies de upgrade (upgradeProposalProblems).
-// Goedkeuren: hetzelfde met "open" (Active of Approved) i.p.v. goedgekeurd.
-// Alle voorstellen 1..transactionIndex worden gelezen, ook stale: Squads voert
-// een goedgekeurde vault-transactie ook uit als hij stale is.
+// Regel (uitvoeren): het laatste voorstel (multisig.transactionIndex) is
+// goedgekeurd, niet stale, en zijn VaultTransaction is precies de upgrade
+// (upgradeProposalProblems); en GEEN ENKEL ander voorstel staat op Approved of
+// Executing, ongeacht wat erin staat (sectie 169, review §168 M-1/M-2).
+// Goedkeuren: het laatste voorstel is open (Active of Approved), dezelfde
+// eis over andere voorstellen, en daarnaast geen ander open voorstel voor
+// deze buffer (duplicaten). Alle voorstellen 1..transactionIndex worden
+// gelezen, ook stale: Squads voert een goedgekeurde vault-transactie ook uit
+// als hij stale is.
+//
+// Waarom niet op inhoud herkennen (de regel van sectie 168: "raakt deze
+// buffer"): die herkenning miste geldige varianten - een Upgrade met extra
+// bytes achter de opcode (de loader leest met allow_trailing_bytes), een
+// Upgrade van hetzelfde programma vanaf een andere buffer, een buffer via een
+// lookup-table, een CPI, Write/SetAuthority/Close op de buffer, en Batches
+// (de losse transacties staan in accounts die de scan niet leest). Elk
+// uitvoerbaar voorstel naast dit ene kan de upgrade beinvloeden; dus mag er
+// geen zijn.
 //
 // Geen imports en geen Buffer: draait ongewijzigd in de browser en in Node.
 // De aanroeper geeft zijn eigen PublicKey-klasse (@solana/web3.js) mee.
@@ -39,7 +51,11 @@ const VAULT_TRANSACTION_DISCRIMINATOR = [168, 250, 162, 100, 81, 14, 162, 207];
 export const PROPOSAL_STATUS_NAMES = ["Draft", "Active", "Rejected", "Approved", "Executing", "Executed", "Cancelled"];
 export const ACTIVE_TAG = 1;
 export const APPROVED_TAG = 3;
-const EXECUTING_TAG = 4;
+export const EXECUTING_TAG = 4;
+// Statussen waarin Squads een voorstel (nog) kan uitvoeren: Approved (vault-
+// of config-transactie, of een batch die nog niet begonnen is) en Executing
+// (een batch halverwege).
+export const EXECUTABLE_TAGS = [APPROVED_TAG, EXECUTING_TAG];
 
 // UpgradeableLoaderInstruction::Upgrade (u32-LE 3), accountvolgorde zoals de
 // pagina hem opbouwt en zoals #11/#13/#14 on-chain staan: programdata,
@@ -206,9 +222,10 @@ export function createUpgradeProposalCheck(PublicKey) {
   }
 
   /**
-   * Ruim: raakt EEN Upgrade-instructie van de loader deze buffer? Zo telt een
-   * voorstel met een upgrade plus iets anders ook als "voorstel voor deze
-   * buffer" (en blokkeert het dus), in plaats van onzichtbaar te blijven.
+   * Raakt EEN Upgrade-instructie van de loader (exact 03000000) deze buffer?
+   * Alleen nog voor de duplicaat-melding van knop 2/3 (open voorstellen voor
+   * deze buffer), NIET als veiligheidsgrens: hij mist varianten (zie de kop
+   * van dit bestand). De grens is "geen ander voorstel Approved/Executing".
    */
   function touchesBuffer(vtx, buffer) {
     return vtx.instructions.some((ix) => {
@@ -272,7 +289,7 @@ export function createUpgradeProposalCheck(PublicKey) {
    * Eén voorstel uit de scan, gelezen en gecontroleerd. Geeft null als er
    * geen proposal-account is (niet uitvoerbaar), anders { problems, status,
    * vtx }. vtx is null als de transactie geen VaultTransaction is (bv. een
-   * config- of batch-transactie): die raakt deze buffer niet.
+   * config- of batch-transactie); de status telt dan nog steeds mee.
    */
   function readEntry(entry, multisigAddress) {
     const problems = [];
@@ -301,18 +318,21 @@ export function createUpgradeProposalCheck(PublicKey) {
   /**
    * De selectieregel. `entries` moet precies de voorstellen 1..
    * multisig.transactionIndex bevatten (loadProposalEntries). purpose:
-   * - "execute": precies één goedgekeurd voorstel raakt deze buffer, en dat is
-   *   het laatste, niet stale, en precies de upgrade;
-   * - "approve": idem met open (Active of Approved);
-   * - "propose": alleen de lijst open voorstellen voor deze buffer (knop 2
-   *   weigert dan zonder bevestiging een nieuw voorstel).
+   * - "execute": het laatste voorstel is goedgekeurd, niet stale en precies
+   *   de upgrade, en geen enkel ander voorstel staat op Approved of Executing
+   *   (`blockers`), welke inhoud ook;
+   * - "approve": het laatste voorstel is open (Active of Approved), dezelfde
+   *   eis over `blockers`, en geen ander Active-voorstel voor deze buffer;
+   * - "propose": alleen de lijsten (knop 2 weigert zonder bevestiging een
+   *   nieuw voorstel als `candidates` niet leeg is).
+   * `candidates`: open (Active/Approved) voorstellen voor deze buffer.
+   * `blockers`: andere voorstellen dan het laatste op Approved of Executing.
    * Elk voorstel dat niet te lezen of te controleren is, is een probleem
    * (fail-closed), ook als het niet het laatste is.
    */
   function selectProposal({ multisig, multisigAddress, entries, expected, purpose }) {
     if (purpose !== "execute" && purpose !== "approve" && purpose !== "propose") throw new Error(`onbekend doel ${purpose}`);
     const wanted = purpose === "execute" ? [APPROVED_TAG] : [ACTIVE_TAG, APPROVED_TAG];
-    const label = purpose === "execute" ? "goedgekeurde" : "open";
     const latest = multisig.transactionIndex;
     const problems = [];
 
@@ -320,43 +340,57 @@ export function createUpgradeProposalCheck(PublicKey) {
     if (!complete) problems.push(`scan onvolledig: verwacht de voorstellen 1..${latest}, gelezen ${entries.length}`);
 
     const candidates = [];
+    const blockers = [];
     let latestRead = null;
     for (const entry of entries) {
       const read = readEntry(entry, multisigAddress);
       if (entry.index === latest) latestRead = read;
       if (!read) continue;
       problems.push(...read.problems);
-      if (read.status && read.vtx && wanted.includes(read.status.statusTag) && touchesBuffer(read.vtx, expected.buffer)) {
-        candidates.push({ index: entry.index, statusName: PROPOSAL_STATUS_NAMES[read.status.statusTag] });
+      if (!read.status) continue;
+      const statusName = PROPOSAL_STATUS_NAMES[read.status.statusTag];
+      if (entry.index !== latest && EXECUTABLE_TAGS.includes(read.status.statusTag)) blockers.push({ index: entry.index, statusName });
+      if (read.vtx && (read.status.statusTag === ACTIVE_TAG || read.status.statusTag === APPROVED_TAG) && touchesBuffer(read.vtx, expected.buffer)) {
+        candidates.push({ index: entry.index, statusName });
       }
     }
-    if (purpose === "propose") return { target: null, candidates, problems };
+    if (purpose === "propose") return { target: null, candidates, blockers, problems };
 
-    const others = candidates.filter((c) => c.index !== latest).map((c) => `#${c.index}`);
-    if (others.length > 0) {
-      problems.push(`andere ${label} voorstellen voor deze buffer: ${others.join(", ")} (vereist: precies één, en dat is het laatste voorstel #${latest})`);
+    if (blockers.length > 0) {
+      problems.push(
+        `andere goedgekeurde of lopende voorstellen (Approved/Executing), ongeacht de inhoud: ` +
+          blockers.map((b) => `#${b.index} (${b.statusName})`).join(", ") +
+          ` (vereist: geen enkel, naast het laatste voorstel #${latest}; een overbodig voorstel eerst annuleren, niet uitvoeren)`
+      );
+    }
+    if (purpose === "approve") {
+      const duplicates = candidates.filter((c) => c.index !== latest && c.statusName === PROPOSAL_STATUS_NAMES[ACTIVE_TAG]).map((c) => `#${c.index}`);
+      if (duplicates.length > 0) {
+        problems.push(`andere open voorstellen voor deze buffer: ${duplicates.join(", ")} (vereist: precies één, en dat is het laatste voorstel #${latest})`);
+      }
     }
     if (!latestRead) {
       problems.push(`het laatste voorstel #${latest} heeft geen proposal-account`);
-      return { target: null, candidates, problems };
+      return { target: null, candidates, blockers, problems };
     }
-    if (!latestRead.status) return { target: null, candidates, problems };
+    if (!latestRead.status) return { target: null, candidates, blockers, problems };
     const statusName = PROPOSAL_STATUS_NAMES[latestRead.status.statusTag];
     if (!wanted.includes(latestRead.status.statusTag)) {
       const want = wanted.map((t) => `"${PROPOSAL_STATUS_NAMES[t]}"`).join(" of ");
       problems.push(`Voorstel #${latest} staat op status "${statusName}", niet ${want}`);
     }
     if (latest <= multisig.staleTransactionIndex) problems.push(`Voorstel #${latest} is stale (staleTransactionIndex = ${multisig.staleTransactionIndex})`);
-    if (latestRead.vtx === undefined) return { target: null, candidates, problems };
+    if (latestRead.vtx === undefined) return { target: null, candidates, blockers, problems };
     if (latestRead.vtx === null) {
       problems.push(`Voorstel #${latest} is geen VaultTransaction`);
     } else {
       problems.push(...upgradeProposalProblems(latestRead.vtx, { ...expected, transactionIndex: latest }));
     }
-    if (problems.length > 0) return { target: null, candidates, problems };
+    if (problems.length > 0) return { target: null, candidates, blockers, problems };
     return {
       target: { index: latest, statusName, statusTimestamp: latestRead.status.statusTimestamp, vtx: latestRead.vtx },
       candidates,
+      blockers,
       problems,
     };
   }

@@ -5,7 +5,7 @@ import { createHash } from "crypto";
 import * as path from "path";
 import { startFakeRpc } from "./fakeDevnetRpc";
 import type { FakeRpcState } from "./fakeDevnetRpc";
-import { fx, LOADER, NOW, OLD_BUFFER, RC_BINARY, squadsAccounts, TIME_LOCK, u64 } from "./squadsScenario";
+import { devnetLikeProposals, fx, LOADER, NOW, OLD_BUFFER, RC_BINARY, squadsAccounts, TIME_LOCK, u64 } from "./squadsScenario";
 import type { BufferOpts, ProposalOpts } from "./squadsScenario";
 
 /**
@@ -252,18 +252,45 @@ describe("pre-flight-scripts tegen een nep-RPC (STATUS.md sectie 167)", function
         await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }),
         1,
         "tweede goedgekeurd voorstel voor deze buffer moet falen",
-        /andere goedgekeurde voorstellen voor deze buffer: #15 \(vereist: precies één, en dat is het laatste voorstel #16\)/
+        /andere goedgekeurde of lopende voorstellen \(Approved\/Executing\), ongeacht de inhoud: #15 \(Approved\) \(vereist: geen enkel, naast het laatste voorstel #16/
       );
     });
 
     it("een stale maar goedgekeurd voorstel voor deze buffer telt ook mee (Squads voert stale goedgekeurde voorstellen uit)", async () => {
       const state = timelockState({ latestIndex: 16, staleIndex: 10, proposals: { 3: {}, 16: {} } });
-      expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }), 1, "oud goedgekeurd voorstel moet falen", /andere goedgekeurde voorstellen voor deze buffer: #3 /);
+      expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }), 1, "oud goedgekeurd voorstel moet falen", /ongeacht de inhoud: #3 \(Approved\)/);
     });
 
     it("groen: #15 alleen Active (niet goedgekeurd) naast het goedgekeurde, laatste #16", async () => {
       const state = timelockState({ latestIndex: 16, proposals: { 15: { status: 1 }, 16: {} } });
       expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }), 0, "een open, niet-goedgekeurd voorstel blokkeert uitvoeren niet", /TIMELOCK VERSTREKEN/);
+    });
+  });
+
+  describe("sectie 169 (review §168 M-1/M-2): geen enkel ander voorstel Approved of Executing, ongeacht de inhoud", () => {
+    const OTHER = /andere goedgekeurde of lopende voorstellen \(Approved\/Executing\), ongeacht de inhoud: #15 \((Approved|Executing)\)/;
+    const cases: [string, ProposalOpts][] = [
+      ["B: #15 goedgekeurd, Upgrade met één extra byte in de instructiedata (loader accepteert dat)", { upgradeDataSuffix: Buffer.from([0]) }],
+      ["C: #15 goedgekeurd, Upgrade van hetzelfde programma vanaf een andere buffer", { buffer: OLD_BUFFER }],
+      ["#15 is een goedgekeurde Batch", { kind: "batch" }],
+      ["#15 is een Batch in uitvoering (Executing)", { kind: "batch", status: 4 }],
+      ["#15 is een goedgekeurde ConfigTransaction (SetTimeLock 0)", { kind: "config" }],
+    ];
+    for (const [name, other] of cases) {
+      it(`${name}, #16 schoon en het laatste: exit 1`, async () => {
+        const state = timelockState({ latestIndex: 16, proposals: { 15: other, 16: {} } });
+        expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }), 1, `${name} moet falen`, OTHER);
+      });
+    }
+
+    it("ook stale: goedgekeurde Upgrade #3 vanaf een andere buffer (staleTransactionIndex 10): exit 1", async () => {
+      const state = timelockState({ latestIndex: 16, staleIndex: 10, proposals: { 3: { buffer: OLD_BUFFER }, 16: {} } });
+      expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "16" }), 1, "stale goedgekeurd voorstel moet falen", /ongeacht de inhoud: #3 \(Approved\)/);
+    });
+
+    it("groen: de echte devnet-stand (Active-, Executed-, Cancelled- en Rejected-restanten) plus een schone, goedgekeurde #15", async () => {
+      const state = timelockState({ latestIndex: 15, proposals: devnetLikeProposals(15) });
+      expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "15" }), 0, "de devnet-stand mag niet blokkeren", /TIMELOCK VERSTREKEN/);
     });
   });
 

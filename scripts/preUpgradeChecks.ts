@@ -22,9 +22,10 @@ import * as path from "path";
 // weigeren een andere cluster dan devnet volgens de genesis-hash die de RPC
 // opgeeft (geen absolute garantie tegen een devnet-fork-simulator).
 //
-// Sectie 168 (review §167): stap 1 toetst ook dat geen ander goedgekeurd
-// voorstel deze buffer raakt (dezelfde regel als knop 4 van de adminpagina)
-// en de buffer zelf (authority de vault, sha256 = de RC-build).
+// Sectie 168 (review §167): stap 1 toetst ook de buffer zelf (authority de
+// vault, sha256 = de RC-build), met dezelfde voorstelregel als knop 4 van de
+// adminpagina. Sectie 169 (review §168): die regel eist dat geen enkel ander
+// voorstel op Approved of Executing staat, welke inhoud ook.
 //
 // Leesalleen; stuurt nooit een transactie.
 //
@@ -44,7 +45,7 @@ interface Step {
 }
 
 const TIMELOCK: Step = {
-  name: "timelock verstreken, enige goedgekeurde en laatste voorstel, precies deze upgrade en buffer",
+  name: "timelock verstreken, laatste voorstel, geen ander uitvoerbaar voorstel, precies deze upgrade en buffer",
   script: "scripts/checkProposalTimelock.ts",
   args: [],
 };

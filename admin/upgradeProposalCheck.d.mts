@@ -7,6 +7,9 @@ export declare const BPF_LOADER_UPGRADEABLE: string;
 export declare const PROPOSAL_STATUS_NAMES: string[];
 export declare const ACTIVE_TAG: number;
 export declare const APPROVED_TAG: number;
+export declare const EXECUTING_TAG: number;
+/** Approved en Executing: statussen waarin Squads een voorstel (nog) uitvoert (sectie 169). */
+export declare const EXECUTABLE_TAGS: number[];
 
 export interface KeyLike {
   equals(other: KeyLike): boolean;
@@ -88,7 +91,10 @@ export interface SelectedProposal<K> {
 
 export interface Selection<K> {
   target: SelectedProposal<K> | null;
+  /** Open (Active/Approved) voorstellen voor deze buffer: alleen de duplicaat-melding. */
   candidates: Candidate[];
+  /** Andere voorstellen dan het laatste op Approved of Executing, welke inhoud ook (sectie 169): blokkeren knop 3 en 4. */
+  blockers: Candidate[];
   problems: string[];
 }
 

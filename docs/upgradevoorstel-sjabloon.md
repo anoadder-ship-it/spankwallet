@@ -35,7 +35,8 @@ L-1), op basis van de pre-flight uit sectie 94 en de verificaties uit sectie 95.
    het voorstel.
 6. Voorstel aanmaken en goedkeuren via `admin/wallet-signer.html` (twee van de drie leden).
    Knop 3 keurt alleen het laatste voorstel goed, en alleen als het het enige open voorstel
-   voor deze buffer is en precies de upgrade (sectie 168).
+   voor deze buffer is, geen enkel ander voorstel Approved of Executing is (welke inhoud
+   ook), en het precies de upgrade is (sectie 168/169).
 
 ## 2. Pre-flight, direct vóór het uitvoeren (volgorde verplicht)
 
@@ -45,8 +46,9 @@ L-1), op basis van de pre-flight uit sectie 94 en de verificaties uit sectie 95.
      - devnet volgens de genesis-hash. Die hash geeft de RPC zelf op: de controle weert een
        verkeerde URL of een lokale test-validator, maar is geen absolute garantie tegen een
        simulator die devnet forkt;
-     - `<n>` is het laatste voorstel, niet stale, en het enige goedgekeurde voorstel dat
-       deze buffer raakt (alle voorstellen 1..`<n>` gelezen, ook stale). De regel komt uit
+     - `<n>` is het laatste voorstel en niet stale, en **geen enkel ander voorstel staat op
+       Approved of Executing**, welke inhoud ook: VaultTransaction, Batch of Config (alle
+       voorstellen 1..`<n>` gelezen, ook stale; sectie 169). De regel komt uit
        `admin/upgradeProposalCheck.mjs`, dezelfde module als knop 4;
      - de VaultTransaction is precies de upgrade van dit programma vanaf `EXPECTED_BUFFER`,
        met de vault als authority en spill;

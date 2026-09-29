@@ -46,6 +46,9 @@ import { bufferProblems } from "./lib/upgradeBuffer";
 //   1..transactionIndex worden gelezen (ook stale), en precies één
 //   goedgekeurd voorstel mag deze buffer raken - het laatste. Een groen
 //   script gaat zo over precies het voorstel dat knop 4 uitvoert.
+// - Sectie 169 (review §168, M-1/M-2): "raakt deze buffer" was te smal als
+//   grens. Nu mag GEEN ENKEL ander voorstel op Approved of Executing staan,
+//   welke inhoud ook (VaultTransaction, Batch, Config).
 // - M-B: de buffer zelf wordt gelezen: van de loader, authority = de vault,
 //   sha256 van het programma = de RC-build, rest nul (scripts/lib/upgradeBuffer.ts).
 //
@@ -128,7 +131,7 @@ async function main() {
   console.log(`Proposal #${TRANSACTION_INDEX}: status=${target.statusName}, goedgekeurd op unix=${approvedAtUnix} (${new Date(Number(approvedAtUnix) * 1000).toISOString()})`);
   console.log(
     `VaultTransaction #${TRANSACTION_INDEX}: alleen Upgrade van ${PROGRAM_ID.toBase58()} vanaf buffer ${EXPECTED_BUFFER.toBase58()}, authority en spill de vault; ` +
-      `geen ander goedgekeurd voorstel voor deze buffer (voorstellen 1..${multisig.transactionIndex} gelezen).`
+      `geen enkel ander voorstel Approved of Executing, welke inhoud ook (voorstellen 1..${multisig.transactionIndex} gelezen).`
   );
 
   // --- De buffer zelf: inhoud en authority ---

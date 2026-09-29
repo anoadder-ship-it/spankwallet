@@ -724,12 +724,17 @@
       // - STATUS.md sectie 168: EEN regel, uit admin/upgradeProposalCheck.mjs,
       //   dezelfde module als scripts/checkProposalTimelock.ts. Alle voorstellen
       //   1..transactionIndex worden gelezen (ook stale: Squads voert een
-      //   goedgekeurde vault-transactie ook stale uit). Knop 4: precies EEN
-      //   goedgekeurd voorstel raakt deze buffer, dat is het laatste, en het is
-      //   precies de upgrade; anders weigert de knop. Knop 3: idem met "open"
-      //   (Active/Approved). Knop 2: elk open voorstel voor deze buffer
-      //   blokkeert zonder bevestigingsvakje; een onleesbaar voorstel
-      //   blokkeert altijd (fail-closed).
+      //   goedgekeurde vault-transactie ook stale uit).
+      // - STATUS.md sectie 169 (review §168, M-1/M-2): "raakt deze buffer" was
+      //   als grens te smal (een Upgrade met een extra byte, een andere buffer
+      //   voor hetzelfde programma, een Batch bleven onzichtbaar). Nu:
+      //   knop 4 alleen als het laatste voorstel goedgekeurd, niet stale en
+      //   precies de upgrade is, EN geen enkel ander voorstel op Approved of
+      //   Executing staat, welke inhoud ook. Knop 3: het laatste voorstel is
+      //   open (Active/Approved), dezelfde eis over andere voorstellen, en geen
+      //   ander Active-voorstel voor deze buffer. Knop 2: elk open voorstel
+      //   voor deze buffer blokkeert zonder bevestigingsvakje. Een onleesbaar
+      //   voorstel blokkeert altijd (fail-closed).
       async function selectUpgradeProposal(purpose) {
         return upgradeCheck.loadAndSelect(connection, { multisigAddress: MULTISIG_PDA, expected: EXPECTED_UPGRADE, purpose });
       }
@@ -748,13 +753,25 @@
       }
 
       // Toont meteen bij verbinden welke voorstellen voor deze buffer open
-      // staan en welk nummer bij de pre-flight hoort.
+      // staan, welke andere voorstellen knop 3/4 blokkeren, en welk nummer
+      // bij de pre-flight hoort. Sectie 169 (review §168, I-1): de teksten
+      // zeggen precies wanneer welke knop weigert.
       async function logCurrentProposalStatus() {
         await showPreflightTransactionIndex();
         try {
-          const { candidates, problems } = await selectUpgradeProposal("propose");
+          const { candidates, blockers, problems } = await selectUpgradeProposal("propose");
           if (problems.length > 0) {
             log("[waarschuwing] Niet elk voorstel was te lezen of te controleren: " + problems.join("; ") + ". Knoppen 2/3/4 weigeren tot dit opgelost is.", "log-error");
+          }
+          if (blockers.length > 0) {
+            log(
+              "[waarschuwing] Uitvoerbare voorstellen naast het laatste: #" +
+                blockers.map((b) => b.index + " (" + b.statusName + ")").join(", #") +
+                ". Knop 3 en knop 4 weigeren zolang er naast het laatste voorstel ook maar één ander voorstel " +
+                "Approved of Executing is, wat er ook in staat. Voer het NIET uit; annuleer het eerst (Squads proposalCancel, " +
+                "niet via deze pagina).",
+              "log-error"
+            );
           }
           if (candidates.length === 0) {
             log("[info] Geen open voorstel gevonden voor deze buffer. Knop 2 zou een NIEUW voorstel aanmaken.");
@@ -764,7 +781,8 @@
             log(
               "[waarschuwing] " + candidates.length + " open voorstellen voor deze buffer: #" +
                 candidates.map((c) => c.index + " (" + c.statusName + ")").join(", #") +
-                ". Knoppen 3/4 weigeren zolang er meer dan een is; wijs de overbodige af met knop 5.",
+                ". Knop 3 weigert zolang er meer dan één open voorstel voor deze buffer is; wijs de overbodige " +
+                "Active-voorstellen af met knop 5. Knop 4 weigert zodra een ander dan het laatste voorstel Approved is.",
               "log-error"
             );
             return;
@@ -1083,8 +1101,9 @@
         return proposal;
       }
 
-      // Sectie 168: alleen het laatste voorstel, als het het enige open
-      // voorstel voor deze buffer is en precies de upgrade - nooit een
+      // Sectie 168/169: alleen het laatste voorstel, als het het enige open
+      // voorstel voor deze buffer is, geen ander voorstel Approved/Executing
+      // is (welke inhoud ook) en het precies de upgrade is - nooit een
       // voorstel goedkeuren dat de pre-flight daarna zou weigeren.
       async function buildApproveTx() {
         const { target, problems } = await selectUpgradeProposal("approve");
@@ -1401,8 +1420,9 @@
         // nooit stilzwijgend een nieuw voorstel aanmaken als er al een
         // open (Active/Approved) voorstel voor deze buffer bestaat. Alleen
         // doorgaan met een expliciete, aparte bevestiging (checkbox).
-        // Sectie 168: een tweede open voorstel laat knoppen 3/4 weigeren tot
-        // er weer precies één is (de overbodige afwijzen met knop 5).
+        // Sectie 168/169: een tweede Active-voorstel voor deze buffer laat
+        // knop 3 weigeren tot er weer precies één is (de overbodige afwijzen
+        // met knop 5); elk ander Approved-voorstel laat knop 3 en 4 weigeren.
         const { candidates, problems } = await selectUpgradeProposal("propose");
         const forceCheckbox = document.getElementById("force-new-proposal-checkbox");
         const checkboxWasChecked = forceCheckbox.checked;
@@ -1424,13 +1444,15 @@
           throw new Error(
             "Er bestaat al een open voorstel voor deze buffer: " + openList + ". Gebruik knop 3/4 op DAT " +
               "voorstel. Vink het bevestigingsvakje hierboven aan als je bewust toch een NIEUW, apart voorstel " +
-              "wilt aanmaken; knoppen 3/4 weigeren dan tot de andere afgewezen zijn (knop 5)."
+              "wilt aanmaken; knop 3 weigert dan tot de andere Active-voorstellen afgewezen zijn (knop 5), " +
+              "en knop 3 en 4 weigeren zolang een ander voorstel Approved is (eerst annuleren)."
           );
         }
         if (candidates.length > 0 && checkboxWasChecked) {
           log(
             "[waarschuwing] Bewust een NIEUW voorstel aangemaakt terwijl " + openList +
-              " al open staat (bevestigingsvakje was aangevinkt). Knoppen 3/4 weigeren tot er weer precies één open voorstel is.",
+              " al open staat (bevestigingsvakje was aangevinkt). Knop 3 weigert tot er weer precies één open voorstel " +
+                "voor deze buffer is; knop 3 en 4 weigeren zolang een ander voorstel Approved is.",
             "log-error"
           );
         }

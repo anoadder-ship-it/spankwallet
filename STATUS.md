@@ -16888,3 +16888,26 @@ Aanvulling op punt 5 (open voor upgrade 2, niet blokkerend voor upgrade 1):
   lange scan. L-3 dekt alleen de afwijkende instellingen. Een bovengrens of een
   terugcontrole op de header (zie I-1 van §169, punt 5) sluit dat;
 - de Alpenglow-marge van de tijdstempel meten (§156), en de 72u-redenering daarop toetsen.
+
+### 8. Aanvulling: de buffers van de Active-restanten #1-4, 6 en 7 (2026-09-30)
+
+Read-only op devnet (genesis `EtWT…`, `api.devnet.solana.com`, commitment finalized). Per
+voorstel de VaultTransaction gedecodeerd met de gedeelde module, en `getAccountInfo` op de
+buffer uit de Upgrade-instructie.
+
+| Voorstel | Status | Instructies | Upgrade (opcode 3) van | Buffer | `getAccountInfo` |
+|---|---|---|---|---|---|
+| #1, 2, 3, 4, 6, 7 | Active | 1 | `9ma6vQVA…` | `7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh` | **bestaat niet** |
+
+Alle zes wijzen naar dezelfde gesloten buffer. Geen enkele bestaat nog, dus er is geen grootte
+of authority te melden. Dit bevestigt de bewering in punt 6 (daar nog "vandaag niet opnieuw
+gelezen").
+
+**Kanttekening: gesloten is niet voorgoed onschuldig.** Een buffer staat op het adres van een
+keypair. Wie het keypair van `7jvi…` nog heeft, kan op hetzelfde adres opnieuw een buffer
+aanmaken, met de vault als authority en willekeurige code. Daarna maken twee goedkeuringen
+plus 72u van zo'n "onschuldig" restant een echte upgrade. Dat vergt nog steeds twee leden,
+maar het oude voorstel oogt dan onschuldig, en na de goedkeuring blokkeert het bovendien
+knop 3/4 en de pre-flight (§169). Afwijzen met knop 5 sluit dit definitief. Dat staat al als
+open punt in §169 punt 9 en in punt 6 hierboven, en krijgt hiermee een tweede reden. Of het
+keypair van `7jvi…` nog ergens bestaat, is niet nagegaan.

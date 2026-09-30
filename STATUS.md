@@ -17538,3 +17538,53 @@ Verwerkt (alleen documentatie):
   geldt bij een eerste terugkeer alleen voor de URL).
 
 Geen tests gedraaid: er is geen code gewijzigd.
+
+## 175. Aanvulling: Solflare-sessies, CodeQL #11 en de stand van de oude voorstellen (2026-09-30)
+
+**Buffer upgrade 1 geschreven.** `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5` bevat de
+RC-binary (eerste 737.080 bytes na de kop van 37 bytes sha `33598b3d…`, geen rest), authority
+nog G1qg; niet overgedragen (dat volgt na de afwijzingen hieronder). Het canonieke programma is
+ongewijzigd (slot 501303135). Terugvalpunt: `rollback/` in de privénotities, eerste 653.256
+bytes sha `4187b809…`.
+
+**CodeQL.** #11 (`js/clear-text-storage-of-sensitive-data`, `wallet-signer.html:483`) afgewezen
+als false positive: CodeQL beschouwt na `JSON.parse` het hele opgeslagen deep-link-object als
+gevoelig; op die regel staan alleen `action` (vaste lijst), `transactionIndex`, `signature`
+(openbare tx-signature) en `savedAt` (getest met sleutel, gedeeld geheim en sessietoken in de
+state). Open alerts: 0. De toelichting van #9 (won't fix, 2026-08-30) kon niet worden
+bijgewerkt: GitHub weigert dat voor een al afgewezen alert ("Alert is already dismissed");
+ongewijzigd gelaten.
+
+**Solflare-sessies** (documentatie van Solflare, deeplinks):
+- een sessie verloopt niet ("Sessions do not expire"); alleen `disconnect` maakt haar ongeldig.
+  De 30-minutentermijn van de pagina wist alleen de lokale kopie (dapp-sleutel, gedeeld
+  geheim, sessietoken); bij Solflare blijft de sessie geldig;
+- de pagina roept nergens `disconnect` aan; elke verse verbinding per actie maakt een nieuwe
+  sessie, de oude blijven geldig. Wie de opslag ooit kopieerde, kan tot een disconnect geldige
+  versleutelde verzoeken maken en de antwoorden ontsleutelen;
+- de documentatie spreekt van "ask the user for permission" per transactie;
+- **niet vastgesteld:** of Solflare elk ondertekenverzoek altijd aan de gebruiker voorlegt
+  (de docs zeggen dat niet letterlijk); of Solflare de `redirect_link` toetst aan de `app_url`
+  van de sessie; of de gebruiker sessies zelf kan intrekken. Niet getest (kan met een
+  wegwerp-wallet). Alleen devnet. Geen codewijziging (pagina bevroren, §173).
+
+**Oude voorstellen, stand 2026-09-30 19:17 UTC** (slot 506008397; alleen lezen, script
+`voorstellen.mjs` in de privénotities, dezelfde regel als de pagina):
+- #1 en #2 Active, één goedkeuring van `3zZc…`; #3 en #4 Active, één goedkeuring van
+  `CP2f…`; #6 en #7 Active, geen stemmen. Eerder aangenomen "0 stemmen" klopt dus alleen
+  voor #6 en #7: bij #1-4 maakt één extra goedkeuring het voorstel Approved (blocker voor
+  knop 3/4 en de pre-flight, §169; zie ook de kanttekening over buffer `7jvi…`, §170 punt 8);
+- #5, 10, 11, 13 Executed; #8 Cancelled; #9, 12, 14 Rejected; #15 bestaat niet;
+- `transactionIndex` 14, threshold 2, time_lock 259200 s, stale 0; geen blockers.
+
+**Verdeling van de zes afwijzingen** (knop 5; afwijzen vraagt 2 van de 3 stemmen), zo dat
+geen lid een eigen goedkeuring hoeft te herroepen:
+
+| Lid | Wijst af |
+|---|---|
+| `2jDz…` | #1, 2, 3, 4, 6, 7 |
+| `3zZc…` | #3, 4, 6, 7 |
+| `CP2f…` | #1, 2 |
+
+**Niet vastgesteld:** of een lid dat een voorstel al goedkeurde, het daarna nog kan afwijzen
+(of Squads v4 de goedkeuring dan vervangt). De verdeling hierboven hangt daar niet van af.

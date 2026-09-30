@@ -167,6 +167,29 @@ describe("pre-flight-logica op echte devnet-bytes (STATUS.md sectie 167)", () =>
           assert.deepEqual(multisigSettingsProblems(threshold(t)), []);
         });
       }
+
+      // Sectie 171 (review §170, punt 2): een eigen grenstest voor config_authority (32 bytes op
+      // offset 40, na de create_key). Alleen de standaardsleutel 111…1 (alle bytes nul) is autonoom.
+      const configAuthority = (key: Uint8Array) => header((b) => b.set(key, 40));
+      const oneBit = new Uint8Array(32);
+      oneBit[31] = 1;
+      const others: [string, PublicKey][] = [
+        ["één bit naast de standaardsleutel", new PublicKey(oneBit)],
+        ["de vault", VAULT],
+        ["de multisig zelf", MULTISIG],
+        ["een willekeurige sleutel", BUFFER_13],
+      ];
+      for (const [name, key] of others) {
+        it(`config_authority ${name}: afwijking`, () => {
+          assert.deepEqual(multisigSettingsProblems(configAuthority(key.toBytes())), [
+            `multisig: config_authority ${key.toBase58()}, verwacht 11111111111111111111111111111111 (autonome multisig)`,
+          ]);
+        });
+      }
+      it("config_authority de standaardsleutel: geen afwijking, ook met een andere create_key ervoor", () => {
+        assert.deepEqual(multisigSettingsProblems(configAuthority(PublicKey.default.toBytes())), []);
+        assert.deepEqual(multisigSettingsProblems(header((b) => b.set(BUFFER_13.toBytes(), 8))), []);
+      });
     });
 
     it("de vault-PDA volgt uit de multisig (seeds uit @sqds/multisig src/pda.ts)", () => {

@@ -132,8 +132,10 @@ function fakeConnection(accounts: Map<string, FakeAccount>, scans: { count: numb
       return { context, value: addresses.map(info) };
     },
     getLatestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 1 }),
-    // Alleen voor de controle dat knop 2 met de juiste instellingen wél verstuurt (review §170, L-2).
+    // Alleen voor de controle dat knop 2 met de juiste instellingen wél verstuurt (review §170, L-2),
+    // en voor de bevestiging van knop 2-5 (sectie 171). Standaard: geland, zonder fout.
     confirmTransaction: async () => ({ context, value: { err: null } }),
+    getSignatureStatuses: async () => ({ context, value: [{ slot: context.slot, confirmations: null, confirmationStatus: "confirmed", err: null }] }),
   };
 }
 
@@ -179,6 +181,10 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
       getElementById: (id: string) => (elements[id] ??= element()),
       createElement: () => element(),
     },
+    // Voor clearDeeplinkSecretState() aan het eind van knop 2-5 (sectie 171).
+    localStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined },
+    DEEPLINK_STORAGE_KEY: "test-deeplink",
+    deeplinkExpiryTimer: null,
   };
   // De gedeelde module zoals de pagina hem na het laden heeft (sectie 168).
   // Bestaat hij nog niet, dan draait de oude paginacode zonder.
@@ -468,6 +474,104 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
       }
       assert.match(out.entries, /^multisig-instellingen wijken af: multisig: time_lock 0 s/);
       assert.strictEqual(out.scans, 0);
+    });
+  });
+
+  // Sectie 171 (review §170, M-1): confirmTransaction gooit niet als de transactie on-chain
+  // mislukt. Via de websocket-route komt het antwoord binnen als { value: { err } }. De pagina
+  // meldde dan "Bevestigd." en "SUCCES". Geen enkele knop mag succes melden tenzij err null bleek.
+  describe("sectie 171 (review §170 M-1): een mislukte transactie is nooit een succes", () => {
+    const FAILED = { InstructionError: [0, { Custom: 6008 }] };
+    const FAILED_TEXT = JSON.stringify(FAILED);
+    const context = { slot: 500_000_000 };
+    const status = (err: unknown) => async () => ({ context, value: [{ slot: context.slot, confirmations: null, confirmationStatus: "confirmed", err }] });
+    // Websocket-route: confirmTransaction lost op met value.err; de RPC zegt hetzelfde.
+    const failedTx = { confirmTransaction: async () => ({ context, value: { err: FAILED } }), getSignatureStatuses: status(FAILED) };
+    const devnetNow = (): Record<number, ProposalOpts> => ({ ...devnetLikeProposals(14), 14: { status: 2, buffer: OLD_BUFFER } });
+    const SUCCESS_WORDS = /SUCCES|Bevestigd|alsnog bevestigd geland|GELAND/;
+
+    // [knop, functie, argumenten, stand]
+    const buttons: [string, string, unknown[], SquadsOpts][] = [
+      ["knop 2 (geen open voorstel)", "finishPropose", ["SIG171"], { latestIndex: 14, proposals: devnetNow() }],
+      ["knop 2 (er staat al een voorstel open voor de buffer)", "finishPropose", ["SIG171"], { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
+      ["knop 3", "finishApprove", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
+      ["knop 4", "finishSquadsExecute", ["SIG171"], { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 5", "finishReject", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
+    ];
+
+    for (const [name, fn, args, state] of buttons) {
+      it(`${name}: mislukte transactie (websocket-route): geen succes, wel MISLUKT met de fout`, async () => {
+        const page = await loadPage(state, failedTx);
+        const why = await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+        assert.include(why, FAILED_TEXT);
+      });
+
+      it(`${name}: websocket zegt mislukt, de RPC zegt geland zonder fout: tegenstrijdig, dus geen succes`, async () => {
+        const page = await loadPage(state, { ...failedTx, getSignatureStatuses: status(null) });
+        const why = await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+        assert.include(why, FAILED_TEXT);
+      });
+
+      // De eenmalige statuscontrole in confirmTransaction gooit de transactiefout zelf (geen Error).
+      it(`${name}: confirmTransaction gooit de transactiefout zelf, de RPC zegt geland zonder fout: geen succes`, async () => {
+        const page = await loadPage(state, {
+          confirmTransaction: async () => {
+            throw FAILED;
+          },
+          getSignatureStatuses: status(null),
+        });
+        const why = await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+        assert.include(why, FAILED_TEXT);
+      });
+
+      it(`${name}: timeout, daarna blijkt de transactie mislukt: geen succes`, async () => {
+        const page = await loadPage(state, {
+          confirmTransaction: async () => {
+            throw new Error("bevestiging verlopen (test)");
+          },
+          getSignatureStatuses: status(FAILED),
+        });
+        const why = await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+      });
+    }
+
+    // Controle: de tests hierboven zien het succespad wel. Met err null op beide routes meldt
+    // elke knop succes (knop 2 zonder open voorstel vooraf: de stand ná het voorstel is #15).
+    const succeeded: [string, string, unknown[], SquadsOpts][] = [
+      ["knop 2", "finishPropose", ["SIG171"], { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
+      ["knop 3", "finishApprove", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 4", "finishSquadsExecute", ["SIG171"], { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 5", "finishReject", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: { status: 2 } } }],
+    ];
+    for (const [name, fn, args, state] of succeeded) {
+      it(`controle, ${name}: gelukt (err null op beide routes): meldt SUCCES`, async () => {
+        const page = await loadPage(state);
+        await page.fns[fn](...args);
+        assert.match(page.logs.join("\n"), /^SUCCES/m);
+      });
+    }
+
+    it("één plek beslist: confirmTransaction en getSignatureStatuses elk één keer, awaitConfirmation alleen in knop 2-5", () => {
+      const src = moduleScript(PAGE);
+      assert.lengthOf([...src.matchAll(/connection\.confirmTransaction\(/g)], 1);
+      assert.lengthOf([...src.matchAll(/connection\.getSignatureStatuses\(/g)], 1);
+      const callers = [...src.matchAll(/await awaitConfirmation\(/g)].map((m) => {
+        const before = src.slice(0, m.index);
+        return before.slice(before.lastIndexOf("async function ")).match(/^async function (\w+)/)![1];
+      });
+      assert.sameMembers(callers, ["finishPropose", "finishApprove", "finishReject", "finishSquadsExecute"]);
     });
   });
 

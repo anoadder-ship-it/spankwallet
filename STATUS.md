@@ -16911,3 +16911,158 @@ maar het oude voorstel oogt dan onschuldig, en na de goedkeuring blokkeert het b
 knop 3/4 en de pre-flight (§169). Afwijzen met knop 5 sluit dit definitief. Dat staat al als
 open punt in §169 punt 9 en in punt 6 hierboven, en krijgt hiermee een tweede reden. Of het
 keypair van `7jvi…` nog ergens bestaat, is niet nagegaan.
+
+## 171. Reparatie van review §170 M-1: een mislukte transactie is nooit een succes (2026-09-30)
+
+Review van §170 (`9e51a5b`) door een verse sessie, 2026-09-30. Oordeel over de poort zelf: de
+instellingencontrole draait vóór de scan, en de tests pinnen elke eis vast (acht mutaties, alle
+rood). Eén middelgrote bevinding lag buiten de poort, in de bevestiging van de adminpagina:
+
+- **M-1** `awaitConfirmation` deed `await connection.confirmTransaction(signature, "confirmed")`
+  en ging daarna uit van een gelukte transactie. De gevendorde web3 gooit alleen als de
+  eenmalige statuscontrole een fout vindt. Via de websocket-route (`onSignature`) lost hij op
+  met `{ value: { err } }`, zonder te gooien. Dat is de gewone route als de transactie nog
+  niet bevestigd is wanneer de pagina gaat luisteren. Een mislukte uitvoering (knop 4) werd
+  zo "Bevestigd." en "SUCCES - uitgevoerd". `--post` vangt dat wel op
+  (`scripts/lib/programDeploySlot.ts`: `status.err !== null`);
+- **L-1** geen bovengrens op de scan bij correcte instellingen; **L-2** geen terugcontrole van
+  de multisig-header; **I-1** de volgorde script-dan-knop-4 rust op de bediener; **I-2** na
+  een deep-link koppelt de pagina de signature niet aan de inhoud van de verstuurde
+  transactie. L-1, L-2 en I-2 staan open voor upgrade 2 (punt 6); I-1 staat nu in de
+  documentatie (punt 4).
+
+Geen wijziging aan het programma of aan de gedeelde module `admin/upgradeProposalCheck.mjs`.
+
+### 1. De reparatie (`admin/wallet-signer.html`)
+
+- `awaitConfirmation` is de enige plek die beslist of een transactie gelukt is. Na
+  `confirmTransaction` (opgelost of gegooid) vraagt `pollSignatureStatus` **altijd** de exacte
+  signature op (`getSignatureStatuses`, met `searchTransactionHistory`). Uitkomst:
+  - `success`: de RPC ziet de signature op confirmed/finalized met `err === null`, en
+    `confirmTransaction` meldde geen fout;
+  - `failed`: `value.err` van `confirmTransaction` is niet null, of `confirmTransaction` gooide
+    de transactiefout zelf (geen `Error`-object), of de RPC ziet een fout. Bij tegenspraak
+    tussen de twee routes wint de fout (fail-closed);
+  - `unknown`: niet gezien binnen de pogingen.
+  "Bevestigd" en "alsnog bevestigd geland" logt alleen `awaitConfirmation`, en alleen bij
+  `success`;
+- `requireLanded(result, signature, knop)` gooit bij `failed` ("Transactie … is on-chain
+  MISLUKT: <err>") en bij `unknown` ("kon niet vaststellen … controleer handmatig"). Knop 3, 4
+  en 5 roepen hem aan vóór hun "SUCCES";
+- knop 2 (`finishPropose`) herleest bij elke uitkomst behalve `success` zonder time-out de
+  voorstellen van de keten, zoals voorheen alleen na een time-out. Een open voorstel voor de
+  buffer telt dan niet meer als bewijs dat deze transactie landde: bij `failed` meldt hij
+  MISLUKT en dat het open voorstel niet van deze transactie is, bij `unknown` "niet
+  vastgesteld". Knop 2 blijft uit zolang er een open voorstel of een onleesbare scan is;
+- de SUCCES-melding van knop 4 zegt er nu bij dat ze geen bewijs is, met de
+  `--post`-opdracht;
+- alle paden lopen hierlangs: de extensie-route (`runProposeAction`, `runApproveAction`,
+  `runExecuteAction`, `runRejectAction`) en de deep-link-route (`resumeDeeplinkIfNeeded`)
+  roepen dezelfde `finishPropose`/`finishApprove`/`finishSquadsExecute`/`finishReject` aan.
+  Een test legt vast dat `confirmTransaction` en `getSignatureStatuses` elk één keer in de
+  pagina voorkomen en dat alleen die vier functies `awaitConfirmation` aanroepen;
+- `PAGE_BUILD` = `2026-09-30T12:00:00Z-sectie-171-bevestiging-controleert-err`.
+
+### 2. Rood vóór groen
+
+Nieuwe tests in `tests/unit/adminPageSelection.ts`. De nep-connectie kan nu een mislukte
+bevestiging geven via de websocket-route (`{ value: { err: { InstructionError: [0, { Custom:
+6008 }] } } }`), en heeft een `getSignatureStatuses`. Per knop (2 zonder en 2 met een open
+voorstel voor de buffer, 3, 4, 5) vier gevallen: websocket en RPC melden de fout;
+tegenspraak (websocket fout, RPC zonder fout); `confirmTransaction` gooit de fout zelf en de
+RPC meldt geen fout; time-out en de RPC meldt de fout. Elk eist: geen "SUCCES", "Bevestigd",
+"alsnog bevestigd geland" of "GELAND" in de log, en een fout met "Transactie SIG171 is
+on-chain MISLUKT" en de fout zelf. Plus vier positieve controles (err null: elke knop meldt
+SUCCES) en de structuurtest uit punt 1.
+
+Tegen de oude pagina: **16 failing**. De websocket-route gaf bij alle vier de knoppen:
+
+| Knop | Log van de oude pagina bij een mislukte transactie |
+|---|---|
+| 2 | `Bevestigd.` / `SUCCES - voorstel status: {"__kind":"Rejected",…}` (het vorige voorstel, #14) |
+| 3 | `Bevestigd.` / `SUCCES - voorstel #15 status: {"__kind":"Active",…}, goedgekeurd door: …` |
+| 4 | `Bevestigd.` / `SUCCES - uitgevoerd. Signature: SIG171` |
+| 5 | `Bevestigd.` / `SUCCES - voorstel #15 status: {"__kind":"Active",…}, afgewezen door: ` |
+
+Knop 2 met een open voorstel meldde bovendien na een time-out en een mislukte transactie
+"De eerdere transactie is dus GELAND". Na de fix: alle groen.
+
+**Mutatiecontrole** (op een kopie buiten de repo, daarna teruggezet en met `cmp` gecontroleerd;
+`yarn test:unit` telde toen 179 tests):
+
+| Mutatie in `awaitConfirmation` / `requireLanded` / `finishPropose` | Failing |
+|---|---|
+| A: `value.err` van `confirmTransaction` genegeerd | 5 (de tegenspraak-tests) |
+| B: `err` van de RPC genegeerd (`status.landed` volstaat) | 5 (time-out-tests) |
+| C: A en B samen: geen enkele err-controle | 15 |
+| D: `requireLanded` keert altijd terug | 9 (knop 3, 4, 5) |
+| E: knop 2 herleest alleen na een time-out (de oude voorwaarde) | 4 |
+| F: een gegooide transactiefout (geen `Error`) genegeerd | 5 |
+
+### 3. config_authority: een eigen grenstest (`tests/unit/preflightLogic.ts`)
+
+Op de echte multisig-bytes met alleen config_authority (32 bytes op offset 40) aangepast:
+één bit naast de standaardsleutel, de vault, de multisig zelf en een willekeurige sleutel
+geven elk precies de melding `multisig: config_authority <sleutel>, verwacht 111…1 (autonome
+multisig)`. De standaardsleutel geeft niets, ook met een andere create_key ervoor. Mutaties in
+de module: de config_authority-eis uit geeft nu **8** failing (was 4, alleen pagina en
+script); config_authority van de create_key-offset lezen geeft 83, waaronder alle vijf
+nieuwe tests.
+
+### 4. Documentatie
+
+`docs/upgradevoorstel-sjabloon.md` (§3) en `admin/README.md`:
+- de volgorde "eerst de pre-flight, dan knop 4" rust op de bediener, niet op de keten: na de
+  72u kan elk lid met Execute-recht buiten de pagina om uitvoeren. Knop 4 controleert
+  bovendien de buffer-inhoud, de genesis-hash en de recovery-invariant niet;
+- de SUCCES-melding van de pagina is geen bewijs; alleen `preUpgradeChecks.ts --post` en de
+  vijf verificaties van sectie 95 tellen;
+- het sjabloon zei dat knop 4 weigert "als het voorstel niet `<n>` is". Dat klopte niet
+  letterlijk: de knop kent `<n>` niet, hij past dezelfde regel toe en logt welk voorstel hij
+  uitvoert. Gecorrigeerd.
+
+### 5. Aanvulling op §170 punt 8: het keypair van buffer `7jvi…`
+
+Lokaal, alleen lezen (2026-09-30): alle bestanden tot 3 KB onder de thuismap (68.902, met
+o.a. `~/.config/solana`, `~/backups`, `~/spankwallet-dev-keys`, de projectmappen en
+`target/deploy`; overgeslagen: `node_modules`, `.git`, caches, toolchains en Python-omgevingen)
+op 64-byte keypairs: een JSON-array of een base58-string van 64 bytes. Van elk keypair
+alleen de publieke helft vergeleken met `7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh`;
+geen geheim is getoond of opgeslagen. 118 keypairs gevonden, **geen enkel met die publieke
+sleutel**. Niet gezocht: grotere bestanden, versleutelde opslag, wallets en andere
+apparaten. Het risico uit punt 8 is daarmee kleiner, niet weg: knop 5 op #1-4, 6 en 7 blijft
+de definitieve afsluiting.
+
+### 6. Open voor upgrade 2 (niet blokkerend voor upgrade 1)
+
+Naast §170 punt 5:
+- **L-1** geen bovengrens op de scan bij correcte instellingen: alle PDA's tot
+  `transactionIndex` worden afgeleid vóór de eerste RPC-aanroep. Faalt veilig (hangt, geeft
+  geen groen);
+- **L-2** geen terugcontrole van de multisig-header (bv. accountlengte tegen het aantal
+  leden); bij een verschoven layout hangt de vroege weigering van toeval af;
+- **I-2** de deep-link-route krijgt de signature van de wallet terug en controleert alleen
+  díe signature, niet of die transactie de instructie bevat die de pagina bouwde
+  (bv. met `getTransaction` en een vergelijking van het bericht).
+
+### 7. Regressie
+
+| Suite | Uitkomst | Baseline (sectie 170) |
+|---|---|---|
+| `cargo test` | 13/0 | 13/0 |
+| `yarn test` | 309 passing, 119 pending, 0 failing | 279/119/0; +30 (25 pagina, 5 config_authority) |
+| `yarn test:pending-action` | 116/0 (1 pending) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 | 117/0 |
+| `yarn test:unit` | 184/0 | 154/0 (+30, idem) |
+
+Typecontrole: strikte `tsc --noEmit` over `checkProposalTimelock.ts`, `preUpgradeChecks.ts`,
+`tests/unit/adminPageSelection.ts` en `tests/unit/preflightLogic.ts`: schoon. `node --check`
+op het module-script van de pagina: schoon. De server op poort 8766 (pid 3936, niet
+herstart) levert `wallet-signer.html` byte-identiek aan de werkmap (sha256 `7a6d5121…`).
+
+### 8. Voor upgrade 1
+
+Ongewijzigd uit §170 punt 6: buffer `F5nh…` schrijven, authority naar de vault, en vlak vóór
+knop 3 nagaan dat geen Active-restant intussen goedgekeurd is. Aanbevolen (punt 5 en §170
+punt 8): de restanten #1-4, 6 en 7 afwijzen met knop 5. Sectie 171 vraagt een review door een
+verse sessie.

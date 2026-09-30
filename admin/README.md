@@ -51,6 +51,16 @@ is `client/` de juiste plek.
    met de reden. Een overbodig voorstel dat nog Active is, wijs je af met knop 5; een
    overbodig goedgekeurd voorstel annuleer je buiten deze pagina (Squads `proposalCancel`)
    en voer je nooit uit om het weg te krijgen (open punt, STATUS.md sectie 168/169).
+
+   Wat de pagina niet afdwingt (STATUS.md sectie 171):
+   - de volgorde "eerst `scripts/preUpgradeChecks.ts --pre`, dan knop 4" rust op de
+     bediener, niet op de keten: na de 72u-timelock kan elk lid met Execute-recht het
+     voorstel buiten deze pagina om uitvoeren. Knop 4 controleert bovendien de
+     buffer-inhoud, de genesis-hash en de recovery-invariant niet; dat doet alleen het script;
+   - "SUCCES" op de pagina betekent alleen dat de RPC de exacte signature zonder fout zag
+     (knop 2-5 beslissen dat op één plek, `awaitConfirmation`). Het is geen bewijs dat de
+     upgrade klopt: alleen `scripts/preUpgradeChecks.ts --post` en de vijf verificaties van
+     STATUS.md sectie 95 tellen.
 5. **Geen enkele private key verlaat ooit een apparaat** - alle drie de ondertekenpaden
    (Wallet Standard, Mobile Wallet Adapter, Solflare-deep-link) laten de wallet-extensie of
    -app zelf ondertekenen. Dit was een expliciete eis bij de echte migratie (in

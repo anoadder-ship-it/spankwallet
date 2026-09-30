@@ -88,9 +88,21 @@ oude binary. Bij twijfel stap 1 opnieuw.
 
 ## 3. Uitvoeren
 
-Knop 4 op `admin/wallet-signer.html`. De knop past dezelfde regel toe als stap 1 en weigert
-als het voorstel dat hij zou uitvoeren niet `<n>` is (sectie 168). Uitvoertransactie
-noteren.
+Knop 4 op `admin/wallet-signer.html`. De knop past dezelfde selectieregel toe als stap 1
+(sectie 168) en logt vooraf welk voorstel hij uitvoert: controleer zelf dat dat `<n>` is. De
+knop kent het `<n>` van stap 1 niet, en controleert de buffer-inhoud, de genesis-hash en de
+recovery-invariant niet; dat doet alleen stap 1. Uitvoertransactie noteren.
+
+Wat de keten **niet** afdwingt (sectie 171):
+- **De volgorde "eerst stap 1, dan knop 4" rust op de bediener.** Na de 72u kan elk lid met
+  Execute-recht het goedgekeurde voorstel uitvoeren buiten deze pagina en de pre-flight om
+  (Squads-app, CLI, eigen transactie). De inhoud is dan wel dezelfde (een VaultTransaction
+  is onveranderlijk), maar de controles van stap 1 zijn dan niet gedaan. Spreek vooraf af wie
+  uitvoert, en dat niemand anders dat doet.
+- **De SUCCES-melding van de pagina is geen bewijs.** Sinds sectie 171 meldt de pagina alleen
+  succes als de RPC de exacte signature zonder fout ziet, maar dat zegt niets over de
+  nieuwe code of de staat erna. Alleen §4 telt: `preUpgradeChecks.ts --post` met exit 0 en
+  de vijf verificaties van sectie 95.
 
 ## 4. Direct ná het uitvoeren
 

@@ -98,7 +98,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-09-30T00:00:00Z-sectie-170-multisig-instellingen";
+      var PAGE_BUILD = "2026-09-30T12:00:00Z-sectie-171-bevestiging-controleert-err";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -621,23 +621,66 @@
       // weet - en gooit alleen een fout als er na herhaalde controle
       // daadwerkelijk iets mis is, nooit uitsluitend omdat de EERSTE
       // controle traag was.
+      //
+      // Sectie 171 (review §170, M-1): dit is de ENIGE plek die bepaalt of een
+      // transactie gelukt is. confirmTransaction gooit NIET als de transactie
+      // on-chain mislukt: via de websocket-route lost hij op met
+      // { value: { err } }, en de pagina meldde dan "Bevestigd." en "SUCCES".
+      // Daarom telt zijn antwoord nooit als succes. Na confirmTransaction
+      // (opgelost of gegooid) vraagt pollSignatureStatus altijd de exacte
+      // signature op. Uitkomst:
+      // - "success": de RPC ziet de signature confirmed/finalized met err null,
+      //   en confirmTransaction meldde geen fout;
+      // - "failed": een fout op een van beide routes (ook bij tegenspraak:
+      //   fail-closed);
+      // - "unknown": niet gezien binnen de pogingen.
+      // Een knop logt pas "SUCCES" na requireLanded (hieronder) of na een
+      // expliciete controle op outcome === "success".
       async function awaitConfirmation(signature, onTimeoutDetected) {
+        let timedOut = false;
+        let confirmErr = null;
         try {
-          await connection.confirmTransaction(signature, "confirmed");
-          log("Bevestigd.");
-          return { timedOut: false, landed: true, err: null };
+          const response = await connection.confirmTransaction(signature, "confirmed");
+          if (response && response.value && response.value.err != null) confirmErr = response.value.err;
         } catch (err) {
+          timedOut = true;
+          // De eenmalige statuscontrole binnen confirmTransaction gooit de
+          // transactiefout zelf (geen Error-object): dat is een mislukking,
+          // geen time-out.
+          if (err != null && !(err instanceof Error)) confirmErr = err;
           log(
-            "De transactie is verstuurd (signature " + signature + "), maar de bevestiging duurt " +
-              "langer dan verwacht. Ik controleer dit nu rechtstreeks bij de RPC - klik niet opnieuw " +
+            "De transactie is verstuurd (signature " + signature + "), maar confirmTransaction gaf geen " +
+              "bevestiging (time-out of fout). Ik controleer dit nu rechtstreeks bij de RPC - klik niet opnieuw " +
               "terwijl dit loopt.",
             "log-error"
           );
-          log("[debug] confirmTransaction gaf: " + (err && err.message ? err.message : String(err)), "log-debug");
+          log("[debug] confirmTransaction gaf: " + (err && err.message ? err.message : JSON.stringify(err)), "log-debug");
           if (onTimeoutDetected) onTimeoutDetected();
-          const outcome = await pollSignatureStatus(signature);
-          return { timedOut: true, landed: outcome.landed, err: outcome.err };
         }
+        const status = await pollSignatureStatus(signature);
+        let verdict;
+        if (confirmErr !== null) verdict = { outcome: "failed", err: confirmErr };
+        else if (status.landed && status.err === null) verdict = { outcome: "success", err: null };
+        else if (status.landed) verdict = { outcome: "failed", err: status.err };
+        else verdict = { outcome: "unknown", err: null };
+        if (verdict.outcome === "success") {
+          log(timedOut ? "Gecontroleerd: de transactie is alsnog bevestigd geland, zonder fout." : "Bevestigd: geland, zonder fout.");
+        }
+        return { timedOut, ...verdict };
+      }
+
+      // Sectie 171: gooit tenzij awaitConfirmation "success" gaf. Pas daarna
+      // mag knop 3, 4 of 5 "SUCCES" loggen.
+      function requireLanded(result, signature, buttonLabel) {
+        if (result.outcome === "success") return;
+        if (result.outcome === "failed") {
+          throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
+        }
+        throw new Error(
+          "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
+            "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op '" +
+            buttonLabel + "'."
+        );
       }
 
       // Logt zo veel mogelijk van een fout - niet enkel err.message, dat bij
@@ -1000,14 +1043,18 @@
           proposeBtn.disabled = true;
         });
 
-        if (result.timedOut) {
+        if (result.timedOut || result.outcome !== "success") {
           // KNOP-2-SPECIFIEK (STATUS.md sectie 91): een kale signatuur-check
           // is hier niet genoeg - het voorstel-ACCOUNT zelf is het
           // gezaghebbende antwoord, niet de status van de tx die het
           // aanmaakte. Lees de voorstellen opnieuw rechtstreeks van de
           // keten, ongeacht wat de signatuur-poll hierboven vond, VOORDAT de
-          // knop weer vrijkomt.
+          // knop weer vrijkomt. Sectie 171: ook na een mislukte of onbekende
+          // uitkomst zonder time-out, en een open voorstel bewijst dan NIET dat
+          // deze transactie landde.
+          proposeBtn.disabled = true;
           const { candidates, problems, settingsProblems } = await selectUpgradeProposal("propose");
+          const failed = result.outcome === "failed" ? "Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err) + ". " : "";
 
           if (settingsProblems.length > 0) {
             // Knop 2 blijft uit; of de eerdere transactie landde, is dan niet gecontroleerd.
@@ -1017,19 +1064,34 @@
           }
           if (candidates.length > 0) {
             const newest = candidates[candidates.length - 1];
-            log(
-              "Gecontroleerd tegen de keten: voorstel #" + newest.index + " bestaat al voor " +
-                "deze buffer (status: " + newest.statusName + "). De eerdere " +
-                "transactie is dus GELAND - er is niets mis, klik NIET opnieuw op '2. Voorstel indienen'. " +
-                "Gebruik knop 3/4."
-            );
+            const open = "voorstel #" + newest.index + " (status: " + newest.statusName + ")";
+            if (result.outcome === "failed") {
+              // Knop 2 blijft uit - er is al een open voorstel, maar niet van deze transactie.
+              throw new Error(
+                failed + "Wel staat " + open + " al open voor deze buffer; dat heeft deze transactie niet " +
+                  "aangemaakt. Klik NIET opnieuw op '2. Voorstel indienen'; gebruik knop 3/4 op dat voorstel."
+              );
+            }
+            if (result.outcome === "success") {
+              log(
+                "Gecontroleerd tegen de keten: " + open + " bestaat voor deze buffer, en de " +
+                  "transactie is GELAND zonder fout - er is niets mis, klik NIET opnieuw op '2. Voorstel indienen'. " +
+                  "Gebruik knop 3/4."
+              );
+            } else {
+              log(
+                "Niet vastgesteld of transactie " + signature + " geland is, maar " + open + " staat open voor " +
+                  "deze buffer. Klik NIET opnieuw op '2. Voorstel indienen'; gebruik knop 3/4 op dat voorstel.",
+                "log-error"
+              );
+            }
             clearDeeplinkSecretState();
             return; // knop 2 blijft bewust uit - er is al een open voorstel
           }
           if (problems.length > 0) {
             // Knop 2 blijft uit: onzeker is niet hetzelfde als "geen voorstel".
             throw new Error(
-              "Kon niet vaststellen of transactie " + signature + " een voorstel aanmaakte: " + problems.join("; ") +
+              failed + "Kon niet vaststellen of transactie " + signature + " een voorstel aanmaakte: " + problems.join("; ") +
                 ". Herlaad de pagina voordat je opnieuw op '2. Voorstel indienen' klikt."
             );
           }
@@ -1038,15 +1100,15 @@
           // alleen NADAT dit vaststaat, niet ervoor.
           proposeBtn.disabled = false;
 
-          if (result.landed && result.err === null) {
+          if (result.outcome === "success") {
             throw new Error(
               "Onverwacht: transactie " + signature + " lijkt on-chain geland (geen fout), maar er is " +
                 "geen voorstel voor deze buffer gevonden. Controleer dit handmatig (bijv. via een block " +
                 "explorer) voordat je opnieuw klikt."
             );
           }
-          if (result.landed && result.err !== null) {
-            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
+          if (result.outcome === "failed") {
+            throw new Error(failed + "Er is geen voorstel voor deze buffer aangemaakt.");
           }
           throw new Error(
             "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland is, " +
@@ -1164,19 +1226,8 @@
         log("Verstuurd. Signature: " + signature);
         const result = await awaitConfirmation(signature);
 
-        if (result.timedOut) {
-          if (result.landed && result.err === null) {
-            log("Gecontroleerd: de transactie is alsnog bevestigd geland. Er is niets mis, klik niet opnieuw.");
-          } else if (result.landed && result.err !== null) {
-            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
-          } else {
-            throw new Error(
-              "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
-                "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op " +
-                "'3. Voorstel goedkeuren'."
-            );
-          }
-        }
+        // Sectie 171: geen SUCCES tenzij de transactie aantoonbaar zonder fout landde.
+        requireLanded(result, signature, "3. Voorstel goedkeuren");
 
         const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
@@ -1214,19 +1265,8 @@
         log("Verstuurd. Signature: " + signature);
         const result = await awaitConfirmation(signature);
 
-        if (result.timedOut) {
-          if (result.landed && result.err === null) {
-            log("Gecontroleerd: de transactie is alsnog bevestigd geland. Er is niets mis, klik niet opnieuw.");
-          } else if (result.landed && result.err !== null) {
-            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
-          } else {
-            throw new Error(
-              "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
-                "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op " +
-                "'5. Voorstel afwijzen'."
-            );
-          }
-        }
+        // Sectie 171: geen SUCCES tenzij de transactie aantoonbaar zonder fout landde.
+        requireLanded(result, signature, "5. Voorstel afwijzen");
 
         const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
@@ -1284,21 +1324,14 @@
         log("Verstuurd. Signature: " + signature);
         const result = await awaitConfirmation(signature);
 
-        if (result.timedOut) {
-          if (result.landed && result.err === null) {
-            log("Gecontroleerd: de transactie is alsnog bevestigd geland. Er is niets mis, klik niet opnieuw.");
-          } else if (result.landed && result.err !== null) {
-            throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
-          } else {
-            throw new Error(
-              "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
-                "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op " +
-                "'4. Uitvoeren'."
-            );
-          }
-        }
+        // Sectie 171: geen SUCCES tenzij de transactie aantoonbaar zonder fout landde.
+        requireLanded(result, signature, "4. Uitvoeren");
 
-        log("SUCCES - uitgevoerd. Signature: " + signature);
+        log(
+          "SUCCES - uitgevoerd (geland, zonder fout). Signature: " + signature + ". Dit is GEEN bewijs dat de " +
+            "upgrade klopt: draai nu EXECUTE_SIGNATURE=" + signature + " npx ts-node --transpile-only " +
+            "scripts/preUpgradeChecks.ts --post en de vijf verificaties van STATUS.md sectie 95."
+        );
         clearDeeplinkSecretState();
       }
 

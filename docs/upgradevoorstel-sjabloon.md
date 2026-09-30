@@ -108,7 +108,7 @@ uitgevoerd" alleen als de signature zonder fout landde én voorstel #n op de ket
 
 Uitvoertransactie noteren.
 
-### Bediening van de adminpagina (secties 172-173; geldt voor knop 2-5)
+### Bediening van de adminpagina (secties 172-174; geldt voor knop 2-5)
 
 - **Tijdens een controle niets klikken, en de pagina niet sluiten of herladen.** Van het
   versturen tot de uitkomst staan alle actieknoppen en de verbindknoppen 1 en 1b uit.
@@ -124,11 +124,34 @@ Uitvoertransactie noteren.
   laden zelf opnieuw (tot 30 minuten na de terugkeer). Meldt de pagina dat een
   te-controleren transactie "gewist" is, dan heeft ze die signature niet beoordeeld:
   controleer haar zelf.
+- **Eén tabblad** (review §173, B-5). Twee tabbladen delen de bewaarde stand maar niet het
+  slot: beide kunnen dezelfde signature controleren, en het ene kan de stand wissen terwijl
+  het andere nog controleert.
+- **Na een melding "niet afgerond" of een FOUT tijdens het laden: alleen herladen, met
+  dezelfde URL** (review §173, B-1/B-3/B-4). Klik dan niet op 1b of op een actieknop, en
+  sluit het tabblad niet, ook al staan die knoppen aan. Op de deep-link-route wist zo'n klik
+  de niet-beoordeelde signature en gaat de pagina meteen naar Solflare, dus de logregel met
+  die signature is weg voordat je haar kunt lezen; na een FOUT tijdens het laden is het
+  antwoord van Solflare in de URL daarna ook niet meer te ontsleutelen. Tussen de terugkeer
+  uit Solflare en het bewaren van de stand zit bovendien een venster van enkele seconden
+  (verbinden, lidmaatschap, scan): sluit je dan het tabblad en open je de pagina zonder die
+  URL, dan is de signature weg zonder melding. Wacht dus tot er een uitkomst staat.
+- **Noteer vóór elk herladen** de signature uit "Verstuurd. Signature: …" en het tijdstip
+  uit "Wacht daarom tot ten minste …": de log verdwijnt bij herladen (review §173, B-8). Is
+  het tijdstip niet genoteerd, wacht dan minstens 2 minuten na het versturen.
+- **Opslagfout bij de terugkeer uit Solflare** (bijv. "FOUT: deeplink-resume (…):
+  QuotaExceededError" of een SecurityError): de pagina heeft de transactie niet
+  gecontroleerd en de signature nergens getoond (review §173, B-2). Zoek haar op in de
+  activiteit van Solflare en controleer haar op de keten voordat je opnieuw klikt.
+- **Knop 2: het voorstelnummer komt uit de melding bij opnieuw verbinden** ("Open voorstel
+  voor deze buffer: #n"), niet uit de SUCCES-regel van knop 2: die toont de status van het
+  hoogst genummerde voorstel, zonder nummer, en dat kan een ander voorstel zijn (review §173,
+  B-6).
 - **"Niet vastgesteld of de transactie geland is":** ze kan nog landen tot haar blockhash
   verloopt (ongeveer 2 minuten na het versturen). Wacht tot het tijdstip dat de pagina
   noemt (de betrokken knop staat tot dan uit), controleer de signature opnieuw, en klik pas
-  daarna eventueel opnieuw. Na herladen staat die knop eerder weer aan: houd het tijdstip
-  dan zelf aan.
+  daarna eventueel opnieuw. Na herladen staat die knop eerder weer aan: houd het genoteerde
+  tijdstip dan zelf aan.
 - **De pagina is bevroren** (sectie 173): alleen een bevinding die een verkeerde transactie
   of een onterecht succes kan veroorzaken, leidt nog tot een wijziging. Al het andere wordt
   een regel in deze lijst.

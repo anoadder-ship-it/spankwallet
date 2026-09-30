@@ -17321,8 +17321,10 @@ aan de adminpagina** (punt 7).
   (`DEEPLINK_SESSION_MAX_AGE_MS`, zoals de andere); een verlopen, onleesbare of onvolledige
   stand wordt gewist zonder controle. Een nieuwe verbinding (knop 1, 1b of een actieknop op
   de deep-link-route, via `beginFreshDeeplinkConnect`) en de wisknop ruimen hem op. Elk wissen
-  zonder controle zet de volledige stand, met de signature, in de log: de pagina heeft die
-  signature dan niet beoordeeld, en koppelt haar nooit aan een latere actie.
+  zonder controle schrijft de volledige stand, met de signature, in de log: de pagina heeft die
+  signature dan niet beoordeeld, en koppelt haar nooit aan een latere actie. *(Gecorrigeerd in
+  §174: bij knop 1b en een actieknop op de deep-link-route gaat de pagina direct daarna naar
+  Solflare, en is die logregel weg voordat de bediener haar kan lezen.)*
 - **L-2/L-3, verbindknoppen onder het slot.** `actionButtons.connectIds`: knop 1 en 1b staan
   uit zolang er een slot is, ook tijdens `resumeAfterLoad`, en hun handlers negeren een klik
   tijdens een slot. De wisknop blijft bewust bruikbaar.
@@ -17454,7 +17456,9 @@ bedieningsregel in het sjabloon. Bewust niet gebouwd (bedieningsregel of accepta
   tijdstip zelf aanhouden;
 - faalt de RPC al bij het lidmaatschap tijdens het laden (review §172, P1), dan stopt het
   module-script vóór de hercontrole; de stand en de URL blijven, dus herladen als de RPC weer
-  antwoordt controleert alsnog;
+  antwoordt controleert alsnog; *(gecorrigeerd in §174: bij een eerste terugkeer uit Solflare
+  is de stand dan nog niet bewaard en blijft alleen de URL; een klik op 1b maakt het antwoord
+  in die URL onbruikbaar)*
 - de melding bij een hangend slot heft het slot niet op; herladen is de uitweg;
 - knop 3 en 5 lezen niet terug of het lid in `approved`/`rejected` staat (L-4 uit §172 blijft
   daarvoor open); ze tonen de gelezen status wel, en `--post` plus sectie 95 blijven het bewijs
@@ -17483,3 +17487,54 @@ Ongewijzigd uit §172 punt 8. Knop 4 bij voorkeur via de desktop-extensie; het n
 "SUCCES - voorstel #n uitgevoerd" moet het `<n>` van de pre-flight zijn, en die melding
 verschijnt nu alleen als #n op de keten Executed is. Sectie 173 vraagt een review door een
 verse sessie.
+
+## 174. Review §173 afgerond; alleen documentatie (2026-09-30)
+
+Review van §173 (`8a89572`) door een verse sessie. Oordeel: **geen bevinding van soort (a)**
+(verkeerde transactie of onterecht succes). De selectie en de poort uit §169/§170 zijn
+ongewijzigd en worden op geen pad overgeslagen; zonder voorstelnummer meldt knop 4 nooit
+SUCCES. Desktop-extensieroute: **ja**. Mobiele Solflare-route: **ja, onder voorwaarden**, zonder
+codewijziging: de bedieningsregels hieronder. `admin/wallet-signer.html` is niet gewijzigd
+(bevroren, §173).
+
+Bevindingen, alle (b):
+- **B-1** knop 1b en een actieknop op de deep-link-route wissen een niet-beoordeelde stand
+  met een logregel, maar navigeren direct daarna naar Solflare: de regel is niet te lezen;
+- **B-2** gooit `localStorage.setItem` bij de terugkeer uit Solflare, dan stopt de hervatting
+  vóór de controle (geen SUCCES), maar de URL wordt gewist en de signature staat nergens;
+- **B-3** tussen het laden en het bewaren van de stand (verbinden, lidmaatschap, scan) zit
+  een venster zonder stand; faalt daar de RPC, dan maakt een klik op 1b het antwoord in de
+  URL onbruikbaar;
+- **B-4** na een RPC-fout zonder oordeel gaan de knoppen aan, terwijl de melding zegt niet te
+  klikken; de controles op de keten vangen een herhaling op;
+- **B-5** twee tabbladen delen de stand maar niet het slot (dubbele of achterhaalde melding,
+  geen onterecht succes);
+- **B-6** het SUCCES van knop 2 toont de status van het hoogst genummerde voorstel, zonder
+  nummer (al bestaand);
+- **B-7** het SUCCES van knop 4 betekent: deze signature landde zonder fout en #n staat op
+  Executed, niet dat precies deze signature #n uitvoerde (met een eerlijke wallet hetzelfde;
+  `--post` beslist);
+- **B-8** de wachttijd na "onbekend" en de log verdwijnen bij herladen;
+- **B-9** gooit `resumeAfterLoad`, dan wordt het pre-flight-nummer niet getoond; niemand
+  raakt buitengesloten.
+
+Mutaties van de reviewer (kopie buiten de repo, 32 uitgevoerd): de mutaties op de kern van §173
+gaven failing. Overleefd, geen van alle (a): de validatie van een geknoeide stand
+(onbekende actie met nummer, signature-formaat, nummer bij approve/reject, `savedAt`, negatieve
+leeftijd), het wissen door de wisknop en de slotbewaking van knop 1 (klikhandlers vallen buiten
+het harnas), en drie gelijkwaardige of veiligere mutaties.
+
+Verwerkt (alleen documentatie):
+- `docs/upgradevoorstel-sjabloon.md` §3: één tabblad; na "niet afgerond" of een FOUT tijdens
+  het laden alleen herladen met dezelfde URL (niet 1b of een actieknop, tabblad niet sluiten);
+  vóór elk herladen signature en wachttijdstip noteren; bij een opslagfout de signature uit
+  de activiteit van Solflare halen; het nummer van knop 2 uit de melding bij opnieuw
+  verbinden;
+- `admin/README.md`: de zin "zet de niet-beoordeelde signature in de log" beperkt (niet
+  leesbaar bij 1b of een actieknop op de deep-link-route), en een verwijzing naar de nieuwe
+  regels;
+- deze sectie, §173 punt 1 en §173 punt 6: de twee te sterke zinnen gemarkeerd als
+  gecorrigeerd ("schrijft … in de log" is bij 1b niet leesbaar; "de stand en de URL blijven"
+  geldt bij een eerste terugkeer alleen voor de URL).
+
+Geen tests gedraaid: er is geen code gewijzigd.

@@ -81,7 +81,9 @@ is `client/` de juiste plek.
      signature, voorstelnummer, tijdstip) vóór de controle. Herlaadt de pagina of sluit het
      toestel het tabblad midden in de controle, dan controleert het volgende laden opnieuw
      (tot 30 minuten na de terugkeer). Een nieuwe verbinding of de wisknop ruimt zo'n stand
-     op en zet de niet-beoordeelde signature in de log;
+     op en schrijft de niet-beoordeelde signature in de log. Bij knop 1b en bij een
+     actieknop op de deep-link-route gaat de pagina daarna meteen naar Solflare, en is die
+     logregel weg voordat je haar kunt lezen (STATUS.md sectie 174);
    - tijdens een controle staan ook de verbindknoppen 1 en 1b uit; de wisknop niet;
    - staan de knoppen na 3 minuten nog uit (wallet of RPC antwoordt niet), dan zegt de
      pagina dat herladen kan, dat de transactie mogelijk toch verstuurd is, en dat je daarna
@@ -92,6 +94,14 @@ is `client/` de juiste plek.
    - bedieningsregels (niets klikken of herladen tijdens een controle, na elke deep-link-stap
      de uitkomst op de keten laten lezen, knop 4 bij voorkeur via de desktop-extensie):
      `docs/upgradevoorstel-sjabloon.md` §3.
+
+   Sinds STATUS.md sectie 174 (review van §173; alleen documentatie, de pagina is
+   ongewijzigd) staan daar ook deze regels: werk met één tabblad; na een melding "niet
+   afgerond" of een FOUT tijdens het laden alleen herladen met dezelfde URL, niet op 1b of
+   een actieknop klikken en het tabblad niet sluiten; noteer vóór elk herladen de signature
+   en het wachttijdstip; bij een opslagfout na de terugkeer uit Solflare haal je de
+   signature uit de activiteit van Solflare; en het voorstelnummer van knop 2 komt uit de
+   melding bij opnieuw verbinden, niet uit de SUCCES-regel.
 5. **Geen enkele private key verlaat ooit een apparaat** - alle drie de ondertekenpaden
    (Wallet Standard, Mobile Wallet Adapter, Solflare-deep-link) laten de wallet-extensie of
    -app zelf ondertekenen. Dit was een expliciete eis bij de echte migratie (in

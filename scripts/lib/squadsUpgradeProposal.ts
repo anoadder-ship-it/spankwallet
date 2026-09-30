@@ -19,6 +19,7 @@ export const {
   proposalPda,
   vaultPda,
   decodeMultisigHeader,
+  multisigSettingsProblems,
   decodeProposalHeader,
   decodeVaultTransaction,
   touchesBuffer,

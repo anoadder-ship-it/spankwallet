@@ -108,6 +108,9 @@ interface TimelockOpts {
   staleIndex?: number;
   proposals: Record<number, ProposalOpts>;
   buffer?: BufferOpts;
+  configAuthority?: PublicKey;
+  threshold?: number;
+  timeLock?: number;
 }
 
 function timelockState(o: TimelockOpts): FakeRpcState {
@@ -122,7 +125,7 @@ interface RunResult {
   output: string;
 }
 
-async function run(state: FakeRpcState, script: string, args: string[], env: Record<string, string> = {}): Promise<RunResult> {
+async function run(state: FakeRpcState, script: string, args: string[], env: Record<string, string> = {}, timeoutMs?: number): Promise<RunResult> {
   const rpc = await startFakeRpc(state);
   try {
     const childEnv: NodeJS.ProcessEnv = { ...process.env, RPC_URL: rpc.url, ...env };
@@ -131,10 +134,19 @@ async function run(state: FakeRpcState, script: string, args: string[], env: Rec
       // Asynchroon (niet spawnSync): de nep-RPC draait in dit proces.
       const child = spawn(TS_NODE, ["--transpile-only", script, ...args], { cwd: ROOT, env: childEnv });
       let output = "";
+      // Sectie 170 (L-3): een script dat blijft scannen, wordt na timeoutMs gestopt;
+      // dat is een falen, met "TIMEOUT" in de uitvoer.
+      const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+        output += `\nTIMEOUT: na ${timeoutMs} ms gestopt\n`;
+        child.kill("SIGKILL");
+      }, timeoutMs);
       child.stdout.on("data", (d) => (output += d));
       child.stderr.on("data", (d) => (output += d));
       child.on("error", reject);
-      child.on("close", (code) => resolve({ code, output }));
+      child.on("close", (code) => {
+        if (timer) clearTimeout(timer);
+        resolve({ code, output });
+      });
     });
   } finally {
     await rpc.close();
@@ -291,6 +303,46 @@ describe("pre-flight-scripts tegen een nep-RPC (STATUS.md sectie 167)", function
     it("groen: de echte devnet-stand (Active-, Executed-, Cancelled- en Rejected-restanten) plus een schone, goedgekeurde #15", async () => {
       const state = timelockState({ latestIndex: 15, proposals: devnetLikeProposals(15) });
       expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "15" }), 0, "de devnet-stand mag niet blokkeren", /TIMELOCK VERSTREKEN/);
+    });
+  });
+
+  describe("sectie 170 (review §169 L-1): autonome multisig, time_lock exact 259200, threshold minstens 2", () => {
+    // Het argument "een voorstel dat na de pre-flight goedgekeurd wordt, kan pas 72u later
+    // uitgevoerd worden" geldt alleen met deze instellingen. Een config_authority kan
+    // time_lock en threshold direct wijzigen, zonder voorstel.
+    const cases: [string, Partial<TimelockOpts>, RegExp][] = [
+      ["een aparte config_authority (gecontroleerde multisig)", { configAuthority: OLD_BUFFER }, /config_authority HRcc\S+, verwacht 11111111111111111111111111111111 \(autonome multisig\)/],
+      ["time_lock 0", { timeLock: 0 }, /time_lock 0 s, verwacht exact 259200 s/],
+      ["time_lock één seconde te kort (259199)", { timeLock: 259_199 }, /time_lock 259199 s, verwacht exact 259200 s/],
+      ["threshold 1", { threshold: 1 }, /threshold 1, verwacht minstens 2/],
+      // Aanvulling (exacte vergelijking, niet "minstens"): ook een langere time_lock en threshold 0.
+      ["time_lock één seconde te lang (259201)", { timeLock: 259_201 }, /time_lock 259201 s, verwacht exact 259200 s/],
+      ["time_lock u32-maximum (4294967295)", { timeLock: 4_294_967_295 }, /time_lock 4294967295 s, verwacht exact 259200 s/],
+      ["threshold 0", { threshold: 0 }, /threshold 0, verwacht minstens 2/],
+    ];
+    for (const [name, multisig, reason] of cases) {
+      it(`${name}, verder een geldig voorstel #15: exit 1, met de melding dat de multisig-instellingen afwijken`, async () => {
+        const state = timelockState({ latestIndex: 15, proposals: { 15: {} }, ...multisig });
+        const r = await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "15" });
+        expectExit(r, 1, `${name} moet falen`, reason);
+        // I-1: de melding zegt dat de instellingen afwijken, niet dat het voorstel het probleem is.
+        assert.match(r.output, /MULTISIG-INSTELLINGEN WIJKEN AF/, r.output);
+        assert.notInclude(r.output, "is niet het enige uitvoerbare voorstel", r.output);
+      });
+    }
+
+    it("L-3: transactionIndex absurd hoog (2^63) en time_lock 0: weigert snel, zonder de voorstellen te scannen", async () => {
+      const huge = (1n << 63n).toString();
+      const state = timelockState({ latestIndex: 0, proposals: {}, timeLock: 0 });
+      state.accounts.get("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp")!.data.writeBigUInt64LE(1n << 63n, 78);
+      const r = await run(state, TIMELOCK, [], { TRANSACTION_INDEX: huge }, 30_000);
+      assert.notInclude(r.output, "TIMEOUT", "het script bleef scannen");
+      expectExit(r, 1, "afwijkende instellingen moeten meteen falen", /MULTISIG-INSTELLINGEN WIJKEN AF[\s\S]*time_lock 0 s, verwacht exact 259200 s/);
+    });
+
+    it("groen: threshold 3 (strenger) met verder de devnet-instellingen", async () => {
+      const state = timelockState({ latestIndex: 15, proposals: { 15: {} }, threshold: 3 });
+      expectExit(await run(state, TIMELOCK, [], { TRANSACTION_INDEX: "15" }), 0, "threshold 3 mag", /TIMELOCK VERSTREKEN/);
     });
   });
 

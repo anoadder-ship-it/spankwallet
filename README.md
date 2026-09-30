@@ -239,6 +239,8 @@ in twee delen:
         programma vanaf `EXPECTED_BUFFER` in
         `scripts/checkProposalTimelock.ts` (dezelfde regel als knop 4 van de adminpagina);
       - de buffer zelf: authority is de vault, en de sha256 van het programma is de RC-build;
+      - de multisig is autonoom (geen config_authority), time_lock is exact 259200 s en
+        threshold minstens 2 (sectie 170);
       - de timelock is verstreken volgens de Clock-sysvar;
       - de recovery-/wachtrij-invariant is groen met een volledig RPC-antwoord. Bij `--pre`
         is dat alleen begrensd tot ná de vorige deploy: een node die daarna achterloopt,

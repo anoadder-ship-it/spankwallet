@@ -45,7 +45,9 @@ is `client/` de juiste plek.
    `scripts/checkProposalTimelock.ts` (sectie 168/169): alleen het laatste voorstel, als het
    open (knop 3) of goedgekeurd (knop 4) is en precies de upgrade, en **geen enkel ander
    voorstel op Approved of Executing staat, welke inhoud ook** (sectie 169). Knop 3 eist
-   daarnaast dat er geen ander Active-voorstel voor deze buffer is. Anders weigert de knop
+   daarnaast dat er geen ander Active-voorstel voor deze buffer is. Knoppen 2, 3 en 4 eisen
+   ook een autonome multisig (geen config_authority), time_lock exact 259200 s en threshold
+   minstens 2 (sectie 170). Anders weigert de knop
    met de reden. Een overbodig voorstel dat nog Active is, wijs je af met knop 5; een
    overbodig goedgekeurd voorstel annuleer je buiten deze pagina (Squads `proposalCancel`)
    en voer je nooit uit om het weg te krijgen (open punt, STATUS.md sectie 168/169).

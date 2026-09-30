@@ -50,11 +50,28 @@ L-1), op basis van de pre-flight uit sectie 94 en de verificaties uit sectie 95.
        Approved of Executing**, welke inhoud ook: VaultTransaction, Batch of Config (alle
        voorstellen 1..`<n>` gelezen, ook stale; sectie 169). De regel komt uit
        `admin/upgradeProposalCheck.mjs`, dezelfde module als knop 4;
+     - de multisig is autonoom (config_authority de standaardwaarde), time_lock is exact
+       259200 s en threshold minstens 2 (sectie 170). Daarop rust dat een later
+       goedgekeurd voorstel pas 72u daarna uitgevoerd kan worden. Wat deze controle
+       **niet** zegt (sectie 170 punt 7):
+       - *spending limits* zijn een uitvoerpad **zonder** voorstel en zonder timelock: een
+         lid van een SpendingLimit maakt SOL of tokens uit de vault over. Ze kunnen geen
+         Upgrade tekenen (`spendingLimitUse` neemt alleen bedrag, decimalen en memo, geen
+         instructies), dus ze omzeilen deze poort niet; wel kunnen ze de vault leeghalen.
+         Een nieuwe spending limit vergt in een autonome multisig een config-voorstel, dat
+         als Approved deze poort blokkeert;
+       - threshold ≥ 2 betekent twee **sleutels**, niet twee **personen**. Houdt één persoon
+         twee lidsleutels (of staan ze op hetzelfde apparaat), dan is er één persoon nodig.
+         Dat kan geen on-chain controle zien; noteer bij het voorstel wie welke sleutel houdt;
+       - de 72u zijn **Clock-seconden** (`unix_timestamp`), geen wandkloktijd. Onder
+         Alpenglow zet de leider van elk blok die tijdstempel, binnen een protocolmarge
+         (sectie 156); hoe ver een leider de 72u kan verschuiven, is nog niet gemeten;
      - de VaultTransaction is precies de upgrade van dit programma vanaf `EXPECTED_BUFFER`,
        met de vault als authority en spill;
      - de buffer zelf: van de loader, authority de vault, en de sha256 van de eerste
        `EXPECTED_BUFFER_PROGRAM_LENGTH` bytes na de kop is de RC-build; de rest is nul;
-     - de 72u-timelock is verstreken, gemeten tegen de Clock-sysvar;
+     - de 72u-timelock is verstreken, gemeten tegen de Clock-sysvar (Clock-seconden, zie
+       hierboven);
    - `scripts/checkRecoveryQueueInvariant.ts --pre`: devnet; geen wachtende actie bij een
      wallet met een lopende recovery, geen afwijkende epoch, en een volledig RPC-antwoord
      (secties 161-162, 167). Versheid is hier alleen begrensd tot ná de vorige deploy: een

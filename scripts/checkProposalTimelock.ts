@@ -49,6 +49,10 @@ import { bufferProblems } from "./lib/upgradeBuffer";
 // - Sectie 169 (review §168, M-1/M-2): "raakt deze buffer" was te smal als
 //   grens. Nu mag GEEN ENKEL ander voorstel op Approved of Executing staan,
 //   welke inhoud ook (VaultTransaction, Batch, Config).
+// - Sectie 170 (review §169, L-1): de multisig moet autonoom zijn
+//   (config_authority de standaardwaarde), time_lock exact 259200 s en
+//   threshold minstens 2; anders exit 1. Daarop rust de redenering dat een
+//   later goedgekeurd voorstel pas 72u daarna uitgevoerd kan worden.
 // - M-B: de buffer zelf wordt gelezen: van de loader, authority = de vault,
 //   sha256 van het programma = de RC-build, rest nul (scripts/lib/upgradeBuffer.ts).
 //
@@ -104,6 +108,16 @@ async function main() {
     purpose: "execute",
   });
   const { multisig } = selection;
+  // Sectie 170 (L-3, I-1): afwijkende instellingen eerst, met een melding die zegt wat er
+  // echt afwijkt. De voorstellen zijn dan niet gescand, dus ook TRANSACTION_INDEX is niet getoetst.
+  if (selection.settingsProblems.length > 0) {
+    throw new Error(
+      `MULTISIG-INSTELLINGEN WIJKEN AF (${MULTISIG_PDA.toBase58()}):\n  - ` +
+        selection.settingsProblems.join("\n  - ") +
+        `\nDe poort vereist een autonome multisig, time_lock exact 259200 s en threshold minstens 2 (STATUS.md sectie 170). ` +
+        `De voorstellen zijn niet gescand. NIET UITVOEREN.`
+    );
+  }
   console.log(
     `Multisig: threshold=${multisig.threshold}, timeLock=${multisig.timeLockSeconds}s (${(multisig.timeLockSeconds / 3600).toFixed(2)}u), ` +
       `transactionIndex=${multisig.transactionIndex}, staleTransactionIndex=${multisig.staleTransactionIndex}`
@@ -133,6 +147,7 @@ async function main() {
     `VaultTransaction #${TRANSACTION_INDEX}: alleen Upgrade van ${PROGRAM_ID.toBase58()} vanaf buffer ${EXPECTED_BUFFER.toBase58()}, authority en spill de vault; ` +
       `geen enkel ander voorstel Approved of Executing, welke inhoud ook (voorstellen 1..${multisig.transactionIndex} gelezen).`
   );
+  console.log(`Multisig-instellingen: autonoom (geen config_authority), time_lock exact 259200 s, threshold ${multisig.threshold} (minstens 2).`);
 
   // --- De buffer zelf: inhoud en authority ---
   const vault = vaultPda(MULTISIG_PDA, VAULT_INDEX);

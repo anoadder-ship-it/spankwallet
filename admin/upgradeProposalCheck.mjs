@@ -16,7 +16,9 @@
 // eis over andere voorstellen, en daarnaast geen ander open voorstel voor
 // deze buffer (duplicaten). Alle voorstellen 1..transactionIndex worden
 // gelezen, ook stale: Squads voert een goedgekeurde vault-transactie ook uit
-// als hij stale is.
+// als hij stale is. Voor alle doelen (sectie 170): de multisig is autonoom
+// (config_authority de standaardwaarde), time_lock is exact 259200 s en
+// threshold minstens 2 (multisigSettingsProblems).
 //
 // Waarom niet op inhoud herkennen (de regel van sectie 168: "raakt deze
 // buffer"): die herkenning miste geldige varianten - een Upgrade met extra
@@ -61,6 +63,19 @@ export const EXECUTABLE_TAGS = [APPROVED_TAG, EXECUTING_TAG];
 // pagina hem opbouwt en zoals #11/#13/#14 on-chain staan: programdata,
 // program, buffer, spill, rent, clock, authority.
 const UPGRADE_OPCODE = [3, 0, 0, 0];
+
+// Sectie 170 (review §169, L-1): de multisig-instellingen waarop de hele
+// redenering rust ("een voorstel dat na de controle goedgekeurd wordt, kan
+// pas 72u later uitgevoerd worden"). Een config_authority kan time_lock en
+// threshold direct wijzigen, zonder voorstel en zonder dat transactionIndex
+// stijgt; een kortere time_lock sluit het venster niet meer af. Wijkt een
+// ervan af, dan weigeren alle drie de doelen (fail-closed).
+const DEFAULT_PUBKEY = "11111111111111111111111111111111";
+// Kop van elke melding over afwijkende instellingen (pagina en script), zodat
+// die niet klinkt als "voorstel niet gevonden" of "herlaad de pagina".
+export const SETTINGS_HEADING = "multisig-instellingen wijken af";
+export const EXPECTED_TIME_LOCK_SECONDS = 259_200;
+export const MIN_THRESHOLD = 2;
 
 // getMultipleAccounts: maximaal 100 adressen per aanroep.
 const MAX_ACCOUNTS_PER_CALL = 100;
@@ -175,9 +190,25 @@ export function createUpgradeProposalCheck(PublicKey) {
   function decodeMultisigHeader(data) {
     return withDiscriminator(data, MULTISIG_DISCRIMINATOR, "Multisig", (r) => {
       r.raw(32); // create_key
-      r.raw(32); // config_authority
-      return { threshold: r.u16(), timeLockSeconds: r.u32(), transactionIndex: r.u64(), staleTransactionIndex: r.u64() };
+      const configAuthority = key(r);
+      return { configAuthority, threshold: r.u16(), timeLockSeconds: r.u32(), transactionIndex: r.u64(), staleTransactionIndex: r.u64() };
     });
+  }
+
+  /** Sectie 170 (L-1): autonome multisig, time_lock exact 72u, threshold minstens 2. */
+  function multisigSettingsProblems(multisig) {
+    const problems = [];
+    const autonomous = new PublicKey(DEFAULT_PUBKEY);
+    if (!multisig.configAuthority || !multisig.configAuthority.equals(autonomous)) {
+      problems.push(
+        `multisig: config_authority ${multisig.configAuthority ? multisig.configAuthority.toBase58() : "-"}, verwacht ${DEFAULT_PUBKEY} (autonome multisig)`
+      );
+    }
+    if (multisig.timeLockSeconds !== EXPECTED_TIME_LOCK_SECONDS) {
+      problems.push(`multisig: time_lock ${multisig.timeLockSeconds} s, verwacht exact ${EXPECTED_TIME_LOCK_SECONDS} s (72u)`);
+    }
+    if (!(multisig.threshold >= MIN_THRESHOLD)) problems.push(`multisig: threshold ${multisig.threshold}, verwacht minstens ${MIN_THRESHOLD}`);
+    return problems;
   }
 
   function decodeProposalHeader(data) {
@@ -327,14 +358,25 @@ export function createUpgradeProposalCheck(PublicKey) {
    *   nieuw voorstel als `candidates` niet leeg is).
    * `candidates`: open (Active/Approved) voorstellen voor deze buffer.
    * `blockers`: andere voorstellen dan het laatste op Approved of Executing.
+   * Voor alle drie de doelen: afwijkende multisig-instellingen
+   * (multisigSettingsProblems, sectie 170) zijn een probleem.
    * Elk voorstel dat niet te lezen of te controleren is, is een probleem
    * (fail-closed), ook als het niet het laatste is.
    */
-  function selectProposal({ multisig, multisigAddress, entries, expected, purpose }) {
+  function checkPurpose(purpose) {
     if (purpose !== "execute" && purpose !== "approve" && purpose !== "propose") throw new Error(`onbekend doel ${purpose}`);
+  }
+
+  /** selectRule plus `settingsProblems` (sectie 170): de afwijkende instellingen apart, voor een eerlijke melding. */
+  function selectProposal(args) {
+    return { ...selectRule(args), settingsProblems: multisigSettingsProblems(args.multisig) };
+  }
+
+  function selectRule({ multisig, multisigAddress, entries, expected, purpose }) {
+    checkPurpose(purpose);
     const wanted = purpose === "execute" ? [APPROVED_TAG] : [ACTIVE_TAG, APPROVED_TAG];
     const latest = multisig.transactionIndex;
-    const problems = [];
+    const problems = multisigSettingsProblems(multisig);
 
     const complete = entries.length === Number(latest) && entries.every((e, i) => e.index === BigInt(i + 1));
     if (!complete) problems.push(`scan onvolledig: verwacht de voorstellen 1..${latest}, gelezen ${entries.length}`);
@@ -399,12 +441,8 @@ export function createUpgradeProposalCheck(PublicKey) {
     return info ? { address, owner: info.owner, data: info.data } : null;
   }
 
-  /**
-   * Leest het multisig-account en daarna alle voorstellen 1..transactionIndex
-   * (proposal + transactie), minstens op de slot van de multisig-lezing.
-   * Gooit bij een ontbrekend of vreemd multisig-account.
-   */
-  async function loadProposalEntries(connection, multisigAddress, commitment) {
+  /** Leest en decodeert het multisig-account; gooit bij een ontbrekend of vreemd account. */
+  async function loadMultisigHeader(connection, multisigAddress, commitment) {
     const { context, value: info } = await connection.getAccountInfoAndContext(multisigAddress, { commitment });
     if (!info) throw new Error(`Multisig-account ${multisigAddress.toBase58()} niet gevonden.`);
     if (!info.owner.equals(squads)) {
@@ -412,7 +450,11 @@ export function createUpgradeProposalCheck(PublicKey) {
     }
     const multisig = decodeMultisigHeader(info.data);
     if (typeof multisig === "string") throw new Error(`Multisig-account: ${multisig}`);
+    return { context, multisig };
+  }
 
+  /** Alle voorstellen 1..transactionIndex (proposal + transactie), minstens op de slot van de multisig-lezing. */
+  async function scanProposals(connection, multisigAddress, multisig, context, commitment) {
     const addresses = [];
     for (let i = 1n; i <= multisig.transactionIndex; i++) {
       addresses.push(proposalPda(multisigAddress, i), transactionPda(multisigAddress, i));
@@ -432,12 +474,35 @@ export function createUpgradeProposalCheck(PublicKey) {
         transaction: accountBytes(addresses[i + 1], infos[i + 1]),
       });
     }
-    return { multisig, entries };
+    return entries;
   }
 
-  /** loadProposalEntries + selectProposal: wat pagina en script allebei doen. */
+  /**
+   * Leest het multisig-account en daarna alle voorstellen 1..transactionIndex.
+   * Sectie 170 (L-3): wijken de instellingen af, dan gooit hij vóór de scan.
+   * Zo leidt een verkeerd gelezen of absurd hoge transactionIndex nooit tot
+   * een eindeloze scan. Gooit ook bij een ontbrekend of vreemd multisig-account.
+   */
+  async function loadProposalEntries(connection, multisigAddress, commitment) {
+    const { context, multisig } = await loadMultisigHeader(connection, multisigAddress, commitment);
+    const settingsProblems = multisigSettingsProblems(multisig);
+    if (settingsProblems.length > 0) throw new Error(`${SETTINGS_HEADING}: ${settingsProblems.join("; ")}`);
+    return { multisig, entries: await scanProposals(connection, multisigAddress, multisig, context, commitment) };
+  }
+
+  /**
+   * loadProposalEntries + selectProposal: wat pagina en script allebei doen.
+   * Sectie 170 (L-3): bij afwijkende instellingen meteen een weigering, zonder
+   * de voorstellen te scannen (geen doel, geen lijsten, alleen de problemen).
+   */
   async function loadAndSelect(connection, { multisigAddress, expected, purpose, commitment = "confirmed" }) {
-    const { multisig, entries } = await loadProposalEntries(connection, multisigAddress, commitment);
+    checkPurpose(purpose);
+    const { context, multisig } = await loadMultisigHeader(connection, multisigAddress, commitment);
+    const settingsProblems = multisigSettingsProblems(multisig);
+    if (settingsProblems.length > 0) {
+      return { multisig, target: null, candidates: [], blockers: [], settingsProblems, problems: [...settingsProblems] };
+    }
+    const entries = await scanProposals(connection, multisigAddress, multisig, context, commitment);
     return { multisig, ...selectProposal({ multisig, multisigAddress, entries, expected, purpose }) };
   }
 
@@ -447,6 +512,7 @@ export function createUpgradeProposalCheck(PublicKey) {
     proposalPda,
     vaultPda,
     decodeMultisigHeader,
+    multisigSettingsProblems,
     decodeProposalHeader,
     decodeVaultTransaction,
     touchesBuffer,

@@ -10,6 +10,12 @@ export declare const APPROVED_TAG: number;
 export declare const EXECUTING_TAG: number;
 /** Approved en Executing: statussen waarin Squads een voorstel (nog) uitvoert (sectie 169). */
 export declare const EXECUTABLE_TAGS: number[];
+/** Sectie 170 (L-1): time_lock moet exact dit zijn (72u). */
+export declare const EXPECTED_TIME_LOCK_SECONDS: number;
+/** Sectie 170 (L-1): threshold moet minstens dit zijn. */
+export declare const MIN_THRESHOLD: number;
+/** Sectie 170 (I-1): kop van elke melding over afwijkende multisig-instellingen. */
+export declare const SETTINGS_HEADING: string;
 
 export interface KeyLike {
   equals(other: KeyLike): boolean;
@@ -23,6 +29,8 @@ export interface KeyClass<K extends KeyLike> {
 }
 
 export interface MultisigHeader {
+  /** Sectie 170: moet de standaardwaarde (111…1) zijn, een autonome multisig. */
+  configAuthority: KeyLike;
   threshold: number;
   timeLockSeconds: number;
   transactionIndex: bigint;
@@ -95,6 +103,8 @@ export interface Selection<K> {
   candidates: Candidate[];
   /** Andere voorstellen dan het laatste op Approved of Executing, welke inhoud ook (sectie 169): blokkeren knop 3 en 4. */
   blockers: Candidate[];
+  /** Sectie 170: afwijkende multisig-instellingen (ook in `problems`); niet leeg = er is niet gescand. */
+  settingsProblems: string[];
   problems: string[];
 }
 
@@ -124,6 +134,8 @@ export interface UpgradeProposalCheck<K extends KeyLike> {
   proposalPda(multisig: K, index: bigint): K;
   vaultPda(multisig: K, vaultIndex: number): K;
   decodeMultisigHeader(data: Uint8Array): MultisigHeader | string;
+  /** Sectie 170 (L-1): afwijkingen van config_authority, time_lock en threshold. */
+  multisigSettingsProblems(multisig: MultisigHeader): string[];
   decodeProposalHeader(data: Uint8Array): ProposalHeader<K> | string;
   decodeVaultTransaction(data: Uint8Array): VaultTransaction<K> | string;
   touchesBuffer(vtx: VaultTransaction<K>, buffer: K): boolean;

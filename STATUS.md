@@ -16610,3 +16610,281 @@ Uit §168 punt 9 (ongewijzigd), plus:
 - de Active-restanten #1-4, 6, 7, 9 opruimen (afwijzen met knop 5). Ze zijn onschuldig
   zolang ze Active blijven, maar één goedkeuring maakt ze een blocker;
 - L-1, L-2 en I-2 uit punt 7.
+
+## 170. Review van sectie 169 en de opvolging: #9 afwijzen, multisig-instellingen in de poort (2026-09-29)
+
+Review van §169 (`efb0b56`) door een verse sessie, 2026-09-29. Oordeel: de brede regel ("geen
+enkel ander voorstel Approved of Executing") is sluitend; geen omweg gevonden in de poort
+zelf. Twee punten in de redenering eromheen, plus twee informatieve:
+
+- **M-1** voorstel **#9** (Active) is een Upgrade vanaf buffer `BDnDJLue…`, en die buffer
+  **bestaat nog** (453.277 bytes, authority de vault `89ME…`). Twee goedkeuringen plus 72 uur,
+  ook ná upgrade 1, zetten het programma terug naar die oude code; de poort draait dan niet
+  meer. #1-4, 6 en 7 zijn onschuldig: hun buffer `7jvi…` is gesloten, de upgrade zou falen;
+- **L-1** de hele timelock-redenering ("een voorstel dat na de controle goedgekeurd wordt,
+  kan pas 72u later uitgevoerd worden") rust op `config_authority` = de standaardwaarde en
+  `time_lock` = 259.200 s, maar de poort toetste geen van beide. Een config_authority kan
+  time_lock en threshold direct wijzigen, zonder voorstel en zonder dat `transactionIndex`
+  stijgt;
+- **I-1** `decodeMultisigHeader` heeft geen terugcontrole zoals proposal (multisig + index)
+  en VaultTransaction (volledige decode); en de aanname "alle uitvoering loopt via een
+  Proposal met timelock" is niet fail-closed als Squads ooit een nieuw uitvoerpad toevoegt;
+- **I-2** reden 4 in §169 punt 7 ("het venster tussen pre-flight en knop 4 is minuten")
+  wordt nergens afgedwongen. De conclusie klopt wel, om andere redenen: knop 4 selecteert
+  zelf opnieuw vlak vóór het bouwen; de inhoud van een VaultTransaction is onveranderlijk;
+  een nieuw voorstel verhoogt `transactionIndex` (knop 4 weigert); en geen Active-restant
+  raakt `F5nh…`.
+
+De review reproduceerde de live stand van §169 punt 5 read-only (genesis devnet; #1-14 zoals
+daar; geen blockers; approve/execute weigeren op "#14 Rejected" en "buffer HRcc…"), en las
+daarnaast: `config_authority` 111…1, threshold 2, time_lock 259.200, stale 0, geen
+rent_collector, ProgramData-authority de vault, buffer `F5nh…` nog niet geschreven.
+
+Deze sectie lost M-1 en L-1 op; I-1 en I-2 zijn open voor upgrade 2 (punt 5). Geen wijziging
+aan het programma.
+
+### 1. M-1: #9 afwijzen met knop 5, vóór het indienen van het upgrade-1-voorstel
+
+Multisig: drie leden (`2jDz…`, `3zZc…`, `CP2f…`), elk met mask 7 (Initiate, Vote, Execute),
+threshold 2. Afwijzen vereist `cutoff = stemgerechtigden − threshold + 1 = 2` afwijzingen:
+**twee leden** klikken elk één keer op knop 5 met index 9. Na de eerste afwijzing staat #9
+nog op Active.
+
+De transactie die knop 5 bouwt (`multisig.transactions.proposalReject`, gevendorde
+`@sqds/multisig` 2.1.4), read-only nagebouwd en per lid gesimuleerd (`sigVerify: false`):
+- v0-bericht, één ondertekenaar (het lid, ook fee payer), geen lookup-tables;
+- één instructie naar `SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf`, accounts: multisig
+  `A5iD…` (alleen-lezen), het lid (schrijfbaar, ondertekenaar), proposal #9
+  `HWAW8jF3M72EzH5fJ8TiMqwZ8NVysDvfZmw1TauZcbc9` (schrijfbaar);
+- data `f33e869ce66af687 00`: de Anchor-discriminator van `proposal_reject`
+  (sha256("global:proposal_reject")[0..8], nagerekend) en `memo: None`;
+- simulatie voor alle drie de leden: `err null`, "Instruction: ProposalReject", ~8.700 CU.
+
+Uitvoering en read-only bevestiging: **gedaan op 2026-09-30**. #9 staat op **Rejected** (zie punt 6).
+
+### 2. L-1: de multisig-instellingen in de poort (`admin/upgradeProposalCheck.mjs`)
+
+- `decodeMultisigHeader` leest nu `configAuthority`;
+- nieuw `multisigSettingsProblems(multisig)`: een probleem als `config_authority` niet
+  111…1 is (geen autonome multisig), als `time_lock` niet **exact** 259.200 s is, of als
+  `threshold` < 2. Constanten `EXPECTED_TIME_LOCK_SECONDS` en `MIN_THRESHOLD` (geëxporteerd,
+  ook in de `.d.mts`);
+- `selectProposal` begint met die problemen, voor **alle drie** de doelen. Knop 3 en 4 en de
+  pre-flight weigeren dus; knop 2 ook (hij weigerde al bij elk probleem: "geen nieuw
+  voorstel uit voorzorg"). Een voorstel indienen in een multisig die niet aan deze eisen
+  voldoet, heeft geen zin;
+- `checkProposalTimelock.ts` meldt de instellingen in zijn groene uitvoer. Een strengere
+  threshold (3) mag.
+
+Waarom exact en niet "minstens" 259.200: elke wijziging van de timelock hoort een bewuste
+wijziging in deze module te zijn, niet stil geaccepteerd te worden.
+
+### 3. Rood vóór groen
+
+Eerst de tests, tegen de ongewijzigde module (`yarn test:unit`: 106 passing, **12 failing**),
+daarna tegen de fix (118/0). `tests/unit/squadsScenario.ts` kan nu `configAuthority`,
+`threshold` en `timeLock` in de multisig-bytes zetten (offsets 40, 72, 74).
+
+| Scenario (#15 schoon, goedgekeurd en het laatste, tenzij anders) | Oude code | Na de fix |
+|---|---|---|
+| script: aparte config_authority | exit 0, "TIMELOCK VERSTREKEN" | exit 1, `config_authority HRcc…, verwacht 111…1 (autonome multisig)` |
+| script: time_lock 0 | exit 0 ("verstreken sinds 262800s") | exit 1, `time_lock 0 s, verwacht exact 259200 s` |
+| script: time_lock 259.199 | exit 0 | exit 1 |
+| script: threshold 1 | exit 0 | exit 1, `threshold 1, verwacht minstens 2` |
+| knop 4: config_authority / time_lock 0 / threshold 1 | **voert #15 uit** | weigert, verstuurt niets |
+| knop 3 (#15 Active): idem | **keurt #15 goed** | weigert, verstuurt niets |
+| melding bij verbinden, time_lock 0 | "[info] Open voorstel …" | waarschuwing met de reden (knop 2 weigert daarop) |
+| decode van de echte multisig | geen `configAuthority` | `configAuthority` = 111…1 |
+| groen moet blijven: threshold 3 | exit 0 | exit 0 |
+
+De rode tests faalden om de juiste reden (`expected +0 to equal 1` met de volledige groene
+uitvoer; `de pagina verstuurde [{"kind":"execute","transactionIndex":"#15"}]`, idem
+`approve`).
+
+**Mutatiecontrole** (op een kopie, daarna teruggezet en met `cmp` gecontroleerd):
+config_authority-eis uit: 3 failing; time_lock-eis uit: 5; threshold-eis uit: 3; de hele
+aanroep in `selectProposal` uit: 11.
+
+**Live, read-only na de fix**: `loadAndSelect` tegen devnet geeft voor indienen geen
+problemen (knop 2 blijft bruikbaar), en voor goedkeuren/uitvoeren alleen de bekende redenen
+over #14. De echte multisig voldoet dus aan de nieuwe eisen.
+
+### 4. Regressie
+
+| Suite | Uitkomst | Baseline (sectie 169) |
+|---|---|---|
+| `cargo test` | 13/0 (opnieuw na punt 7) | 13/0 |
+| `yarn test` | 279 passing, 119 pending, 0 failing (na punt 7) | 231/119/0; +12 uit punt 3, +36 vóór en in punt 7 |
+| `yarn test:pending-action` | 116/0 (1 pending; opnieuw na punt 7) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 (opnieuw na punt 7) | 117/0 |
+| `yarn test:unit` | 154/0 (na punt 7) | 106/0; +12 uit punt 3, +36 vóór en in punt 7 |
+
+Typecontrole (opnieuw na punt 7): strikte `tsc --noEmit` over `checkProposalTimelock.ts`, `preUpgradeChecks.ts` en de vier
+gewijzigde bestanden in `tests/unit/`: schoon. `node --check` op de gedeelde module: schoon.
+
+### 5. Open voor upgrade 2 (niet blokkerend voor upgrade 1)
+
+Uit §169 punt 10 (ongewijzigd), plus:
+- **I-1: Squads-ProgramData vastpinnen.** De poort gaat ervan uit dat Squads v4 alleen via
+  een Proposal met timelock uitvoert, en dat de layouts van Multisig/Proposal gelijk
+  blijven. Squads' programma is upgradeable. Voorstel: de `last_deploy_slot` (of de hash) van
+  de ProgramData van `SQDS4ep…` vastleggen en de poort laten weigeren als die verandert; plus
+  een terugcontrole op de multisig-header (bv. de accountlengte tegen het aantal leden), zodat
+  een verschoven layout niet tot een absurde `transactionIndex` en een eindeloze scan leidt;
+- **I-2: documentatiecorrectie.** §169 punt 7, reden 4, vervangen door de echte redenen
+  (zie de opsomming bovenaan deze sectie) in README, `admin/README.md` en het sjabloon.
+
+### 6. Nog te doen vóór het indienen van upgrade 1
+
+- ~~#9 afwijzen (punt 1)~~ **gedaan, 2026-09-30.** Twee leden klikten elk op knop 5 met
+  index 9:
+  - `3zZcLwTXUn2zw3RPJ3tLNofqPnP6J8KQD3pxfEJixXt3`:
+    `5Cxxuce7FAr3h2anyquxaWjBhuzZJU9zTdgW68UxWtY6J2HiyxfrvGmfZUuA5mVPCMr5Vd9AcfKL5SYXpKtMPEH5`
+    (slot 505.848.605, 08:53:33Z);
+  - `CP2fg9zgyh12FFVhqfP9PcuVhfhNBp4H59GrGDW9ios3`:
+    `gTfZmHJDbv7UBmAsGA5FRv2jPBQ5ce1sLgcj7FhHQjxgjraLxT1WsNyEvWBuiaLNrW21YZ7j8Fci7TctrenPyER`
+    (slot 505.849.832, 08:58:17Z).
+
+  **Read-only bevestigd**, onafhankelijk van de paginalog. Gelezen op devnet (genesis
+  `EtWT…`) via `api.devnet.solana.com`, commitment finalized, met de gevendorde web3 en
+  `@sqds/multisig` en de gedeelde module:
+  - proposal #9 `HWAW8jF3M72EzH5fJ8TiMqwZ8NVysDvfZmw1TauZcbc9`: status **Rejected**
+    (timestamp 1790758697 = 2026-09-30T08:58:17Z), `rejected` = [`3zZc…`, `CP2f…`],
+    `approved` en `cancelled` leeg;
+  - beide transacties zijn finalized, met `err null`. Elk heeft één ondertekenaar, en dat is
+    een lid van de multisig. Elk bevat één Squads-instructie met data `f33e869ce66af687 00`
+    (`proposal_reject`, `memo: None`) en de accounts multisig `A5iD…`, het lid en proposal #9.
+    Log: "Instruction: ProposalReject" en success. Daarnaast heeft de wallet twee
+    ComputeBudget-instructies toegevoegd (limiet 200.000; prijs 375.000 resp. 100.000
+    micro-lamports per CU). Die staan niet in het bericht dat knop 5 bouwt (punt 1), en ze
+    zijn onschuldig;
+  - stand na de afwijzing: #1-4, 6 en 7 Active; #5, 10, 11 en 13 Executed; #8 Cancelled;
+    #9, 12 en 14 Rejected. **Geen enkel voorstel staat op Approved of Executing.**
+    Multisig-instellingen zonder afwijking (config_authority 111…1, time_lock 259.200,
+    threshold 2), `transactionIndex` 14, stale 0;
+  - pre-flight-selectie met `TRANSACTION_INDEX=14`: `checkProposalTimelock.ts` geeft exit 1,
+    en `loadAndSelect` weigert voor approve en execute om dezelfde redenen als in §169
+    punt 5: "#14 staat op status Rejected" en "buffer: HRcc…, verwacht F5nh…". Er zijn geen
+    blockers. Voor indienen zijn er geen problemen. Buffer `F5nh…` bestaat nog niet.
+
+  Wat overblijft van M-1: de Active-restanten #1-4, 6 en 7 wijzen naar buffer `7jvi…`.
+  Volgens de review bovenaan is die gesloten (vandaag niet opnieuw gelezen). Een Upgrade
+  daaruit zou dan falen, maar één goedkeuring maakt zo'n restant een
+  blocker.
+- ongewijzigd uit §169 punt 9: de buffer `F5nh…` schrijven, authority naar de vault, en
+  vlak vóór knop 3 nagaan dat geen Active-restant intussen goedgekeurd is.
+
+**Adminpagina bij de commit.** `PAGE_BUILD` = `2026-09-30T00:00:00Z-sectie-170-multisig-instellingen`.
+Hij stond nog op sectie 168, want §169 had hem niet bijgewerkt. Read-only bevestigd dat de
+server op poort 8766 (pid 3936, niet herstart) byte-identiek levert wat in de werkmap staat.
+`wallet-signer.html` heeft sha256 `be097144…e5ff`, en `upgradeProposalCheck.mjs` is ook
+identiek (`cmp`). De server leest de bestanden dus per verzoek van schijf. Een herstart is
+niet nodig.
+
+**Eindregressie bij de commit** (na het invullen van #9 en `PAGE_BUILD`): cargo 13/0,
+`yarn test` 279/0 (119 pending), pending-action 116/0 (1 pending), rollover 117/0 en
+`test:unit` 154/0, inclusief de paginatests.
+
+### 7. Review van deze sectie vóór de commit (review §170)
+
+Een verse sessie heeft de werkboom van deze sectie beoordeeld, vóór de commit. Er kwamen
+drie lage punten en drie informatieve uit. Ze staan hieronder met de opvolging. De labels
+horen bij deze review (review §170), niet bij die van §169 bovenaan.
+
+- **L-1** er waren geen tests voor time_lock 259.201 en 4.294.967.295 of voor threshold 0.
+  Een "kleiner dan"-mutatie van de exacte vergelijking bleef daardoor onopgemerkt;
+- **L-2** geen test toonde aan dat knop 2 weigert bij afwijkende instellingen en dan niets
+  verstuurt;
+- **L-3** `multisigSettingsProblems` moet direct na het decoderen van de header draaien, vóór
+  de scan. Anders leidt een absurd hoge `transactionIndex` tot een eindeloze scan;
+- **I-1** bij een afwijkende instelling zeiden sommige meldingen "herlaad de pagina" of "klik
+  eerst op knop 2", in plaats van welke waarde afwijkt;
+- **I-2** spending limits zijn een uitvoerpad zonder voorstel;
+- **I-3** threshold ≥ 2 betekent twee sleutels, niet twee personen. De 72u zijn
+  Clock-seconden.
+
+**Wat er aan het begin van deze ronde al stond (eerlijkheidshalve).** De werkboom bevatte
+al de vroege weigering vóór de scan (L-3), de meldingen met `SETTINGS_HEADING` en
+`settingsRefusal` (I-1), de tests voor knop 2 (L-2), de script-gevallen 259.201,
+4.294.967.295 en threshold 0 (L-1) en de script-test met `transactionIndex` 2^63 (L-3):
+`yarn test:unit` 129/0. Die code is **niet** rood-vóór-groen ontstaan. Het rood is hieronder
+achteraf aangetoond met mutaties op precies die regels. Nieuw in deze ronde zijn alleen tests.
+De productiecode is niet gewijzigd, op één export in `scripts/lib/squadsUpgradeProposal.ts`
+na (`multisigSettingsProblems`, voor de tests).
+
+**Een vondst tijdens het werk (L-2).** De bestaande knop-2-tests gebruikten
+`devnetLikeProposals(14)`. Daarin is #14 een goedgekeurd voorstel voor déze buffer, dus knop 2
+weigerde daar al op "er bestaat al een open voorstel". De bewering "verstuurt niets" hing dus
+niet af van de instellingencontrole. De tests gebruiken nu de echte devnetstand van §169
+punt 5 (`devnetNow()`: #14 Rejected, geen open voorstel voor de buffer). Dat is precies de
+stand waarin knop 2 zonder de controle een voorstel zou versturen. Een positieve controle
+toont bovendien aan dat de opname het verstuurpad ziet: met de juiste instellingen verstuurt
+knop 2 precies één transactie via de wallet.
+
+**Nieuwe tests** (`yarn test:unit` 129 → 154):
+- `tests/unit/preflightLogic.ts`: `multisigSettingsProblems` op de grenzen, op de echte
+  multisig-bytes met één aangepast veld. De afwijkingen: time_lock 0, 1, 259.199, 259.201,
+  518.400 en 4.294.967.295, en threshold 0 en 1, elk met de exacte melding. Geen afwijking:
+  de echte multisig, time_lock 259.200 en threshold 2, 3 en 65.535 (13 tests);
+- `tests/unit/adminPageSelection.ts`: time_lock 259.201 en 4.294.967.295 en threshold 0 voor
+  knop 2, 3 en 4 (9 tests). Verder de L-2-controle (knop 2 verstuurt wel) en een L-3-test
+  met `transactionIndex` 2^63 en time_lock 0. Die laatste draait in een apart proces met een
+  harde timeout van 20 s, zodat een regressie faalt in plaats van de suite te laten hangen.
+  Hij toetst dat `loadAndSelect` (alle drie de doelen) en `loadProposalEntries` weigeren met
+  `scans = 0`. Tot slot een I-1-test voor de hercontrole van knop 2 na een
+  bevestigings-timeout (`finishPropose`): de melding noemt time_lock 0, knop 2 blijft uit en er
+  wordt niets verstuurd.
+
+De mutaties L-1, L-3 en L-2 draaiden vóór die laatste test (153 tests); de I-1-mutatie is erna
+herhaald (154).
+
+**Mutatiecontrole** (op de echte bestanden met een reservekopie, na elke mutatie teruggezet;
+`cmp` en sha256 identiek aan vóór de controle):
+
+| Mutatie | `yarn test:unit` | Voorbeelden van de falende tests |
+|---|---|---|
+| L-1: `timeLockSeconds !== 259200` → `< 259200` | 142/**11** | knop 4 bij 259.201: `de pagina verstuurde [{"kind":"execute","transactionIndex":"#15"}]`; knop 3: `approve #15`; knop 2: `wallet-signAndSend`; script bij 259.201: exit 0; 3× grenstest (259.201, 518.400, 4.294.967.295) |
+| L-3: instellingen pas ná de scan (vroege return en vroege throw weg) | 149/**4** | apart proces: `bleef scannen en werd na 20 s gestopt (SIGTERM)`; script: `TIMEOUT: na 30000 ms gestopt`; `loadProposalEntries`: `expected 10 to equal +0` (scans); pagina met 500 voorstellen gescand |
+| L-2: `multisigSettingsProblems` geeft altijd `[]` | 114/**39** | knop 2 (6 gevallen): `wallet-signAndSend` verstuurd; knop 3/4 (12): `approve`/`execute #15`; script (7): exit 0; grenstests (8) |
+| I-1: pagina en script negeren `settingsProblems` (6× in de pagina, 1× in het script) | 137/**17** | knop 2: `Kon niet met zekerheid vaststellen…` (6); knop 2 na een timeout: `Kon niet vaststellen of transactie SIG170…`; melding bij verbinden: `Niet elk voorstel was te lezen…`; knop 3: `Geen voorstel om goed te keuren…`; script (8): geen `MULTISIG-INSTELLINGEN WIJKEN AF` |
+
+**I-1: meldingen.** Bij afwijkende instellingen noemen alle paden de afwijkende waarde, onder
+de kop "multisig-instellingen wijken af". Dat geldt voor knop 2 (vooraf en de hercontrole na
+een timeout), knop 3, knop 4, de melding bij verbinden, het TRANSACTION_INDEX-veld en het
+script. Ze zeggen erbij dat herladen of een nieuw voorstel het niet oplost. De hercontrole na een
+timeout van knop 2 (`finishPropose`) had die melding al, maar aanvankelijk geen test: de
+eerste I-1-mutatie raakte die regel zonder dat er een test faalde (16 failing). Met de test
+erbij faalt ook die (17 failing). "Herlaad de
+pagina" en "klik eerst op knop 2" blijven alleen staan waar ze kloppen: bij een onvolledige
+of onleesbare scan, en bij "geen open voorstel" met correcte instellingen.
+
+**I-2: spending limits.** Squads v4 kent naast voorstellen een tweede uitvoerpad:
+`spending_limit_use`. Een lid van een SpendingLimit-account maakt daarmee SOL of tokens uit
+de vault over, zonder voorstel en zonder timelock. Het kan **geen Upgrade** tekenen. Nagegaan
+in de gevendorde `@sqds/multisig` 2.1.4: de argumenten zijn alleen `amount`, `decimals` en
+`memo` (discriminator `[16,57,130,127,193,20,155,134]`), en er zijn geen instructies of
+accounts om aan te roepen. Deze poort wordt er dus niet door omzeild. De vault kan er wel
+door leeglopen. Een nieuwe spending limit vergt in een autonome multisig een config-voorstel
+met timelock, en zo'n voorstel blokkeert als Approved knop 3/4 en de pre-flight (§169).
+Bestaande SpendingLimit-accounts van deze multisig zijn **niet** gelezen. Dat staat open
+(punt 5).
+
+**I-3: sleutels en tijd.**
+- threshold ≥ 2 betekent twee **sleutels**, niet twee **personen**. Houdt één persoon twee
+  van de drie lidsleutels (`2jDz…`, `3zZc…`, `CP2f…`), of staan twee sleutels op hetzelfde
+  apparaat, dan volstaat die ene persoon of dat ene apparaat voor goedkeuren en uitvoeren.
+  Geen on-chain controle kan dat zien. Bij elk voorstel noteren wie welke sleutel houdt;
+- de 72u zijn **Clock-seconden** (`unix_timestamp` van de Clock-sysvar), geen wandkloktijd.
+  Onder Alpenglow zet de leider van elk blok die tijdstempel, binnen een protocolmarge
+  (§156). Hoe ver één leider of een reeks leiders de 72u kan verkorten, is nog niet gemeten.
+  Dat valt samen met het open punt van §156.
+
+Bijgewerkt: `docs/upgradevoorstel-sjabloon.md` (I-2 en I-3 bij de pre-flight).
+
+Aanvulling op punt 5 (open voor upgrade 2, niet blokkerend voor upgrade 1):
+- de SpendingLimit-accounts van multisig `A5iD…` read-only opsommen. Overweeg of de poort
+  moet weigeren als er een bestaat;
+- een absurd hoge `transactionIndex` **met correcte instellingen** leidt nog steeds tot een
+  lange scan. L-3 dekt alleen de afwijkende instellingen. Een bovengrens of een
+  terugcontrole op de header (zie I-1 van §169, punt 5) sluit dat;
+- de Alpenglow-marge van de tijdstempel meten (§156), en de 72u-redenering daarop toetsen.

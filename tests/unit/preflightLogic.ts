@@ -14,6 +14,7 @@ import {
   decodeMultisigHeader,
   decodeProposalHeader,
   decodeVaultTransaction,
+  multisigSettingsProblems,
   upgradeProposalProblems,
   vaultPda,
 } from "../../scripts/lib/squadsUpgradeProposal";
@@ -111,7 +112,13 @@ describe("pre-flight-logica op echte devnet-bytes (STATUS.md sectie 167)", () =>
     const vtx13 = () => decodeVaultTransaction(b64(fx.vaultTransaction13)) as VaultTransaction;
 
     it("echte multisig en proposal #13 worden gedecodeerd", () => {
-      assert.deepEqual(decodeMultisigHeader(b64(fx.multisig)), {
+      const header = decodeMultisigHeader(b64(fx.multisig));
+      assert.notTypeOf(header, "string");
+      if (typeof header === "string") return;
+      // Sectie 170: config_authority wordt gelezen; op devnet de standaardwaarde (autonoom).
+      assert.isTrue(header.configAuthority?.equals(PublicKey.default), `config_authority ${header.configAuthority?.toBase58()}`);
+      const { configAuthority: _configAuthority, ...rest } = header;
+      assert.deepEqual(rest, {
         threshold: 2,
         timeLockSeconds: 259_200,
         transactionIndex: 14n,
@@ -123,6 +130,43 @@ describe("pre-flight-logica op echte devnet-bytes (STATUS.md sectie 167)", () =>
       assert.isTrue(proposal.multisig.equals(MULTISIG));
       assert.equal(proposal.transactionIndex, 13n);
       assert.equal(proposal.statusTag, 5); // Executed
+    });
+
+    // Sectie 170 (review §170, L-1): de grenzen van multisigSettingsProblems, op de echte
+    // multisig-bytes met één veld aangepast (threshold u16 op 72, time_lock u32 op 74).
+    // time_lock moet EXACT 259200 zijn: ook langer weigert (een "kleiner dan"-mutatie valt hier op).
+    describe("sectie 170, L-1: multisigSettingsProblems op de grenzen", () => {
+      const header = (edit: (b: Buffer) => void) => {
+        const bytes = Buffer.from(b64(fx.multisig));
+        edit(bytes);
+        const h = decodeMultisigHeader(bytes);
+        if (typeof h === "string") throw new Error(h);
+        return h;
+      };
+      const timeLock = (s: number) => header((b) => b.writeUInt32LE(s, 74));
+      const threshold = (t: number) => header((b) => b.writeUInt16LE(t, 72));
+
+      it("de echte devnet-multisig heeft geen afwijkingen", () => {
+        assert.deepEqual(multisigSettingsProblems(header(() => {})), []);
+      });
+      for (const s of [0, 1, 259_199, 259_201, 518_400, 4_294_967_295]) {
+        it(`time_lock ${s}: afwijking`, () => {
+          assert.deepEqual(multisigSettingsProblems(timeLock(s)), [`multisig: time_lock ${s} s, verwacht exact 259200 s (72u)`]);
+        });
+      }
+      it("time_lock 259200: geen afwijking", () => {
+        assert.deepEqual(multisigSettingsProblems(timeLock(259_200)), []);
+      });
+      for (const t of [0, 1]) {
+        it(`threshold ${t}: afwijking`, () => {
+          assert.deepEqual(multisigSettingsProblems(threshold(t)), [`multisig: threshold ${t}, verwacht minstens 2`]);
+        });
+      }
+      for (const t of [2, 3, 65_535]) {
+        it(`threshold ${t}: geen afwijking`, () => {
+          assert.deepEqual(multisigSettingsProblems(threshold(t)), []);
+        });
+      }
     });
 
     it("de vault-PDA volgt uit de multisig (seeds uit @sqds/multisig src/pda.ts)", () => {

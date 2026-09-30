@@ -180,12 +180,27 @@ export interface SquadsOpts {
   staleIndex?: number;
   proposals: Record<number, ProposalOpts>;
   buffer?: BufferOpts;
+  /**
+   * Sectie 170 (L-1): multisig-instellingen waarop de timelock-redenering
+   * rust. Standaard de devnet-stand: config_authority de standaardwaarde
+   * (autonoom), threshold 2, time_lock 259200.
+   */
+  configAuthority?: PublicKey;
+  threshold?: number;
+  timeLock?: number;
 }
+
+// Multisig-layout: discriminator (8), create_key (32), config_authority op
+// 40, threshold (u16) op 72, time_lock (u32) op 74, transaction_index op 78,
+// stale_transaction_index op 86.
 
 /** Multisig, voorstellen, VaultTransactions, de RC-buffer en de Clock-sysvar. */
 export function squadsAccounts(o: SquadsOpts): Map<string, FakeAccount> {
   const accounts = new Map<string, FakeAccount>();
   const multisig = Buffer.from(fx.multisig, "base64");
+  if (o.configAuthority) o.configAuthority.toBuffer().copy(multisig, 40);
+  if (o.threshold !== undefined) multisig.writeUInt16LE(o.threshold, 72);
+  if (o.timeLock !== undefined) multisig.writeUInt32LE(o.timeLock, 74);
   multisig.writeBigUInt64LE(BigInt(o.latestIndex), 78);
   multisig.writeBigUInt64LE(BigInt(o.staleIndex ?? 0), 86);
   accounts.set(MULTISIG.toBase58(), { owner: SQUADS.toBase58(), data: multisig });

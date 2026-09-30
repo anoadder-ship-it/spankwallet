@@ -98,7 +98,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-09-29T00:00:00Z-sectie-168-gedeelde-voorstelselectie";
+      var PAGE_BUILD = "2026-09-30T00:00:00Z-sectie-170-multisig-instellingen";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -739,14 +739,28 @@
         return upgradeCheck.loadAndSelect(connection, { multisigAddress: MULTISIG_PDA, expected: EXPECTED_UPGRADE, purpose });
       }
 
+      // Sectie 170 (review §169 L-1/L-3, I-1): wijkt de multisig af van wat de
+      // poort vereist (autonoom, time_lock exact 259200 s, threshold >= 2), dan
+      // weigeren knop 2, 3 en 4 en zegt de melding welke waarde afwijkt. Niet
+      // "herlaad de pagina" en niet "klik eerst op knop 2": herladen of een nieuw
+      // voorstel lost dit niet op. De voorstellen zijn dan niet gescand.
+      function settingsRefusal(settingsProblems) {
+        return (
+          "Multisig-instellingen wijken af: " + settingsProblems.join("; ") + ". De poort vereist een autonome " +
+          "multisig (geen config_authority), time_lock exact 259200 s en threshold minstens 2 (STATUS.md sectie 170). " +
+          "Herladen of een nieuw voorstel lost dit niet op; de voorstellen zijn niet gescand."
+        );
+      }
+
       // Het nummer dat bij `TRANSACTION_INDEX=<n> ... preUpgradeChecks.ts --pre`
       // hoort: precies het voorstel dat knop 4 zou uitvoeren, of de reden
       // waarom er (nog) geen is.
       async function showPreflightTransactionIndex() {
         const display = document.getElementById("transaction-index-display");
         try {
-          const { target, problems } = await selectUpgradeProposal("execute");
-          display.textContent = target ? target.index + " (" + target.statusName + ")" : "geen: " + problems.join("; ");
+          const { target, problems, settingsProblems } = await selectUpgradeProposal("execute");
+          if (settingsProblems.length > 0) display.textContent = "geen: " + settingsRefusal(settingsProblems);
+          else display.textContent = target ? target.index + " (" + target.statusName + ")" : "geen: " + problems.join("; ");
         } catch (err) {
           display.textContent = "onbekend: " + err.message;
         }
@@ -759,7 +773,11 @@
       async function logCurrentProposalStatus() {
         await showPreflightTransactionIndex();
         try {
-          const { candidates, blockers, problems } = await selectUpgradeProposal("propose");
+          const { candidates, blockers, problems, settingsProblems } = await selectUpgradeProposal("propose");
+          if (settingsProblems.length > 0) {
+            log("[waarschuwing] " + settingsRefusal(settingsProblems) + " Knoppen 2, 3 en 4 weigeren.", "log-error");
+            return;
+          }
           if (problems.length > 0) {
             log("[waarschuwing] Niet elk voorstel was te lezen of te controleren: " + problems.join("; ") + ". Knoppen 2/3/4 weigeren tot dit opgelost is.", "log-error");
           }
@@ -989,8 +1007,14 @@
           // aanmaakte. Lees de voorstellen opnieuw rechtstreeks van de
           // keten, ongeacht wat de signatuur-poll hierboven vond, VOORDAT de
           // knop weer vrijkomt.
-          const { candidates, problems } = await selectUpgradeProposal("propose");
+          const { candidates, problems, settingsProblems } = await selectUpgradeProposal("propose");
 
+          if (settingsProblems.length > 0) {
+            // Knop 2 blijft uit; of de eerdere transactie landde, is dan niet gecontroleerd.
+            throw new Error(
+              "Kon niet controleren of transactie " + signature + " een voorstel aanmaakte. " + settingsRefusal(settingsProblems)
+            );
+          }
           if (candidates.length > 0) {
             const newest = candidates[candidates.length - 1];
             log(
@@ -1106,7 +1130,8 @@
       // is (welke inhoud ook) en het precies de upgrade is - nooit een
       // voorstel goedkeuren dat de pre-flight daarna zou weigeren.
       async function buildApproveTx() {
-        const { target, problems } = await selectUpgradeProposal("approve");
+        const { target, problems, settingsProblems } = await selectUpgradeProposal("approve");
+        if (settingsProblems.length > 0) throw new Error("Knop 3 weigert. " + settingsRefusal(settingsProblems));
         if (!target) {
           throw new Error(
             "Geen voorstel om goed te keuren dat de pre-flight zou accepteren:\n- " + problems.join("\n- ") +
@@ -1231,7 +1256,8 @@
       // `TRANSACTION_INDEX=<n> ... preUpgradeChecks.ts --pre` toetst, met
       // dezelfde regel; anders weigert de knop.
       async function buildSquadsExecuteTx() {
-        const { target, problems } = await selectUpgradeProposal("execute");
+        const { target, problems, settingsProblems } = await selectUpgradeProposal("execute");
+        if (settingsProblems.length > 0) throw new Error("Knop 4 weigert - NIET UITVOEREN. " + settingsRefusal(settingsProblems));
         if (!target) {
           throw new Error("Geen voorstel dat de pre-flight zou accepteren - NIET UITVOEREN:\n- " + problems.join("\n- "));
         }
@@ -1423,7 +1449,7 @@
         // Sectie 168/169: een tweede Active-voorstel voor deze buffer laat
         // knop 3 weigeren tot er weer precies één is (de overbodige afwijzen
         // met knop 5); elk ander Approved-voorstel laat knop 3 en 4 weigeren.
-        const { candidates, problems } = await selectUpgradeProposal("propose");
+        const { candidates, problems, settingsProblems } = await selectUpgradeProposal("propose");
         const forceCheckbox = document.getElementById("force-new-proposal-checkbox");
         const checkboxWasChecked = forceCheckbox.checked;
         // Vakje ONMIDDELLIJK resetten, ongeacht wat hierna gebeurt - het is
@@ -1433,6 +1459,9 @@
         // enige nieuwe bevestiging.
         forceCheckbox.checked = false;
 
+        if (settingsProblems.length > 0) {
+          throw new Error("Knop 2 weigert, geen nieuw voorstel aangemaakt. " + settingsRefusal(settingsProblems));
+        }
         if (problems.length > 0) {
           throw new Error(
             "Kon niet met zekerheid vaststellen of er al een open voorstel bestaat: " + problems.join("; ") +

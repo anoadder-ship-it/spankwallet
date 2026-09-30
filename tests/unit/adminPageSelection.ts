@@ -1,6 +1,8 @@
 import { assert } from "chai";
+import { spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { pathToFileURL } from "url";
 import type { FakeAccount } from "./fakeDevnetRpc";
 import { devnetLikeProposals, OLD_BUFFER, squadsAccounts } from "./squadsScenario";
 import type { ProposalOpts, SquadsOpts } from "./squadsScenario";
@@ -108,9 +110,14 @@ interface Page {
   /** Wat de eigen log() van de pagina in #output zette. */
   logs: string[];
   elements: Record<string, FakeElement>;
+  /** Sectie 170 (L-3): aantal getMultipleAccounts-aanroepen, dus of de voorstellen gescand werden. */
+  scans: { count: number };
 }
 
-function fakeConnection(accounts: Map<string, FakeAccount>) {
+// Een echt lid van de multisig uit de fixture (devnet): nodig voor knop 2, die eerst het lidmaatschap toetst.
+const MEMBER = "2jDzaP3FbW5583hb4FeGZVU9MYseqBeFHwxycjzcvT7Q";
+
+function fakeConnection(accounts: Map<string, FakeAccount>, scans: { count: number } = { count: 0 }) {
   const info = (address: { toBase58(): string }) => {
     const a = accounts.get(address.toBase58());
     return a ? { data: Buffer.from(a.data), owner: new web3.PublicKey(a.owner), executable: !!a.executable, lamports: 1_000_000, rentEpoch: 0 } : null;
@@ -120,15 +127,21 @@ function fakeConnection(accounts: Map<string, FakeAccount>) {
     getAccountInfo: async (address: any) => info(address),
     getAccountInfoAndContext: async (address: any) => ({ context, value: info(address) }),
     getMultipleAccountsInfo: async (addresses: any[]) => addresses.map(info),
-    getMultipleAccountsInfoAndContext: async (addresses: any[]) => ({ context, value: addresses.map(info) }),
+    getMultipleAccountsInfoAndContext: async (addresses: any[]) => {
+      scans.count++;
+      return { context, value: addresses.map(info) };
+    },
     getLatestBlockhash: async () => ({ blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 1 }),
+    // Alleen voor de controle dat knop 2 met de juiste instellingen wél verstuurt (review §170, L-2).
+    confirmTransaction: async () => ({ context, value: { err: null } }),
   };
 }
 
-async function loadPage(state: SquadsOpts): Promise<Page> {
+async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, unknown> = {}): Promise<Page> {
   const { names, source } = pageCode(PAGE);
   const sent: Sent[] = [];
   const logs: string[] = [];
+  const scans = { count: 0 };
   const elements: Page["elements"] = {};
   const record = (kind: string) => (args: { transactionIndex: bigint }) => {
     sent.push({ kind, transactionIndex: BigInt(args.transactionIndex) });
@@ -142,9 +155,25 @@ async function loadPage(state: SquadsOpts): Promise<Page> {
   });
   const env: Record<string, unknown> = {
     PublicKey: web3.PublicKey,
-    connection: fakeConnection(squadsAccounts(state)),
+    // De overige web3-namen die de pagina uit de gevendorde web3 haalt; knop 2 bouwt zijn
+    // transactie zelf (review §170, L-2: de controle dat knop 2 met de juiste instellingen verstuurt).
+    TransactionMessage: web3.TransactionMessage,
+    TransactionInstruction: web3.TransactionInstruction,
+    VersionedTransaction: web3.VersionedTransaction,
+    SYSVAR_RENT_PUBKEY: web3.SYSVAR_RENT_PUBKEY,
+    SYSVAR_CLOCK_PUBKEY: web3.SYSVAR_CLOCK_PUBKEY,
+    connection: { ...fakeConnection(squadsAccounts(state), scans), ...connectionOverrides },
     multisig: { ...sdk, transactions: { ...sdk.transactions, vaultTransactionExecute: record("execute"), proposalApprove: record("approve") } },
-    connectedWallet: { publicKey: web3.PublicKey.default, mode: "extension" },
+    // Een lid (sectie 170, L-2: knop 2 toetst eerst het lidmaatschap); alles wat de wallet zou
+    // versturen, wordt opgenomen i.p.v. verstuurd.
+    connectedWallet: {
+      publicKey: new web3.PublicKey(MEMBER),
+      mode: "extension",
+      signAndSendTransaction: async () => {
+        sent.push({ kind: "wallet-signAndSend", transactionIndex: -1n });
+        return { signature: "opgenomen" };
+      },
+    },
     // Genoeg DOM voor de eigen log() van de pagina en de getoonde velden.
     document: {
       getElementById: (id: string) => (elements[id] ??= element()),
@@ -156,7 +185,7 @@ async function loadPage(state: SquadsOpts): Promise<Page> {
   const sharedPath = path.join(ROOT, "admin", "upgradeProposalCheck.mjs");
   if (fs.existsSync(sharedPath)) env.upgradeCheck = require(sharedPath).createUpgradeProposalCheck(web3.PublicKey);
   const factory = new Function(...Object.keys(env), `${source}\nreturn { ${names.join(", ")} };`);
-  return { fns: factory(...Object.values(env)), sent, logs, elements };
+  return { fns: factory(...Object.values(env)), sent, logs, elements, scans };
 }
 
 async function rejection(p: Promise<unknown>): Promise<string> {
@@ -275,6 +304,170 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
       const logs = page.logs.join("\n");
       assert.notInclude(logs, "Knoppen 3/4 weigeren zolang er meer dan een is");
       assert.match(logs, /Knop 3 weigert zolang er meer dan één open voorstel voor deze buffer is/);
+    });
+  });
+
+  describe("sectie 170 (review §169 L-1): de multisig-instellingen waarop de timelock rust", () => {
+    const settings: [string, Partial<SquadsOpts>, RegExp][] = [
+      ["een aparte config_authority", { configAuthority: OLD_BUFFER }, /config_authority HRcc\S+, verwacht 11111111111111111111111111111111 \(autonome multisig\)/],
+      ["time_lock 0", { timeLock: 0 }, /time_lock 0 s, verwacht exact 259200 s/],
+      ["threshold 1", { threshold: 1 }, /threshold 1, verwacht minstens 2/],
+      // Review §170 (L-1): exact, niet "minstens": ook een langere time_lock weigert; en threshold 0.
+      ["time_lock 259201", { timeLock: 259_201 }, /time_lock 259201 s, verwacht exact 259200 s/],
+      ["time_lock 4294967295", { timeLock: 4_294_967_295 }, /time_lock 4294967295 s, verwacht exact 259200 s/],
+      ["threshold 0", { threshold: 0 }, /threshold 0, verwacht minstens 2/],
+    ];
+    for (const [name, multisig, reason] of settings) {
+      it(`knop 4: ${name}, #15 schoon, goedgekeurd en het laatste: weigert, voert niets uit`, async () => {
+        const page = await loadPage({ latestIndex: 15, proposals: { 15: {} }, ...multisig });
+        const why = await rejection(page.fns.buildSquadsExecuteTx());
+        assert.deepEqual(page.sent, [], `de pagina verstuurde ${JSON.stringify(page.sent, (_, v) => (typeof v === "bigint" ? `#${v}` : v))}`);
+        assert.match(why, reason);
+      });
+
+      it(`knop 3: ${name}, #15 Active en het laatste: weigert, keurt niets goed`, async () => {
+        const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 1 } }, ...multisig });
+        const why = await rejection(page.fns.buildApproveTx());
+        assert.deepEqual(page.sent, [], `de pagina verstuurde ${JSON.stringify(page.sent, (_, v) => (typeof v === "bigint" ? `#${v}` : v))}`);
+        assert.match(why, reason);
+      });
+    }
+
+    // De echte devnet-stand vóór upgrade 1 (sectie 169 punt 5): #1-14, #14 Rejected, dus GEEN open
+    // voorstel voor deze buffer. Alleen dan zou knop 2 zonder de instellingencontrole een nieuw
+    // voorstel versturen (review §170, L-2); met devnetLikeProposals(14) weigerde hij al op "#14 open".
+    const devnetNow = (): Record<number, ProposalOpts> => ({ ...devnetLikeProposals(14), 14: { status: 2, buffer: OLD_BUFFER } });
+
+    it("melding bij verbinden: zegt welke instelling afwijkt, en niet 'geen open voorstel, knop 2 zou een nieuw voorstel aanmaken'", async () => {
+      const page = await loadPage({ latestIndex: 14, proposals: devnetNow(), timeLock: 0 });
+      await page.fns.logCurrentProposalStatus();
+      const logs = page.logs.join("\n");
+      assert.match(logs, /multisig-instellingen wijken af[^\n]*time_lock 0 s, verwacht exact 259200 s/i);
+      assert.notInclude(logs, "Knop 2 zou een NIEUW voorstel aanmaken");
+      assert.notInclude(logs, "Niet elk voorstel was te lezen");
+      assert.match(page.elements["transaction-index-display"]?.textContent ?? "", /^geen: multisig-instellingen wijken af.*time_lock 0 s/i);
+    });
+
+    // L-2: knop 2 weigert en verstuurt niets. I-1: de reden is de afwijkende waarde, niet "herlaad de pagina".
+    for (const [name, multisig, reason] of settings) {
+      it(`knop 2: ${name}: weigert, verstuurt niets, en noemt de afwijkende waarde`, async () => {
+        const page = await loadPage({ latestIndex: 14, proposals: devnetNow(), ...multisig });
+        const why = await rejection(page.fns.runProposeAction());
+        assert.deepEqual(page.sent, [], `de pagina verstuurde ${JSON.stringify(page.sent, (_, v) => (typeof v === "bigint" ? `#${v}` : v))}`);
+        assert.match(why, reason);
+        assert.match(why, /multisig-instellingen wijken af/i);
+        assert.notInclude(why, "herlaad de pagina");
+        assert.notInclude(why, "Kon niet met zekerheid vaststellen");
+      });
+    }
+
+    // Review §170 (L-2): zonder deze controle zou "verstuurt niets" hierboven ook groen zijn als de
+    // opname het verstuurpad van knop 2 niet zag. Met de juiste instellingen en geen open voorstel
+    // voor de buffer verstuurt knop 2 precies één transactie via de wallet. Wat na het versturen
+    // gebeurt (bevestiging, deeplink-opruiming) valt buiten deze test en mag hier falen: alleen
+    // de opname telt.
+    it("L-2 controle: met de juiste instellingen verstuurt knop 2 wel (één transactie via de wallet)", async () => {
+      const page = await loadPage({ latestIndex: 14, proposals: devnetNow() });
+      await page.fns.runProposeAction().catch(() => undefined);
+      assert.deepEqual(page.sent.map((s) => s.kind), ["wallet-signAndSend"]);
+    });
+
+    // Review §170 (I-1): de hercontrole van knop 2 na een bevestigings-timeout (finishPropose).
+    // Bevestiging time-out, de signatuur blijkt geland, de herlezing ziet time_lock 0: de melding
+    // noemt de afwijkende waarde (niet "herlaad de pagina") en knop 2 blijft uit.
+    it("I-1: knop 2 na een bevestigings-timeout noemt de afwijkende instelling en blijft uit", async () => {
+      const page = await loadPage({ latestIndex: 14, proposals: devnetNow(), timeLock: 0 }, {
+        confirmTransaction: async () => {
+          throw new Error("bevestiging verlopen (test)");
+        },
+        getSignatureStatuses: async () => ({ value: [{ confirmationStatus: "confirmed", err: null }] }),
+      });
+      const why = await rejection(page.fns.finishPropose("SIG170"));
+      assert.match(why, /^Kon niet controleren of transactie SIG170 een voorstel aanmaakte\. Multisig-instellingen wijken af: multisig: time_lock 0 s, verwacht exact 259200 s/);
+      assert.notInclude(why, "Herlaad de pagina");
+      assert.isTrue(page.elements["propose-btn"]?.disabled, "knop 2 kwam weer vrij");
+      assert.deepEqual(page.sent, []);
+    });
+
+    it("I-1: knop 3 en 4 zeggen dat de instellingen afwijken, niet 'klik eerst op knop 2'", async () => {
+      const approve = await loadPage({ latestIndex: 15, proposals: { 15: { status: 1 } }, timeLock: 0 });
+      const whyApprove = await rejection(approve.fns.buildApproveTx());
+      assert.match(whyApprove, /multisig-instellingen wijken af/i);
+      assert.notInclude(whyApprove, "Klik eerst op '2. Voorstel indienen'");
+      const execute = await loadPage({ latestIndex: 15, proposals: { 15: {} }, timeLock: 0 });
+      assert.match(await rejection(execute.fns.buildSquadsExecuteTx()), /multisig-instellingen wijken af/i);
+    });
+
+    it("L-3: bij afwijkende instellingen worden de voorstellen niet gescand (500 voorstellen, time_lock 0)", async () => {
+      const proposals: Record<number, ProposalOpts> = {};
+      for (let i = 1; i <= 500; i++) proposals[i] = { status: 1 };
+      const page = await loadPage({ latestIndex: 500, proposals, timeLock: 0 });
+      const why = await rejection(page.fns.buildSquadsExecuteTx());
+      assert.match(why, /time_lock 0 s, verwacht exact 259200 s/);
+      assert.strictEqual(page.scans.count, 0, `de voorstellen werden gescand (${page.scans.count} getMultipleAccounts-aanroepen)`);
+    });
+
+    it("L-3: ook loadProposalEntries zelf weigert te scannen bij afwijkende instellingen", async () => {
+      const check = require(path.join(ROOT, "admin", "upgradeProposalCheck.mjs")).createUpgradeProposalCheck(web3.PublicKey);
+      const scans = { count: 0 };
+      const connection = fakeConnection(squadsAccounts({ latestIndex: 500, proposals: {}, timeLock: 0 }), scans);
+      const why = await rejection(check.loadProposalEntries(connection, new web3.PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp"), "confirmed"));
+      assert.match(why, /multisig-instellingen wijken af.*time_lock 0 s/i);
+      assert.strictEqual(scans.count, 0);
+    });
+
+    it("controle: met de juiste instellingen worden de voorstellen wel gescand", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } });
+      await page.fns.buildSquadsExecuteTx();
+      assert.isAbove(page.scans.count, 0);
+    });
+
+    // Review §170 (L-3): transactionIndex absurd hoog (2^63) en time_lock afwijkend. Een scan
+    // zou 2^64 PDA's afleiden en de event-loop blokkeren; daarom in een apart proces met een
+    // harde timeout, zodat een regressie hier faalt in plaats van de suite te laten hangen.
+    // Dezelfde loadAndSelect/loadProposalEntries die de pagina (knop 2/3/4) en het script gebruiken.
+    it("L-3: transactionIndex 2^63 en time_lock 0: loadAndSelect en loadProposalEntries weigeren snel, zonder scan", function () {
+      this.timeout(30_000);
+      const multisig = squadsAccounts({ latestIndex: 0, proposals: {}, timeLock: 0 }).get("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp")!;
+      const data = Buffer.from(multisig.data);
+      data.writeBigUInt64LE(1n << 63n, 78);
+      const url = (p: string) => JSON.stringify(pathToFileURL(path.join(ROOT, p)).href);
+      const code = `
+        import { createUpgradeProposalCheck } from ${url("admin/upgradeProposalCheck.mjs")};
+        import * as web3 from ${url("admin/vendor/web3.mjs")};
+        const check = createUpgradeProposalCheck(web3.PublicKey);
+        let scans = 0;
+        const value = { data: Buffer.from(process.env.MULTISIG_B64, "base64"), owner: new web3.PublicKey(${JSON.stringify(multisig.owner)}), executable: false, lamports: 1, rentEpoch: 0 };
+        const connection = {
+          getAccountInfoAndContext: async () => ({ context: { slot: 1 }, value }),
+          getMultipleAccountsInfoAndContext: async (a) => { scans++; return { context: { slot: 1 }, value: a.map(() => null) }; },
+        };
+        const address = new web3.PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
+        const out = {};
+        for (const purpose of ["propose", "approve", "execute"]) {
+          const s = await check.loadAndSelect(connection, { multisigAddress: address, expected: null, purpose });
+          out[purpose] = { transactionIndex: String(s.multisig.transactionIndex), target: s.target, settingsProblems: s.settingsProblems };
+        }
+        try { await check.loadProposalEntries(connection, address, "confirmed"); out.entries = "geen fout"; } catch (e) { out.entries = e.message; }
+        out.scans = scans;
+        console.log(JSON.stringify(out));
+      `;
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], {
+        cwd: ROOT,
+        env: { ...process.env, MULTISIG_B64: data.toString("base64") },
+        timeout: 20_000,
+        encoding: "utf8",
+      });
+      assert.isNull(r.signal, `het proces bleef scannen en werd na 20 s gestopt (${r.signal})\n${r.stderr}`);
+      assert.strictEqual(r.status, 0, r.stderr);
+      const out = JSON.parse(r.stdout.trim().split("\n").pop()!);
+      for (const purpose of ["propose", "approve", "execute"]) {
+        assert.strictEqual(out[purpose].transactionIndex, (1n << 63n).toString(), purpose);
+        assert.isNull(out[purpose].target, purpose);
+        assert.deepEqual(out[purpose].settingsProblems, ["multisig: time_lock 0 s, verwacht exact 259200 s (72u)"], purpose);
+      }
+      assert.match(out.entries, /^multisig-instellingen wijken af: multisig: time_lock 0 s/);
+      assert.strictEqual(out.scans, 0);
     });
   });
 

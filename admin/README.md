@@ -61,6 +61,19 @@ is `client/` de juiste plek.
      (knop 2-5 beslissen dat op één plek, `awaitConfirmation`). Het is geen bewijs dat de
      upgrade klopt: alleen `scripts/preUpgradeChecks.ts --post` en de vijf verificaties van
      STATUS.md sectie 95 tellen.
+
+   Sinds STATUS.md sectie 172:
+   - alle actieknoppen staan uit van het versturen tot het einde van de controle, ook na
+     terugkeer van een Solflare-deep-link (dan vanaf het laden van de pagina);
+   - "Kon niet vaststellen of transactie … geland is": de transactie kan nog landen tot haar
+     blockhash verloopt (ongeveer 2 minuten na het versturen). Wacht tot het tijdstip dat de
+     pagina noemt, controleer de signature opnieuw, en klik pas daarna eventueel opnieuw;
+   - knop 4 via de deep-link bewaart het voorstelnummer over de omleiding heen en noemt het
+     in de uitkomst ("SUCCES - voorstel #… uitgevoerd"). De regel "Uitvoeren van voorstel
+     #…" vóór de omleiding is op mobiel nauwelijks te lezen; controleer het nummer in de
+     uitkomst;
+   - de verbindingsmelding begint niet meer met "SUCCES"; dat woord is voorbehouden aan een
+     transactie die aantoonbaar zonder fout landde.
 5. **Geen enkele private key verlaat ooit een apparaat** - alle drie de ondertekenpaden
    (Wallet Standard, Mobile Wallet Adapter, Solflare-deep-link) laten de wallet-extensie of
    -app zelf ondertekenen. Dit was een expliciete eis bij de echte migratie (in

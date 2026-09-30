@@ -17029,9 +17029,19 @@ o.a. `~/.config/solana`, `~/backups`, `~/spankwallet-dev-keys`, de projectmappen
 op 64-byte keypairs: een JSON-array of een base58-string van 64 bytes. Van elk keypair
 alleen de publieke helft vergeleken met `7jvidUn42xWhJCV7GWbE61N41exK5iEP4sZDnJtwTZYh`;
 geen geheim is getoond of opgeslagen. 118 keypairs gevonden, **geen enkel met die publieke
-sleutel**. Niet gezocht: grotere bestanden, versleutelde opslag, wallets en andere
-apparaten. Het risico uit punt 8 is daarmee kleiner, niet weg: knop 5 op #1-4, 6 en 7 blijft
-de definitieve afsluiting.
+sleutel**: lokaal niet gevonden als keypair-bestand tot 3 KB.
+
+*Gecorrigeerd in §172 (review §171, I-4).* Hier stond eerst dat het risico uit punt 8
+"daarmee kleiner" was. Dat is sterker dan de zoektocht onderbouwt. Hij keek alleen naar
+keypairs van 64 bytes in bestanden tot 3 KB. Niet doorzocht:
+- seed phrases, in shellgeschiedenis, logs en sessietranscripten. Juist in die vorm
+  overleeft een tijdelijk buffer-keypair van `solana program write-buffer` vaak: de CLI
+  toont een seed phrase van 12 woorden, bijvoorbeeld bij een mislukte write;
+- grotere bestanden (zoals die geschiedenis, logs en transcripten);
+- versleutelde opslag, wallets en andere apparaten.
+
+Dus: **lokaal niet gevonden**, niet "bestaat waarschijnlijk niet meer". Het risico uit
+punt 8 staat onverminderd open. Knop 5 op #1-4, 6 en 7 is de definitieve afsluiting.
 
 ### 6. Open voor upgrade 2 (niet blokkerend voor upgrade 1)
 
@@ -17066,3 +17076,206 @@ Ongewijzigd uit §170 punt 6: buffer `F5nh…` schrijven, authority naar de vaul
 knop 3 nagaan dat geen Active-restant intussen goedgekeurd is. Aanbevolen (punt 5 en §170
 punt 8): de restanten #1-4, 6 en 7 afwijzen met knop 5. Sectie 171 vraagt een review door een
 verse sessie.
+
+## 172. Opvolging review §171: tests voor "unknown", knoppen uit tijdens de controle, voorstelnummer bij uitvoeren (2026-09-30)
+
+Review van §171 (`b77adc4`) door een verse sessie, 2026-09-30. Oordeel: de pagina meldt op
+geen enkele route een onterecht succes en is bruikbaar voor upgrade 1, mits de bediener niets
+klikt tijdens een controle en `--post` de bewijsstap blijft. Bevindingen:
+
+- **M-1** geen test dekte "unknown", `confirmationStatus` of de identiteit van de signature:
+  de mutaties "unknown is succes", "processed telt als geland", "zonder
+  searchTransactionHistory", "een andere signature pollen", "confirmTransaction op
+  processed" en "fout als tekst genegeerd" gaven elk 0 failing;
+- **L-1** "klik niet opnieuw" werd niet afgedwongen: knop 3/4/5 bleven aan tijdens de
+  controle, en na een deep-link zette `finishConnectUI` alle knoppen aan vóórdat de controle
+  startte (een klik navigeerde weg en verloor de uitkomst);
+- **L-2** een groene "SUCCES - verbonden met …" bij elke deep-link-terugkeer, ook direct
+  boven een "MISLUKT";
+- **L-3** het advies bij "unknown" ("controleer handmatig") kwam vóór het verlopen van de
+  blockhash; de transactie kon daarna nog landen;
+- **L-4** de signature van de wallet wordt op elke route vertrouwd, niet alleen op de
+  deep-link (§171 I-2 noemde alleen die), en na afloop wordt de stand niet teruggelezen
+  (knop 4: voorstel `Executed`; knop 3: lid in `approved`);
+- **L-5** knop 4 via de deep-link bewaarde het voorstelnummer niet; het sjabloon vroeg de
+  bediener het nummer te controleren in een logregel die op mobiel meteen verdwijnt;
+- **I-1** de eenmalige statuscontrole in de gevendorde `confirmTransaction` wijst al af op
+  een fout op "processed"-niveau (faalt veilig); **I-2** de structuurtest die tekst telt is te
+  omzeilen (alias, `connection["…"]`); **I-3** de mock bootste fout-als-tekst, processed,
+  null en de base58-controle niet na; **I-4** §171 punt 5 (keypair `7jvi…`) was sterker dan
+  onderbouwd.
+
+Deze sectie bouwt M-1, I-2, I-3, L-1, L-2, L-3, L-5 en I-4. L-4 en I-1 blijven open (punt 6).
+Geen wijziging aan het programma of aan `admin/upgradeProposalCheck.mjs`.
+
+### 1. Tests (`tests/unit/adminPageSelection.ts`)
+
+Harnas:
+- **nep-timers**: `setTimeout` onder 60 s loopt meteen af (de pogingen van
+  `pollSignatureStatus`), langer nooit (de vervaltermijn van de deep-link-sessie). "unknown"
+  kost daardoor geen 27 s meer; de pagina zelf is hiervoor niet aangepast;
+- **opname** van elke `confirmTransaction`, `getSignatureStatuses` en wallet-verzending, met
+  de stand van de vier actieknoppen op dat moment, ook als een test het antwoord vervangt;
+- `confirmTransaction` controleert de signature zoals de gevendorde web3 (base58, 64 bytes,
+  anders een `Error`);
+- `getSignatureStatuses` antwoordt **per signature**: alleen wat de test noemt, de rest `null`;
+- een geldige base58-signature `SIG` (64 bytes) in plaats van `"SIG171"` (bevat een `I`);
+  `OTHER_SIG` voor "een andere signature";
+- `assertExactQueries`: elke statusvraag is precies `[SIG]` met `searchTransactionHistory:
+  true`, en `confirmTransaction` precies één keer met `(SIG, "confirmed")`. Alle tests van
+  §171 en §172 die bevestigen roepen hem aan;
+- genoeg omgeving voor de deep-link-route: een echte opslag voor `localStorage`, `window`,
+  `history`, de gevendorde `bs58` en `tweetnacl` (PRNG uit `crypto`, want de gevendorde
+  tweetnacl vindt er in Node geen).
+
+Nieuwe gedragstests, per knop (2 zonder en 2 met een open voorstel, 3, 4, 5):
+- "unknown" (time-out, de RPC ziet de signature niet): geen succeswoord, geen MISLUKT, alle 10
+  pogingen gedaan, en (behalve knop 2 met een open voorstel, die alleen "klik NIET opnieuw"
+  meldt) het advies te wachten op de blockhash met een tijdstip;
+- `confirmTransaction` zonder fout, maar status `null`: geen succes;
+- status alleen `"processed"` (zonder fout): telt niet als geland, geen succes;
+- de RPC kent alleen een andere signature (finalized, zonder fout): geen succes;
+- een fout als tekst (`"AccountInUse"`) op beide routes, en alleen via de websocket: MISLUKT.
+
+Verder:
+- **L-1**: knop 2-5 via de extensie (vier keer gelukt, één keer mislukt) en knop 2-5 via de
+  deep-link-hervatting (`resumeAfterLoad`): bij elke wallet-verzending, `confirmTransaction`
+  en statusvraag staan alle vier de knoppen uit; daarna alle vier weer aan;
+- **L-2**: na een deep-link-terugkeer "Verbonden met Solflare…", geen "SUCCES - verbonden";
+  na een mislukte uitvoering via de deep-link begint geen enkele regel met "SUCCES"; en een
+  brontest: `log("SUCCES` staat alleen in `finishPropose`, `finishApprove`, `finishReject` en
+  `finishSquadsExecute`;
+- **L-5**: knop 4 via de deep-link bewaart `pendingActionTransactionIndex: "15"`; na terugkeer
+  "SUCCES - voorstel #15 uitgevoerd"; een oudere stand zonder nummer controleert toch en zegt
+  dat het nummer ontbreekt.
+
+De structuurtest die tekst telt blijft, met in zijn commentaar dat hij te omzeilen is en dat
+de gedragstests de echte bescherming zijn (I-2).
+
+### 2. De pagina (`admin/wallet-signer.html`)
+
+- **L-1**: `actionButtons` (`allowed`, `locks`, `proposeHeldOff`) en
+  `refreshActionButtons`/`withActionButtonsLocked`. Op de extensie-route omvat het slot de
+  wallet-verzending en de hele `finish*`-functie. Op de deep-link-route omvat het slot het
+  laden, de verbinding en de hervatting (`resumeAfterLoad`), dus ook de controle van de
+  verstuurde transactie. `finishPropose` zet alleen nog `proposeHeldOff`; knop 2 blijft dus,
+  als voorheen, uit bij een open voorstel of een onleesbare scan;
+- **L-2**: de verbindingsmelding is "Verbonden met …", op elke route;
+- **L-3**: `notLandedYetAdvice`, gebruikt door `requireLanded` (knop 3-5) en `finishPropose`
+  (knop 2): de transactie kan nog landen tot haar blockhash verloopt, ongeveer 2 minuten na
+  het versturen; wacht tot ten minste `<nu + 2 min>`, controleer opnieuw en klik pas dan
+  eventueel opnieuw. **Bewust alleen tekst, niet de blockhash-strategie** van
+  `confirmTransaction`: de wallet kan de blockhash vervangen, en de pagina kent dan de
+  blockhash van de werkelijk verstuurde transactie niet. Een "verlopen, niet geland" op
+  grond van de eigen blockhash kan dan onwaar zijn. De tijd in de tekst rekent vanaf het
+  oordeel "unknown", dat minstens een minuut na het versturen valt, en is daarmee ruim,
+  welke blockhash de wallet ook koos (die is altijd opgehaald vóór het versturen);
+- **L-5**: `buildSquadsExecuteTx` geeft `{ tx, transactionIndex }`; de deep-link-route bewaart
+  het nummer (`pendingActionTransactionIndex`, zoals knop 3 en 5), en `finishSquadsExecute`
+  noemt het in "Verstuurd" en "SUCCES - voorstel #n uitgevoerd". Afwijkend van knop 3 en 5:
+  ontbreekt het nummer (een stand van vóór §172), dan loopt de controle toch, in plaats van
+  vóór de controle te stoppen; de uitkomst zegt dan dat het nummer ontbreekt. Het nummer is
+  het voorstel dat de pagina vóór het versturen koos, niet teruggelezen uit de transactie
+  (dat is L-4);
+- `PAGE_BUILD` = `2026-09-30T18:00:00Z-sectie-172-knoppen-uit-tijdens-controle`.
+
+### 3. Rood vóór groen
+
+Alle nieuwe tests tegen de pagina van §171: **18 failing**, elk om de bedoelde reden:
+
+| Aantal | Reden |
+|---|---|
+| 5 | L-1 extensie: "knop aan tijdens wallet-signAndSend" |
+| 4 | L-3: de melding bij "unknown" noemt de blockhash niet |
+| 7 | L-1/L-2/L-5 deep-link: `resumeAfterLoad` bestaat nog niet |
+| 1 | L-5: `pendingActionTransactionIndex` is `null` |
+| 1 | L-2: `log("SUCCES` in `finishConnectUI` |
+
+De tests voor null, processed, een andere signature en een fout als tekst waren tegen de
+pagina van §171 al groen: die pagina deed het goed (review §171), de tests zijn
+regressiebescherming. Dat ze die bescherming geven, toont punt 4. (Een eerste rode run gaf
+ook een 19e failing, `unitPathIsPure`: de nep-origin `https://localhost:8766` in het harnas
+leek een vast RPC-adres. Vervangen door `https://adminpagina.test`.)
+
+Na de reparatie: `yarn test:unit` 228/0 (was 184, +44).
+
+### 4. Mutatiecontrole
+
+Op een kopie buiten de repo (scratchpad), steeds één mutatie in `wallet-signer.html`, daarna
+`yarn test:unit`. De repo zelf is niet gemuteerd.
+
+| Mutatie | §171-tests | §172-tests |
+|---|---|---|
+| M8 `requireLanded`: "unknown" telt als succes | 0 | **12** |
+| M9 `pollSignatureStatus`: elke status telt als geland (ook processed) | 0 | **5** |
+| M10 `searchTransactionHistory: false` | 0 | **59** |
+| M11 knop 4: op het unknown-pad een eigen statusvraag via `connection["getSignatureStatuses"]` en "SUCCES" | 0 | **4** |
+| M16 een vaste, andere signature pollen | 0 | **64** |
+| M17 `confirmTransaction` op "processed" | 0 | **59** |
+| M18 een fout als tekst via de websocket genegeerd | 0 | **5** |
+| M1 `value.err` van de websocket genegeerd | 5 | 10 |
+| M2 gegooide transactiefout genegeerd | 5 | 5 |
+| M3 `err` van de RPC genegeerd | 5 | 5 |
+| M4 bij tegenspraak wint succes | 10 | 15 |
+| M5/M6/M7 geen `requireLanded` bij knop 3/4/5 | 4/4/4 | 10/12/10 |
+| M12 knop 2 herleest alleen na een time-out | 4 | 10 |
+| M13 knop 4: tweede `confirmTransaction` via een alias | 2 | 14 |
+| M14 knop 2: mislukt met open voorstel niet meer als fout | 4 | 6 |
+| M19 `resumeAfterLoad` zonder slot | - | 5 |
+| M20 knop 4 (extensie) zonder slot | - | 2 |
+
+Elke mutatie geeft nu failing. De kolom "§171-tests" komt uit de review van §171 (M1-M18)
+tegen de toen bestaande tests.
+
+### 5. Documentatie
+
+- **§171 punt 5** in place gecorrigeerd: "lokaal niet gevonden als keypair-bestand tot
+  3 KB", niet "kleiner". Wat niet doorzocht is, staat er nu expliciet: seed phrases in
+  shellgeschiedenis, logs en sessietranscripten (de vorm waarin een tijdelijk buffer-keypair
+  van `solana program write-buffer` vaak overleeft), grotere bestanden, versleutelde opslag,
+  wallets en andere apparaten. Het risico uit §170 punt 8 staat onverminderd open; knop 5 op
+  #1-4, 6 en 7 is de afsluiting;
+- `docs/upgradevoorstel-sjabloon.md` §3: waar de bediener het voorstelnummer controleert
+  (extensie: de regel vóór de popup; deep-link: de uitkomst na terugkeer), dat de knoppen uit
+  staan tijdens de controle, en wat te doen bij "niet vastgesteld" (wachten tot het genoemde
+  tijdstip). Het sjabloon zei niets over de keypair-zoektocht; daar was niets te corrigeren;
+- `admin/README.md`: dezelfde punten, plus dat de verbindingsmelding geen "SUCCES" meer is.
+
+### 6. Open
+
+- **L-4** (voor upgrade 2, niet blokkerend voor upgrade 1): de stand na afloop teruglezen
+  (knop 4: voorstel `Executed`; knop 3/5: lid in `approved`/`rejected`; knop 2: het voorstel
+  op het nieuwe nummer is van deze buffer). Tot dan telt `--post` (sjabloon §4);
+- **I-1**: een fout op "processed"-niveau op een minderheidsfork geeft "MISLUKT", ook als de
+  transactie later op de hoofdfork slaagt. Faalt veilig; alleen de knop-2-melding "dat heeft
+  deze transactie niet aangemaakt" kan dan onwaar zijn;
+- knop 2 komt bij "unknown" zonder gevonden voorstel weer vrij, zoals voorheen; de melding
+  zegt nu eerst te wachten. Een tweede voorstel botst dan op hetzelfde nummer
+  (`transactionIndex`), dus een dubbel voorstel vergt dat de eerste transactie al geland is
+  én de herlezing hem mist;
+- de verbindingsknoppen (1, 1b) vallen niet onder het slot. Verbinden tijdens een controle
+  laat de actieknoppen uit (het slot wint), maar zet `proposeHeldOff` terug.
+
+### 7. Regressie
+
+| Suite | Uitkomst | Baseline (sectie 171) |
+|---|---|---|
+| `cargo test` | 13/0 | 13/0 |
+| `yarn test` | 353 passing, 119 pending, 0 failing | 309/119/0; +44 (alle in `adminPageSelection.ts`) |
+| `yarn test:pending-action` | 116/0 (1 pending) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 | 117/0 |
+| `yarn test:unit` | 228/0 | 184/0 (+44, idem) |
+
+Typecontrole: strikte `tsc --noEmit` over `tests/unit/adminPageSelection.ts`,
+`tests/unit/preflightLogic.ts`, `scripts/checkProposalTimelock.ts` en
+`scripts/preUpgradeChecks.ts`: schoon. `node --check` op het module-script van de pagina:
+schoon. De server op poort 8766 (pid 3936, niet herstart) levert `wallet-signer.html`
+byte-identiek aan de werkmap (sha256 `abcc5d6b…`).
+
+### 8. Voor upgrade 1
+
+Ongewijzigd uit §171 punt 8: buffer `F5nh…` schrijven (read-only nagekeken 2026-09-30:
+bestaat nog niet; `7jvi…` ook niet), authority naar de vault, en vlak vóór knop 3 nagaan dat
+geen Active-restant intussen goedgekeurd is. Aanbevolen: de restanten #1-4, 6 en 7 afwijzen
+met knop 5. Bij knop 4 via de deep-link: het nummer in "SUCCES - voorstel #n uitgevoerd"
+moet het `<n>` van de pre-flight zijn. Sectie 172 vraagt een review door een verse sessie.

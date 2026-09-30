@@ -1,5 +1,6 @@
 import { assert } from "chai";
 import { spawnSync } from "child_process";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { pathToFileURL } from "url";
@@ -27,6 +28,19 @@ const SERVER = fs.readFileSync(path.join(ROOT, "admin", "https-server.js"), "utf
 const web3 = require("../../admin/vendor/web3.mjs");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const sdk = require("../../admin/vendor/multisig.mjs").default;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const bs58 = require("../../admin/vendor/bs58.mjs").default;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const nacl = require("../../admin/vendor/tweetnacl.mjs").default;
+// De gevendorde tweetnacl vindt in Node geen PRNG (in de browser: window.crypto).
+nacl.setPRNG((x: Uint8Array, n: number) => x.set(crypto.randomBytes(n)));
+
+// Sectie 172 (review §171 I-3): geldige base58-signatures van 64 bytes, zoals de echte
+// confirmTransaction eist ("SIG171" bevat een I en zou daar al gooien). SIG is de verstuurde
+// transactie; OTHER_SIG een andere, die de RPC wel kent.
+const SIG = bs58.encode(Uint8Array.from({ length: 64 }, (_, i) => i + 1));
+const OTHER_SIG = bs58.encode(Uint8Array.from({ length: 64 }, (_, i) => 200 - i));
+const ACTION_BUTTONS = ["propose-btn", "approve-btn", "squads-execute-btn", "reject-btn"];
 
 function moduleScript(html: string): string {
   const start = html.indexOf('<script type="module">');
@@ -112,6 +126,27 @@ interface Page {
   elements: Record<string, FakeElement>;
   /** Sectie 170 (L-3): aantal getMultipleAccounts-aanroepen, dus of de voorstellen gescand werden. */
   scans: { count: number };
+  /** Sectie 172: elke confirmTransaction/getSignatureStatuses/wallet-aanroep, met de stand van de actieknoppen op dat moment. */
+  rpc: RpcCall[];
+  /** Sectie 172: wat de pagina in localStorage zette. */
+  storage: Map<string, string>;
+  window: { location: { search: string; pathname: string; origin: string; href: string } };
+}
+
+interface RpcCall {
+  method: string;
+  args: unknown[];
+  /** true = uit. */
+  buttons: Record<string, boolean>;
+}
+
+interface PageOptions {
+  /** Vervangt of vult de omgeving aan (bv. connectedWallet: null voor de deep-link-hervatting). */
+  env?: Record<string, unknown>;
+  /** Beginstand van localStorage. */
+  storage?: Record<string, string>;
+  /** window.location.search bij het laden. */
+  search?: string;
 }
 
 // Een echt lid van de multisig uit de fixture (devnet): nodig voor knop 2, die eerst het lidmaatschap toetst.
@@ -135,20 +170,51 @@ function fakeConnection(accounts: Map<string, FakeAccount>, scans: { count: numb
     // Alleen voor de controle dat knop 2 met de juiste instellingen wél verstuurt (review §170, L-2),
     // en voor de bevestiging van knop 2-5 (sectie 171). Standaard: geland, zonder fout.
     confirmTransaction: async () => ({ context, value: { err: null } }),
-    getSignatureStatuses: async () => ({ context, value: [{ slot: context.slot, confirmations: null, confirmationStatus: "confirmed", err: null }] }),
+    // Sectie 172: per signature. Alleen de verstuurde SIG is geland (zonder fout); elke andere onbekend.
+    getSignatureStatuses: async (signatures: string[]) => ({
+      context,
+      value: signatures.map((s) => (s === SIG ? { slot: context.slot, confirmations: null, confirmationStatus: "confirmed", err: null } : null)),
+    }),
   };
 }
 
-async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, unknown> = {}): Promise<Page> {
+async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, unknown> = {}, options: PageOptions = {}): Promise<Page> {
   const { names, source } = pageCode(PAGE);
   const sent: Sent[] = [];
   const logs: string[] = [];
   const scans = { count: 0 };
+  const rpc: RpcCall[] = [];
+  const storage = new Map(Object.entries(options.storage ?? {}));
   const elements: Page["elements"] = {};
+  const buttons = () => Object.fromEntries(ACTION_BUTTONS.map((id) => [id, !!elements[id]?.disabled]));
   const record = (kind: string) => (args: { transactionIndex: bigint }) => {
     sent.push({ kind, transactionIndex: BigInt(args.transactionIndex) });
-    return { kind };
+    // serialize: voor de deep-link-route (startDeeplinkSignAndSend), die de transactie versleutelt.
+    return { kind, serialize: () => Uint8Array.of(1, 2, 3) };
   };
+  // Sectie 172 (review §171 M-1/I-3): elke bevestigingsaanroep wordt opgenomen, wat de test ook
+  // als antwoord geeft. confirmTransaction controleert de signature zoals de gevendorde web3
+  // (base58, 64 bytes; anders een Error) voordat het antwoord van de test komt.
+  const connection: Record<string, any> = { ...fakeConnection(squadsAccounts(state), scans), ...connectionOverrides };
+  const confirmImpl = connection.confirmTransaction;
+  const statusImpl = connection.getSignatureStatuses;
+  connection.confirmTransaction = async (strategy: any, commitment?: string) => {
+    rpc.push({ method: "confirmTransaction", args: [strategy, commitment], buttons: buttons() });
+    const signature = typeof strategy === "string" ? strategy : strategy.signature;
+    let bytes: Uint8Array;
+    try {
+      bytes = bs58.decode(signature);
+    } catch {
+      throw new Error("signature must be base58 encoded: " + signature);
+    }
+    if (bytes.length !== 64) throw new Error("signature has invalid length");
+    return confirmImpl(strategy, commitment);
+  };
+  connection.getSignatureStatuses = async (signatures: string[], config?: unknown) => {
+    rpc.push({ method: "getSignatureStatuses", args: [signatures, config], buttons: buttons() });
+    return statusImpl(signatures, config);
+  };
+  const window = { location: { search: options.search ?? "", pathname: "/wallet-signer.html", origin: "https://adminpagina.test", href: "" } };
   const element = (): FakeElement => ({
     textContent: "",
     disabled: false,
@@ -164,16 +230,17 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
     VersionedTransaction: web3.VersionedTransaction,
     SYSVAR_RENT_PUBKEY: web3.SYSVAR_RENT_PUBKEY,
     SYSVAR_CLOCK_PUBKEY: web3.SYSVAR_CLOCK_PUBKEY,
-    connection: { ...fakeConnection(squadsAccounts(state), scans), ...connectionOverrides },
+    connection,
     multisig: { ...sdk, transactions: { ...sdk.transactions, vaultTransactionExecute: record("execute"), proposalApprove: record("approve") } },
     // Een lid (sectie 170, L-2: knop 2 toetst eerst het lidmaatschap); alles wat de wallet zou
-    // versturen, wordt opgenomen i.p.v. verstuurd.
+    // versturen, wordt opgenomen i.p.v. verstuurd. De wallet geeft de geldige signature SIG terug.
     connectedWallet: {
       publicKey: new web3.PublicKey(MEMBER),
       mode: "extension",
       signAndSendTransaction: async () => {
         sent.push({ kind: "wallet-signAndSend", transactionIndex: -1n });
-        return { signature: "opgenomen" };
+        rpc.push({ method: "wallet-signAndSend", args: [], buttons: buttons() });
+        return { signature: SIG };
       },
     },
     // Genoeg DOM voor de eigen log() van de pagina en de getoonde velden.
@@ -181,17 +248,55 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
       getElementById: (id: string) => (elements[id] ??= element()),
       createElement: () => element(),
     },
-    // Voor clearDeeplinkSecretState() aan het eind van knop 2-5 (sectie 171).
-    localStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined },
+    // Sectie 172: een echte opslag, voor de deep-link-route (knop 2-5 wissen hem aan het eind).
+    localStorage: {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => void storage.set(k, String(v)),
+      removeItem: (k: string) => void storage.delete(k),
+    },
     DEEPLINK_STORAGE_KEY: "test-deeplink",
+    DEEPLINK_LAST_WALLET_KEY: "test-deeplink-last-wallet",
+    DEEPLINK_SESSION_MAX_AGE_MS: 30 * 60 * 1000,
+    REDIRECT_URL: window.location.origin + "/wallet-signer.html",
     deeplinkExpiryTimer: null,
+    window,
+    history: { replaceState: () => undefined },
+    bs58,
+    nacl,
+    // Stil: startDeeplinkSignAndSend logt het verzoek, logFullError de fout (die staat al in page.logs).
+    console: { ...console, log: () => undefined, error: () => undefined },
+    // Sectie 172 (review §171 M-1): nep-timers. Korte wachttijden (de pogingen van
+    // pollSignatureStatus, 3 s) lopen meteen af, zodat "unknown" geen 27 s kost; lange (de
+    // vervaltermijn van de deep-link-sessie, 30 min) nooit binnen een test.
+    setTimeout: (fn: () => void, ms = 0) => {
+      if (ms < 60_000) queueMicrotask(fn);
+      return 0;
+    },
+    clearTimeout: () => undefined,
+    ...options.env,
   };
   // De gedeelde module zoals de pagina hem na het laden heeft (sectie 168).
   // Bestaat hij nog niet, dan draait de oude paginacode zonder.
   const sharedPath = path.join(ROOT, "admin", "upgradeProposalCheck.mjs");
   if (fs.existsSync(sharedPath)) env.upgradeCheck = require(sharedPath).createUpgradeProposalCheck(web3.PublicKey);
   const factory = new Function(...Object.keys(env), `${source}\nreturn { ${names.join(", ")} };`);
-  return { fns: factory(...Object.values(env)), sent, logs, elements, scans };
+  return { fns: factory(...Object.values(env)), sent, logs, elements, scans, rpc, storage, window };
+}
+
+/**
+ * Sectie 172 (review §171 M-1): de pagina vroeg precies de verstuurde signature op, met
+ * searchTransactionHistory: true, en bevestigde precies die ene signature op "confirmed".
+ */
+function assertExactQueries(page: Page, signature: string = SIG): void {
+  const statusCalls = page.rpc.filter((c) => c.method === "getSignatureStatuses");
+  assert.isNotEmpty(statusCalls, "de pagina vroeg de status van de signature niet op");
+  for (const c of statusCalls) {
+    assert.deepEqual(c.args[0], [signature], "getSignatureStatuses vroeg een andere signature op");
+    assert.strictEqual((c.args[1] as { searchTransactionHistory?: boolean } | undefined)?.searchTransactionHistory, true, "zonder searchTransactionHistory: true");
+  }
+  const confirms = page.rpc.filter((c) => c.method === "confirmTransaction");
+  assert.lengthOf(confirms, 1, "confirmTransaction niet precies één keer aangeroepen");
+  assert.deepEqual(confirms[0].args, [signature, "confirmed"], "confirmTransaction met een andere signature of commitment");
 }
 
 async function rejection(p: Promise<unknown>): Promise<string> {
@@ -480,33 +585,43 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
   // Sectie 171 (review §170, M-1): confirmTransaction gooit niet als de transactie on-chain
   // mislukt. Via de websocket-route komt het antwoord binnen als { value: { err } }. De pagina
   // meldde dan "Bevestigd." en "SUCCES". Geen enkele knop mag succes melden tenzij err null bleek.
+  // Sectie 172: met de geldige signature SIG, en elke test controleert welke signature en welke
+  // opties de pagina gebruikte (assertExactQueries).
+  const FAILED = { InstructionError: [0, { Custom: 6008 }] };
+  const FAILED_TEXT = JSON.stringify(FAILED);
+  const context = { slot: 500_000_000 };
+  const signatureStatus = (confirmationStatus: string, err: unknown) => ({ slot: context.slot, confirmations: null, confirmationStatus, err });
+  /** De RPC kent alleen de signatures in bySignature; elke andere is onbekend (null). */
+  const statuses = (bySignature: Record<string, unknown>) => async (signatures: string[]) => ({ context, value: signatures.map((s) => bySignature[s] ?? null) });
+  const status = (err: unknown) => statuses({ [SIG]: signatureStatus("confirmed", err) });
+  const timeout = async () => {
+    throw new Error("bevestiging verlopen (test)");
+  };
+  // Websocket-route: confirmTransaction lost op met value.err; de RPC zegt hetzelfde.
+  const failedTx = { confirmTransaction: async () => ({ context, value: { err: FAILED } }), getSignatureStatuses: status(FAILED) };
+  const devnetNow = (): Record<number, ProposalOpts> => ({ ...devnetLikeProposals(14), 14: { status: 2, buffer: OLD_BUFFER } });
+  const SUCCESS_WORDS = /SUCCES|Bevestigd|alsnog bevestigd geland|GELAND/;
+  const MISLUKT = new RegExp(`Transactie ${SIG} is on-chain MISLUKT`);
+
+  // [knop, functie, argumenten, stand, gooit bij "unknown" (knop 2 met een open voorstel meldt alleen)]
+  const buttons: [string, string, unknown[], SquadsOpts, boolean][] = [
+    ["knop 2 (geen open voorstel)", "finishPropose", [SIG], { latestIndex: 14, proposals: devnetNow() }, true],
+    ["knop 2 (er staat al een voorstel open voor de buffer)", "finishPropose", [SIG], { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }, false],
+    ["knop 3", "finishApprove", [SIG, 15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }, true],
+    ["knop 4", "finishSquadsExecute", [SIG, 15n], { latestIndex: 15, proposals: { 15: {} } }, true],
+    ["knop 5", "finishReject", [SIG, 15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }, true],
+  ];
+
   describe("sectie 171 (review §170 M-1): een mislukte transactie is nooit een succes", () => {
-    const FAILED = { InstructionError: [0, { Custom: 6008 }] };
-    const FAILED_TEXT = JSON.stringify(FAILED);
-    const context = { slot: 500_000_000 };
-    const status = (err: unknown) => async () => ({ context, value: [{ slot: context.slot, confirmations: null, confirmationStatus: "confirmed", err }] });
-    // Websocket-route: confirmTransaction lost op met value.err; de RPC zegt hetzelfde.
-    const failedTx = { confirmTransaction: async () => ({ context, value: { err: FAILED } }), getSignatureStatuses: status(FAILED) };
-    const devnetNow = (): Record<number, ProposalOpts> => ({ ...devnetLikeProposals(14), 14: { status: 2, buffer: OLD_BUFFER } });
-    const SUCCESS_WORDS = /SUCCES|Bevestigd|alsnog bevestigd geland|GELAND/;
-
-    // [knop, functie, argumenten, stand]
-    const buttons: [string, string, unknown[], SquadsOpts][] = [
-      ["knop 2 (geen open voorstel)", "finishPropose", ["SIG171"], { latestIndex: 14, proposals: devnetNow() }],
-      ["knop 2 (er staat al een voorstel open voor de buffer)", "finishPropose", ["SIG171"], { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
-      ["knop 3", "finishApprove", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
-      ["knop 4", "finishSquadsExecute", ["SIG171"], { latestIndex: 15, proposals: { 15: {} } }],
-      ["knop 5", "finishReject", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
-    ];
-
     for (const [name, fn, args, state] of buttons) {
       it(`${name}: mislukte transactie (websocket-route): geen succes, wel MISLUKT met de fout`, async () => {
         const page = await loadPage(state, failedTx);
         const why = await rejection(page.fns[fn](...args));
         const logs = page.logs.join("\n");
         assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
-        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+        assert.match(why, MISLUKT);
         assert.include(why, FAILED_TEXT);
+        assertExactQueries(page);
       });
 
       it(`${name}: websocket zegt mislukt, de RPC zegt geland zonder fout: tegenstrijdig, dus geen succes`, async () => {
@@ -514,8 +629,9 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
         const why = await rejection(page.fns[fn](...args));
         const logs = page.logs.join("\n");
         assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
-        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+        assert.match(why, MISLUKT);
         assert.include(why, FAILED_TEXT);
+        assertExactQueries(page);
       });
 
       // De eenmalige statuscontrole in confirmTransaction gooit de transactiefout zelf (geen Error).
@@ -529,40 +645,42 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
         const why = await rejection(page.fns[fn](...args));
         const logs = page.logs.join("\n");
         assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
-        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+        assert.match(why, MISLUKT);
         assert.include(why, FAILED_TEXT);
+        assertExactQueries(page);
       });
 
       it(`${name}: timeout, daarna blijkt de transactie mislukt: geen succes`, async () => {
-        const page = await loadPage(state, {
-          confirmTransaction: async () => {
-            throw new Error("bevestiging verlopen (test)");
-          },
-          getSignatureStatuses: status(FAILED),
-        });
+        const page = await loadPage(state, { confirmTransaction: timeout, getSignatureStatuses: status(FAILED) });
         const why = await rejection(page.fns[fn](...args));
         const logs = page.logs.join("\n");
         assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
-        assert.match(why, /Transactie SIG171 is on-chain MISLUKT/);
+        assert.match(why, MISLUKT);
+        assertExactQueries(page);
       });
     }
 
     // Controle: de tests hierboven zien het succespad wel. Met err null op beide routes meldt
     // elke knop succes (knop 2 zonder open voorstel vooraf: de stand ná het voorstel is #15).
     const succeeded: [string, string, unknown[], SquadsOpts][] = [
-      ["knop 2", "finishPropose", ["SIG171"], { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
-      ["knop 3", "finishApprove", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: {} } }],
-      ["knop 4", "finishSquadsExecute", ["SIG171"], { latestIndex: 15, proposals: { 15: {} } }],
-      ["knop 5", "finishReject", ["SIG171", 15n], { latestIndex: 15, proposals: { 15: { status: 2 } } }],
+      ["knop 2", "finishPropose", [SIG], { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
+      ["knop 3", "finishApprove", [SIG, 15n], { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 4", "finishSquadsExecute", [SIG, 15n], { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 5", "finishReject", [SIG, 15n], { latestIndex: 15, proposals: { 15: { status: 2 } } }],
     ];
     for (const [name, fn, args, state] of succeeded) {
       it(`controle, ${name}: gelukt (err null op beide routes): meldt SUCCES`, async () => {
         const page = await loadPage(state);
         await page.fns[fn](...args);
         assert.match(page.logs.join("\n"), /^SUCCES/m);
+        assertExactQueries(page);
       });
     }
 
+    // Sectie 172 (review §171 I-2): deze test telt tekst en is te omzeilen, bijvoorbeeld met
+    // connection["confirmTransaction"](…), een alias (const c = connection) of een tweede
+    // verbinding. De echte bescherming zijn de gedragstests hierboven en in sectie 172 hieronder
+    // (assertExactQueries, "unknown", "processed", een andere signature, een fout als tekst).
     it("één plek beslist: confirmTransaction en getSignatureStatuses elk één keer, awaitConfirmation alleen in knop 2-5", () => {
       const src = moduleScript(PAGE);
       assert.lengthOf([...src.matchAll(/connection\.confirmTransaction\(/g)], 1);
@@ -572,6 +690,221 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
         return before.slice(before.lastIndexOf("async function ")).match(/^async function (\w+)/)![1];
       });
       assert.sameMembers(callers, ["finishPropose", "finishApprove", "finishReject", "finishSquadsExecute"]);
+    });
+  });
+
+  // Sectie 172 (review §171 M-1/I-3): wat de mock van sectie 171 niet nabootste. Met nep-timers
+  // kost "unknown" (10 pogingen, 3 s ertussen) geen 27 s meer.
+  describe("sectie 172 (review §171 M-1): unknown, processed, een andere signature en een fout als tekst", () => {
+    for (const [name, fn, args, state, throwsOnUnknown] of buttons) {
+      it(`${name}: time-out en de RPC ziet de signature niet (unknown): geen succes, wel het advies te wachten op de blockhash`, async () => {
+        const page = await loadPage(state, { confirmTransaction: timeout, getSignatureStatuses: statuses({}) });
+        const why = await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assert.notMatch(why, /MISLUKT/);
+        if (throwsOnUnknown) {
+          assert.match(why, new RegExp(`niet vaststellen of transactie ${SIG} geland is`));
+          assert.match(why, /tot haar blockhash verloopt, ongeveer 2 minuten na het versturen/);
+          assert.match(why, /Wacht daarom tot ten minste \d\d:\d\d:\d\d/);
+        } else {
+          assert.strictEqual(why, "(geen fout: de actie werd doorgezet)");
+          assert.match(logs, /Klik NIET opnieuw op '2\. Voorstel indienen'/);
+        }
+        assert.lengthOf(page.rpc.filter((c) => c.method === "getSignatureStatuses"), 10, "niet alle pogingen gedaan");
+        assertExactQueries(page);
+      });
+
+      it(`${name}: confirmTransaction zonder fout, maar de RPC ziet de signature niet (status null): geen succes`, async () => {
+        const page = await loadPage(state, { getSignatureStatuses: statuses({}) });
+        await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assertExactQueries(page);
+      });
+
+      it(`${name}: de RPC ziet de signature alleen op "processed" (zonder fout): telt niet als geland, geen succes`, async () => {
+        const page = await loadPage(state, { confirmTransaction: timeout, getSignatureStatuses: statuses({ [SIG]: signatureStatus("processed", null) }) });
+        await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assertExactQueries(page);
+      });
+
+      it(`${name}: de RPC kent alleen een andere signature (geland, zonder fout): geen succes`, async () => {
+        const page = await loadPage(state, { confirmTransaction: timeout, getSignatureStatuses: statuses({ [OTHER_SIG]: signatureStatus("finalized", null) }) });
+        await rejection(page.fns[fn](...args));
+        const logs = page.logs.join("\n");
+        assert.notMatch(logs, SUCCESS_WORDS, `de pagina meldde succes:\n${logs}`);
+        assertExactQueries(page);
+      });
+
+      it(`${name}: een fout als tekst ("AccountInUse") op beide routes: MISLUKT`, async () => {
+        const page = await loadPage(state, {
+          confirmTransaction: async () => ({ context, value: { err: "AccountInUse" } }),
+          getSignatureStatuses: status("AccountInUse"),
+        });
+        const why = await rejection(page.fns[fn](...args));
+        assert.notMatch(page.logs.join("\n"), SUCCESS_WORDS);
+        assert.match(why, MISLUKT);
+        assert.include(why, '"AccountInUse"');
+        assertExactQueries(page);
+      });
+
+      it(`${name}: een fout als tekst alleen via de websocket, de RPC zegt zonder fout: MISLUKT`, async () => {
+        const page = await loadPage(state, {
+          confirmTransaction: async () => ({ context, value: { err: "AccountInUse" } }),
+          getSignatureStatuses: status(null),
+        });
+        const why = await rejection(page.fns[fn](...args));
+        assert.notMatch(page.logs.join("\n"), SUCCESS_WORDS);
+        assert.match(why, MISLUKT);
+        assertExactQueries(page);
+      });
+    }
+
+    // Review §171 L-2: "SUCCES" is voorbehouden aan een transactie die aantoonbaar zonder fout landde.
+    it('"SUCCES" staat alleen in finishPropose, finishApprove, finishReject en finishSquadsExecute', () => {
+      const src = moduleScript(PAGE);
+      const places = [...src.matchAll(/log\(\s*"SUCCES/g)].map((m) => {
+        const before = src.slice(0, m.index);
+        return before.slice(before.lastIndexOf("function ")).match(/^function (\w+)/)![1];
+      });
+      assert.isNotEmpty(places);
+      for (const place of places) assert.include(["finishPropose", "finishApprove", "finishReject", "finishSquadsExecute"], place);
+    });
+  });
+
+  // Sectie 172 (review §171 L-1, L-2, L-5): de actieknoppen staan uit van het versturen tot het
+  // einde van de controle, ook op de deep-link-hervatroute; de connect-melding is geen "SUCCES";
+  // uitvoeren via de deep-link bewaart het voorstelnummer.
+  describe("sectie 172 (review §171 L-1/L-2/L-5): knoppen uit tijdens de controle, voorstelnummer bij uitvoeren", () => {
+    const CHECK = ["wallet-signAndSend", "confirmTransaction", "getSignatureStatuses"];
+    const allOff = (page: Page) => {
+      const during = page.rpc.filter((c) => CHECK.includes(c.method));
+      assert.isNotEmpty(during, "geen controle gezien");
+      for (const c of during) assert.deepEqual(c.buttons, Object.fromEntries(ACTION_BUTTONS.map((id) => [id, true])), `knop aan tijdens ${c.method}`);
+    };
+    const allOn = (page: Page) => {
+      for (const id of ACTION_BUTTONS) assert.isFalse(!!page.elements[id]?.disabled, `${id} bleef uit`);
+    };
+
+    // [knop, functie, argumenten, stand]
+    const runs: [string, string, unknown[], SquadsOpts][] = [
+      ["knop 2", "runProposeAction", [], { latestIndex: 14, proposals: devnetNow() }],
+      ["knop 3", "runApproveAction", [], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
+      ["knop 4", "runExecuteAction", [], { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 5", "runRejectAction", [15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
+    ];
+    for (const [name, fn, args, state] of runs) {
+      it(`L-1, ${name} (extensie): alle actieknoppen uit tijdens versturen en controle, daarna weer aan`, async () => {
+        const page = await loadPage(state);
+        page.fns.enableActionButtons();
+        await page.fns[fn](...args);
+        assert.match(page.logs.join("\n"), /^SUCCES/m);
+        allOff(page);
+        allOn(page);
+      });
+    }
+
+    it("L-1, knop 4 (extensie), mislukte transactie: knoppen uit tijdens de controle, daarna weer aan", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, failedTx);
+      page.fns.enableActionButtons();
+      assert.match(await rejection(page.fns.runExecuteAction()), MISLUKT);
+      allOff(page);
+      allOn(page);
+    });
+
+    /** De stand na een omleiding terug van Solflare met { signature } als versleuteld antwoord. */
+    const deeplinkReturn = (pendingAction: string, index: string | null, signature: string = SIG): PageOptions => {
+      const sharedSecret = nacl.randomBytes(32);
+      const nonce = nacl.randomBytes(24);
+      const data = nacl.box.after(new TextEncoder().encode(JSON.stringify({ signature })), nonce, sharedSecret);
+      return {
+        env: { connectedWallet: null },
+        storage: {
+          "test-deeplink": JSON.stringify({
+            dappSecretKey: [],
+            dappPublicKey: [],
+            sharedSecret: Array.from(sharedSecret),
+            session: "sessie",
+            walletPublicKey: MEMBER,
+            pendingAction,
+            pendingActionStartedAt: new Date().toISOString(),
+            pendingActionTransactionIndex: index,
+            sessionCreatedAt: Date.now(),
+          }),
+          "test-deeplink-last-wallet": JSON.stringify({ walletPublicKey: MEMBER, savedAt: Date.now() }),
+        },
+        search: "?" + new URLSearchParams({ nonce: bs58.encode(nonce), data: bs58.encode(data) }).toString(),
+      };
+    };
+
+    const resumes: [string, string, string | null, SquadsOpts][] = [
+      ["knop 2", "propose", null, { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
+      ["knop 3", "approve", "15", { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 4", "execute", "15", { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 5", "reject", "15", { latestIndex: 15, proposals: { 15: { status: 2 } } }],
+    ];
+    for (const [name, action, index, state] of resumes) {
+      it(`L-1/L-2, ${name} (deep-link-hervatting): knoppen uit tijdens de controle, daarna aan; de connect-melding is geen SUCCES`, async () => {
+        const page = await loadPage(state, {}, deeplinkReturn(action, index));
+        await page.fns.resumeAfterLoad();
+        const logs = page.logs.join("\n");
+        assert.match(logs, /^Verbonden met Solflare/m);
+        assert.notMatch(logs, /^SUCCES - verbonden/m);
+        assert.match(logs, /^SUCCES/m, `geen succesmelding:\n${logs}`);
+        allOff(page);
+        allOn(page);
+        assertExactQueries(page);
+      });
+    }
+
+    it("L-2, knop 4 (deep-link-hervatting), mislukte transactie: geen enkele regel begint met SUCCES", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, failedTx, deeplinkReturn("execute", "15"));
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.match(logs, MISLUKT);
+      assert.notMatch(logs, /^SUCCES/m, `een regel begon met SUCCES:\n${logs}`);
+      allOff(page);
+      allOn(page);
+    });
+
+    it("L-5: knop 4 via de deep-link bewaart het voorstelnummer over de omleiding heen", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, {
+        env: { connectedWallet: { mode: "deeplink", publicKey: new web3.PublicKey(MEMBER), walletName: "Solflare (test)" } },
+        storage: {
+          "test-deeplink": JSON.stringify({
+            dappSecretKey: [],
+            dappPublicKey: Array.from(new Uint8Array(32)),
+            sharedSecret: Array.from(nacl.randomBytes(32)),
+            session: "sessie",
+            walletPublicKey: MEMBER,
+            pendingAction: null,
+            sessionCreatedAt: Date.now(),
+          }),
+        },
+      });
+      await page.fns.runExecuteAction();
+      assert.deepEqual(page.sent, [{ kind: "execute", transactionIndex: 15n }]);
+      assert.match(page.window.location.href, /^https:\/\/solflare\.com\/ul\/v1\/signAndSendTransaction\?/);
+      const saved = JSON.parse(page.storage.get("test-deeplink")!);
+      assert.strictEqual(saved.pendingAction, "execute");
+      assert.strictEqual(saved.pendingActionTransactionIndex, "15");
+    });
+
+    it("L-5: na de omleiding noemt de uitkomst van knop 4 het voorstelnummer", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, deeplinkReturn("execute", "15"));
+      await page.fns.resumeAfterLoad();
+      assert.match(page.logs.join("\n"), /^SUCCES - voorstel #15 uitgevoerd \(geland, zonder fout\)/m);
+    });
+
+    it("L-5: een oudere stand zonder voorstelnummer: de controle loopt toch, en de uitkomst zegt dat het nummer ontbreekt", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, deeplinkReturn("execute", null));
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.match(logs, /^SUCCES - uitgevoerd \(geland, zonder fout\); welk voorstel is niet bewaard/m);
+      assertExactQueries(page);
     });
   });
 

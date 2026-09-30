@@ -98,7 +98,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-09-30T12:00:00Z-sectie-171-bevestiging-controleert-err";
+      var PAGE_BUILD = "2026-09-30T18:00:00Z-sectie-172-knoppen-uit-tijdens-controle";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -676,10 +676,24 @@
         if (result.outcome === "failed") {
           throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
         }
-        throw new Error(
-          "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland " +
-            "is. Controleer dit handmatig (bijv. via een block explorer) voordat je opnieuw klikt op '" +
-            buttonLabel + "'."
+        throw new Error(notLandedYetAdvice(signature, buttonLabel));
+      }
+
+      // Sectie 172 (review §171, L-3): bij "unknown" kan de transactie nog landen tot haar
+      // blockhash verloopt (150 blokken na de blockhash; die haalt de pagina op vóór het
+      // versturen, dus binnen ongeveer 2 minuten na het versturen). Wie meteen in een explorer
+      // kijkt, ziet dan nog niets. Bewust alleen tekst, niet de blockhash-strategie van
+      // confirmTransaction: de wallet kan de blockhash vervangen, en de pagina kent dan niet
+      // de blockhash van de transactie die werkelijk verstuurd is; een "verlopen"-oordeel op
+      // grond van de eigen blockhash kan dan onwaar zijn. De tijd hieronder rekent vanaf nu
+      // (minstens een minuut na het versturen) en is dus ruim.
+      function notLandedYetAdvice(signature, buttonLabel) {
+        const waitUntil = new Date(Date.now() + 2 * 60 * 1000).toLocaleTimeString("nl-NL", { hour12: false });
+        return (
+          "Kon na herhaalde controle niet vaststellen of transactie " + signature + " geland is. Ze kan nog " +
+          "landen tot haar blockhash verloopt, ongeveer 2 minuten na het versturen. Wacht daarom tot ten minste " +
+          waitUntil + ", controleer dan opnieuw of deze signature geland is (bijv. via een block explorer) en " +
+          "klik pas daarna eventueel opnieuw op '" + buttonLabel + "'."
         );
       }
 
@@ -727,18 +741,44 @@
         return isMember;
       }
 
+      // Sectie 172 (review §171, L-1): de actieknoppen staan uit van het versturen tot het einde
+      // van de controle (withActionButtonsLocked), ook op de deep-link-hervatroute. allowed: een
+      // lid is verbonden; locks: aantal lopende acties; proposeHeldOff: finishPropose houdt knop 2
+      // bewust uit (open voorstel of onleesbare scan), tot de volgende verbinding.
+      const actionButtons = { ids: ["propose-btn", "approve-btn", "squads-execute-btn", "reject-btn"], allowed: false, locks: 0, proposeHeldOff: false };
+
+      function refreshActionButtons() {
+        const on = actionButtons.allowed && actionButtons.locks === 0;
+        for (const id of actionButtons.ids) {
+          document.getElementById(id).disabled = !on || (id === "propose-btn" && actionButtons.proposeHeldOff);
+        }
+      }
+
       function enableActionButtons() {
-        document.getElementById("propose-btn").disabled = false;
-        document.getElementById("approve-btn").disabled = false;
-        document.getElementById("squads-execute-btn").disabled = false;
-        document.getElementById("reject-btn").disabled = false;
+        actionButtons.allowed = true;
+        actionButtons.proposeHeldOff = false;
+        refreshActionButtons();
+      }
+
+      async function withActionButtonsLocked(run) {
+        actionButtons.locks++;
+        refreshActionButtons();
+        try {
+          return await run();
+        } finally {
+          actionButtons.locks--;
+          refreshActionButtons();
+        }
       }
 
       // Gedeelde afronding na een geslaagde verbinding, ongeacht via welk
       // pad (Wallet Standard/MWA synchroon, of Solflare-deep-link na een
       // paginareload) - verwacht dat connectedWallet al gezet is.
       async function finishConnectUI() {
-        log("SUCCES - verbonden met " + connectedWallet.walletName + ": " + connectedWallet.publicKey.toBase58());
+        // Sectie 172 (review §171, L-2): geen "SUCCES" - dat woord is voorbehouden aan een
+        // transactie die aantoonbaar zonder fout landde. Na een deep-link-omleiding stond deze
+        // groene regel anders direct boven een "MISLUKT".
+        log("Verbonden met " + connectedWallet.walletName + ": " + connectedWallet.publicKey.toBase58());
 
         const isMember = await checkMembership(connectedWallet.publicKey);
         if (!isMember) {
@@ -879,10 +919,8 @@
         clearDeeplinkSecretState();
         clearLastWalletMarker();
         connectedWallet = null;
-        document.getElementById("propose-btn").disabled = true;
-        document.getElementById("approve-btn").disabled = true;
-        document.getElementById("squads-execute-btn").disabled = true;
-        document.getElementById("reject-btn").disabled = true;
+        actionButtons.allowed = false;
+        refreshActionButtons();
         log("Solflare-deep-link-status gewist - verbind opnieuw via knop 1b.");
       });
 
@@ -1035,12 +1073,14 @@
 
       async function finishPropose(signature) {
         log("Verstuurd. Signature: " + signature);
-        const proposeBtn = document.getElementById("propose-btn");
         const result = await awaitConfirmation(signature, () => {
           // Knop 2 blijft uit zolang de extra controle hieronder loopt -
           // sluit het venster waarin een ongeduldige herklik tijdens die
-          // controle zelf nog een duplicaat zou kunnen aanmaken.
-          proposeBtn.disabled = true;
+          // controle zelf nog een duplicaat zou kunnen aanmaken. Sectie 172:
+          // tijdens de controle staan alle knoppen al uit (withActionButtonsLocked);
+          // dit bepaalt de stand van knop 2 daarna.
+          actionButtons.proposeHeldOff = true;
+          refreshActionButtons();
         });
 
         if (result.timedOut || result.outcome !== "success") {
@@ -1052,7 +1092,8 @@
           // knop weer vrijkomt. Sectie 171: ook na een mislukte of onbekende
           // uitkomst zonder time-out, en een open voorstel bewijst dan NIET dat
           // deze transactie landde.
-          proposeBtn.disabled = true;
+          actionButtons.proposeHeldOff = true;
+          refreshActionButtons();
           const { candidates, problems, settingsProblems } = await selectUpgradeProposal("propose");
           const failed = result.outcome === "failed" ? "Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err) + ". " : "";
 
@@ -1098,7 +1139,8 @@
 
           // Geen open voorstel gevonden - knop 2 mag weer vrij, maar
           // alleen NADAT dit vaststaat, niet ervoor.
-          proposeBtn.disabled = false;
+          actionButtons.proposeHeldOff = false;
+          refreshActionButtons();
 
           if (result.outcome === "success") {
             throw new Error(
@@ -1111,10 +1153,8 @@
             throw new Error(failed + "Er is geen voorstel voor deze buffer aangemaakt.");
           }
           throw new Error(
-            "Kon na herhaalde controle nog steeds niet vaststellen of transactie " + signature + " geland is, " +
-              "en er is geen voorstel voor deze buffer gevonden. Controleer dit handmatig (bijv. via een " +
-              "block explorer) voordat je opnieuw op '2. Voorstel indienen' klikt - een retry zonder dat te " +
-              "weten kan een overbodig, dubbel voorstel aanmaken."
+            "Er is (nog) geen voorstel voor deze buffer gevonden. " + notLandedYetAdvice(signature, "2. Voorstel indienen") +
+              " Een retry zonder dat te weten kan een overbodig, dubbel voorstel aanmaken."
           );
         }
 
@@ -1287,8 +1327,10 @@
           startDeeplinkSignAndSend("reject", tx, confirmedIndex);
         } else {
           log("Keur de afwijzing goed in je wallet-extensie...");
-          const { signature } = await connectedWallet.signAndSendTransaction(tx);
-          await finishReject(signature, confirmedIndex);
+          await withActionButtonsLocked(async () => {
+            const { signature } = await connectedWallet.signAndSendTransaction(tx);
+            await finishReject(signature, confirmedIndex);
+          });
         }
       }
 
@@ -1310,7 +1352,7 @@
         await checkProposalReadyForAction("execute", transactionIndex, multisigInfo);
 
         const { blockhash } = await connection.getLatestBlockhash();
-        return multisig.transactions.vaultTransactionExecute({
+        const tx = multisig.transactions.vaultTransactionExecute({
           connection,
           blockhash,
           feePayer: connectedWallet.publicKey,
@@ -1318,19 +1360,31 @@
           transactionIndex,
           member: connectedWallet.publicKey,
         });
+        // Sectie 172 (review §171, L-5): het nummer gaat mee, ook over de deep-link-omleiding heen.
+        return { tx, transactionIndex };
       }
 
-      async function finishSquadsExecute(signature) {
-        log("Verstuurd. Signature: " + signature);
+      // Sectie 172 (review §171, L-5): transactionIndex is het voorstel dat buildSquadsExecuteTx
+      // koos, ook na een deep-link-omleiding (pendingActionTransactionIndex). null alleen bij een
+      // deep-link-stand van vóór sectie 172: de controle loopt dan toch, en de uitkomst zegt dat
+      // het nummer ontbreekt.
+      async function finishSquadsExecute(signature, transactionIndex) {
+        const which = transactionIndex != null ? "voorstel #" + transactionIndex : null;
+        log("Verstuurd" + (which ? " (uitvoeren van " + which + ")" : "") + ". Signature: " + signature);
         const result = await awaitConfirmation(signature);
 
         // Sectie 171: geen SUCCES tenzij de transactie aantoonbaar zonder fout landde.
         requireLanded(result, signature, "4. Uitvoeren");
 
+        const proof =
+          "Signature: " + signature + ". Dit is GEEN bewijs dat de upgrade klopt: draai nu EXECUTE_SIGNATURE=" +
+          signature + " npx ts-node --transpile-only scripts/preUpgradeChecks.ts --post en de vijf " +
+          "verificaties van STATUS.md sectie 95.";
         log(
-          "SUCCES - uitgevoerd (geland, zonder fout). Signature: " + signature + ". Dit is GEEN bewijs dat de " +
-            "upgrade klopt: draai nu EXECUTE_SIGNATURE=" + signature + " npx ts-node --transpile-only " +
-            "scripts/preUpgradeChecks.ts --post en de vijf verificaties van STATUS.md sectie 95."
+          which
+            ? "SUCCES - " + which + " uitgevoerd (geland, zonder fout). " + proof
+            : "SUCCES - uitgevoerd (geland, zonder fout); welk voorstel is niet bewaard over de omleiding, " +
+                "--post stelt het vast. " + proof
         );
         clearDeeplinkSecretState();
       }
@@ -1524,8 +1578,10 @@
           startDeeplinkSignAndSend("propose", versionedTx);
         } else {
           log("Keur de transactie goed in je wallet-extensie...");
-          const { signature } = await connectedWallet.signAndSendTransaction(versionedTx);
-          await finishPropose(signature);
+          await withActionButtonsLocked(async () => {
+            const { signature } = await connectedWallet.signAndSendTransaction(versionedTx);
+            await finishPropose(signature);
+          });
         }
       }
 
@@ -1539,8 +1595,10 @@
           startDeeplinkSignAndSend("approve", tx, transactionIndex);
         } else {
           log("Keur de goedkeuring goed in je wallet-extensie...");
-          const { signature } = await connectedWallet.signAndSendTransaction(tx);
-          await finishApprove(signature, transactionIndex);
+          await withActionButtonsLocked(async () => {
+            const { signature } = await connectedWallet.signAndSendTransaction(tx);
+            await finishApprove(signature, transactionIndex);
+          });
         }
       }
 
@@ -1549,13 +1607,15 @@
           log("FOUT: verbonden account is geen lid van de multisig - zie de melding bij 'Wallet verbinden'.");
           return;
         }
-        const tx = await buildSquadsExecuteTx();
+        const { tx, transactionIndex } = await buildSquadsExecuteTx();
         if (connectedWallet.mode === "deeplink") {
-          startDeeplinkSignAndSend("execute", tx);
+          startDeeplinkSignAndSend("execute", tx, transactionIndex);
         } else {
           log("Keur de uitvoering goed in je wallet-extensie...");
-          const { signature } = await connectedWallet.signAndSendTransaction(tx);
-          await finishSquadsExecute(signature);
+          await withActionButtonsLocked(async () => {
+            const { signature } = await connectedWallet.signAndSendTransaction(tx);
+            await finishSquadsExecute(signature, transactionIndex);
+          });
         }
       }
 
@@ -1771,7 +1831,12 @@
               }
               await finishApprove(responseData.signature, BigInt(state.pendingActionTransactionIndex));
             }
-            else if (action === "execute") await finishSquadsExecute(responseData.signature);
+            else if (action === "execute") {
+              await finishSquadsExecute(
+                responseData.signature,
+                state.pendingActionTransactionIndex ? BigInt(state.pendingActionTransactionIndex) : null
+              );
+            }
             else if (action === "reject") {
               if (!state.pendingActionTransactionIndex) {
                 throw new Error(
@@ -1794,10 +1859,20 @@
         }
       }
 
-      if (!(await restoreDeeplinkSessionIfPresent())) {
-        log("[debug] geen eerder-opgeslagen Solflare-deep-link-sessie in deze tab.", "log-debug");
+      // Sectie 172 (review §171, L-1): de knoppen staan uit vanaf het laden tot een eventuele
+      // deep-link-hervatting (inclusief de controle van de verstuurde transactie) klaar is.
+      // Zonder dit zette finishConnectUI ze aan vóórdat resumeDeeplinkIfNeeded de controle
+      // startte, en een klik daartussen navigeerde weg en verloor de uitkomst.
+      async function resumeAfterLoad() {
+        await withActionButtonsLocked(async () => {
+          if (!(await restoreDeeplinkSessionIfPresent())) {
+            log("[debug] geen eerder-opgeslagen Solflare-deep-link-sessie in deze tab.", "log-debug");
+          }
+          await resumeDeeplinkIfNeeded();
+        });
       }
-      await resumeDeeplinkIfNeeded();
+
+      await resumeAfterLoad();
       // Alleen lezen, ook zonder verbonden wallet: welk nummer bij de pre-flight hoort.
       await showPreflightTransactionIndex();
     </script>

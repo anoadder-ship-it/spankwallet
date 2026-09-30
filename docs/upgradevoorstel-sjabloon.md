@@ -89,9 +89,22 @@ oude binary. Bij twijfel stap 1 opnieuw.
 ## 3. Uitvoeren
 
 Knop 4 op `admin/wallet-signer.html`. De knop past dezelfde selectieregel toe als stap 1
-(sectie 168) en logt vooraf welk voorstel hij uitvoert: controleer zelf dat dat `<n>` is. De
-knop kent het `<n>` van stap 1 niet, en controleert de buffer-inhoud, de genesis-hash en de
-recovery-invariant niet; dat doet alleen stap 1. Uitvoertransactie noteren.
+(sectie 168) en logt vooraf welk voorstel hij uitvoert. De knop kent het `<n>` van stap 1
+niet, en controleert de buffer-inhoud, de genesis-hash en de recovery-invariant niet; dat
+doet alleen stap 1. Controleer zelf dat het voorstel `<n>` is:
+- **extensie of Mobile Wallet Adapter:** in de regel "Uitvoeren van voorstel #…" vóór de
+  wallet-popup;
+- **Solflare-deep-link:** die regel staat er maar even; de pagina gaat direct daarna naar
+  Solflare. Sinds sectie 172 bewaart de pagina het nummer over de omleiding heen en noemt
+  het na terugkeer in de uitkomst ("SUCCES - voorstel #… uitgevoerd"). Controleer het daar.
+  Staat er een ander nummer dan `<n>`, dan is er een ander voorstel uitgevoerd: meteen §4
+  draaien en vastleggen.
+
+Uitvoertransactie noteren. Tijdens het versturen en de controle staan alle knoppen uit
+(sectie 172). Meldt de pagina dat ze niet kon vaststellen of de transactie geland is, dan
+kan die nog landen tot haar blockhash verloopt (ongeveer 2 minuten na het versturen): wacht
+tot het tijdstip dat de pagina noemt, controleer de signature opnieuw, en klik pas daarna
+eventueel opnieuw.
 
 Wat de keten **niet** afdwingt (sectie 171):
 - **De volgorde "eerst stap 1, dan knop 4" rust op de bediener.** Na de 72u kan elk lid met

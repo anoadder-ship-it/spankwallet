@@ -41,6 +41,9 @@ nacl.setPRNG((x: Uint8Array, n: number) => x.set(crypto.randomBytes(n)));
 const SIG = bs58.encode(Uint8Array.from({ length: 64 }, (_, i) => i + 1));
 const OTHER_SIG = bs58.encode(Uint8Array.from({ length: 64 }, (_, i) => 200 - i));
 const ACTION_BUTTONS = ["propose-btn", "approve-btn", "squads-execute-btn", "reject-btn"];
+// Sectie 173 (review §172, L-2/L-3): de verbindknoppen 1 en 1b vallen onder hetzelfde slot.
+const CONNECT_BUTTONS = ["connect-btn", "connect-solflare-deeplink-btn"];
+const LOCKED_BUTTONS = [...ACTION_BUTTONS, ...CONNECT_BUTTONS];
 
 function moduleScript(html: string): string {
   const start = html.indexOf('<script type="module">');
@@ -130,13 +133,15 @@ interface Page {
   rpc: RpcCall[];
   /** Sectie 172: wat de pagina in localStorage zette. */
   storage: Map<string, string>;
+  /** Sectie 173: timers van een minuut of langer (die lopen nooit vanzelf af); de test roept fn zelf aan. */
+  longTimers: { fn: () => void; ms: number }[];
   window: { location: { search: string; pathname: string; origin: string; href: string } };
 }
 
 interface RpcCall {
   method: string;
   args: unknown[];
-  /** true = uit. */
+  /** true = uit. Sectie 173: ook de verbindknoppen 1 en 1b. */
   buttons: Record<string, boolean>;
 }
 
@@ -147,6 +152,10 @@ interface PageOptions {
   storage?: Record<string, string>;
   /** window.location.search bij het laden. */
   search?: string;
+  /** Sectie 173: de stand op de keten zodra de wallet verstuurt (bv. voorstel #15 Executed na knop 4). */
+  afterSend?: SquadsOpts;
+  /** Sectie 173: een klok die de test verzet (Date.now() en new Date() van de pagina). */
+  clock?: { now: number };
 }
 
 // Een echt lid van de multisig uit de fixture (devnet): nodig voor knop 2, die eerst het lidmaatschap toetst.
@@ -186,7 +195,15 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
   const rpc: RpcCall[] = [];
   const storage = new Map(Object.entries(options.storage ?? {}));
   const elements: Page["elements"] = {};
-  const buttons = () => Object.fromEntries(ACTION_BUTTONS.map((id) => [id, !!elements[id]?.disabled]));
+  const buttons = () => Object.fromEntries(LOCKED_BUTTONS.map((id) => [id, !!elements[id]?.disabled]));
+  const longTimers: Page["longTimers"] = [];
+  const accounts = squadsAccounts(state);
+  // Sectie 173: de keten na het versturen (de wallet verstuurt; de fixture volgt).
+  const applyAfterSend = () => {
+    if (!options.afterSend) return;
+    accounts.clear();
+    for (const [k, v] of squadsAccounts(options.afterSend)) accounts.set(k, v);
+  };
   const record = (kind: string) => (args: { transactionIndex: bigint }) => {
     sent.push({ kind, transactionIndex: BigInt(args.transactionIndex) });
     // serialize: voor de deep-link-route (startDeeplinkSignAndSend), die de transactie versleutelt.
@@ -195,7 +212,7 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
   // Sectie 172 (review §171 M-1/I-3): elke bevestigingsaanroep wordt opgenomen, wat de test ook
   // als antwoord geeft. confirmTransaction controleert de signature zoals de gevendorde web3
   // (base58, 64 bytes; anders een Error) voordat het antwoord van de test komt.
-  const connection: Record<string, any> = { ...fakeConnection(squadsAccounts(state), scans), ...connectionOverrides };
+  const connection: Record<string, any> = { ...fakeConnection(accounts, scans), ...connectionOverrides };
   const confirmImpl = connection.confirmTransaction;
   const statusImpl = connection.getSignatureStatuses;
   connection.confirmTransaction = async (strategy: any, commitment?: string) => {
@@ -240,6 +257,7 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
       signAndSendTransaction: async () => {
         sent.push({ kind: "wallet-signAndSend", transactionIndex: -1n });
         rpc.push({ method: "wallet-signAndSend", args: [], buttons: buttons() });
+        applyAfterSend();
         return { signature: SIG };
       },
     },
@@ -256,6 +274,7 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
     },
     DEEPLINK_STORAGE_KEY: "test-deeplink",
     DEEPLINK_LAST_WALLET_KEY: "test-deeplink-last-wallet",
+    DEEPLINK_VERIFY_KEY: "test-deeplink-verify",
     DEEPLINK_SESSION_MAX_AGE_MS: 30 * 60 * 1000,
     REDIRECT_URL: window.location.origin + "/wallet-signer.html",
     deeplinkExpiryTimer: null,
@@ -270,9 +289,11 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
     // vervaltermijn van de deep-link-sessie, 30 min) nooit binnen een test.
     setTimeout: (fn: () => void, ms = 0) => {
       if (ms < 60_000) queueMicrotask(fn);
+      else longTimers.push({ fn, ms });
       return 0;
     },
     clearTimeout: () => undefined,
+    ...(options.clock ? { Date: fakeDate(options.clock) } : {}),
     ...options.env,
   };
   // De gedeelde module zoals de pagina hem na het laden heeft (sectie 168).
@@ -280,7 +301,21 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
   const sharedPath = path.join(ROOT, "admin", "upgradeProposalCheck.mjs");
   if (fs.existsSync(sharedPath)) env.upgradeCheck = require(sharedPath).createUpgradeProposalCheck(web3.PublicKey);
   const factory = new Function(...Object.keys(env), `${source}\nreturn { ${names.join(", ")} };`);
-  return { fns: factory(...Object.values(env)), sent, logs, elements, scans, rpc, storage, window };
+  return { fns: factory(...Object.values(env)), sent, logs, elements, scans, rpc, storage, window, longTimers };
+}
+
+/** Sectie 173: Date met een klok die de test verzet; new Date(x) en de rest blijven echt. */
+function fakeDate(clock: { now: number }): DateConstructor {
+  class FakeDate extends Date {
+    constructor(...args: any[]) {
+      if (args.length === 0) super(clock.now);
+      else super(...(args as [any]));
+    }
+    static now(): number {
+      return clock.now;
+    }
+  }
+  return FakeDate as unknown as DateConstructor;
 }
 
 /**
@@ -665,7 +700,8 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
     const succeeded: [string, string, unknown[], SquadsOpts][] = [
       ["knop 2", "finishPropose", [SIG], { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
       ["knop 3", "finishApprove", [SIG, 15n], { latestIndex: 15, proposals: { 15: {} } }],
-      ["knop 4", "finishSquadsExecute", [SIG, 15n], { latestIndex: 15, proposals: { 15: {} } }],
+      // Sectie 173 (review §172, L-4): na het uitvoeren staat #15 op Executed.
+      ["knop 4", "finishSquadsExecute", [SIG, 15n], { latestIndex: 15, proposals: { 15: { status: 5 } } }],
       ["knop 5", "finishReject", [SIG, 15n], { latestIndex: 15, proposals: { 15: { status: 2 } } }],
     ];
     for (const [name, fn, args, state] of succeeded) {
@@ -775,30 +811,57 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
     });
   });
 
+  // Gedeeld door sectie 172 en 173.
+  const CHECK = ["wallet-signAndSend", "confirmTransaction", "getSignatureStatuses"];
+  // Sectie 173 (review §172, L-2/L-3): ook de verbindknoppen 1 en 1b.
+  const allOff = (page: Page) => {
+    const during = page.rpc.filter((c) => CHECK.includes(c.method));
+    assert.isNotEmpty(during, "geen controle gezien");
+    for (const c of during) assert.deepEqual(c.buttons, Object.fromEntries(LOCKED_BUTTONS.map((id) => [id, true])), `knop aan tijdens ${c.method}`);
+  };
+  const allOn = (page: Page) => {
+    for (const id of LOCKED_BUTTONS) assert.isFalse(!!page.elements[id]?.disabled, `${id} bleef uit`);
+  };
+
+  /** De stand na een omleiding terug van Solflare met { signature } als versleuteld antwoord. */
+  const deeplinkReturn = (pendingAction: string, index: string | null, signature: string = SIG, wallet: string = MEMBER): PageOptions => {
+    const sharedSecret = nacl.randomBytes(32);
+    const nonce = nacl.randomBytes(24);
+    const data = nacl.box.after(new TextEncoder().encode(JSON.stringify({ signature })), nonce, sharedSecret);
+    return {
+      env: { connectedWallet: null },
+      storage: {
+        "test-deeplink": JSON.stringify({
+          dappSecretKey: [],
+          dappPublicKey: [],
+          sharedSecret: Array.from(sharedSecret),
+          session: "sessie",
+          walletPublicKey: MEMBER,
+          pendingAction,
+          pendingActionStartedAt: new Date().toISOString(),
+          pendingActionTransactionIndex: index,
+          sessionCreatedAt: Date.now(),
+        }),
+        "test-deeplink-last-wallet": JSON.stringify({ walletPublicKey: wallet, savedAt: Date.now() }),
+      },
+      search: "?" + new URLSearchParams({ nonce: bs58.encode(nonce), data: bs58.encode(data) }).toString(),
+    };
+  };
+
   // Sectie 172 (review §171 L-1, L-2, L-5): de actieknoppen staan uit van het versturen tot het
   // einde van de controle, ook op de deep-link-hervatroute; de connect-melding is geen "SUCCES";
   // uitvoeren via de deep-link bewaart het voorstelnummer.
   describe("sectie 172 (review §171 L-1/L-2/L-5): knoppen uit tijdens de controle, voorstelnummer bij uitvoeren", () => {
-    const CHECK = ["wallet-signAndSend", "confirmTransaction", "getSignatureStatuses"];
-    const allOff = (page: Page) => {
-      const during = page.rpc.filter((c) => CHECK.includes(c.method));
-      assert.isNotEmpty(during, "geen controle gezien");
-      for (const c of during) assert.deepEqual(c.buttons, Object.fromEntries(ACTION_BUTTONS.map((id) => [id, true])), `knop aan tijdens ${c.method}`);
-    };
-    const allOn = (page: Page) => {
-      for (const id of ACTION_BUTTONS) assert.isFalse(!!page.elements[id]?.disabled, `${id} bleef uit`);
-    };
-
-    // [knop, functie, argumenten, stand]
-    const runs: [string, string, unknown[], SquadsOpts][] = [
+    // [knop, functie, argumenten, stand, stand na het versturen]
+    const runs: [string, string, unknown[], SquadsOpts, SquadsOpts?][] = [
       ["knop 2", "runProposeAction", [], { latestIndex: 14, proposals: devnetNow() }],
       ["knop 3", "runApproveAction", [], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
-      ["knop 4", "runExecuteAction", [], { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 4", "runExecuteAction", [], { latestIndex: 15, proposals: { 15: {} } }, { latestIndex: 15, proposals: { 15: { status: 5 } } }],
       ["knop 5", "runRejectAction", [15n], { latestIndex: 15, proposals: { 15: { status: 1 } } }],
     ];
-    for (const [name, fn, args, state] of runs) {
+    for (const [name, fn, args, state, afterSend] of runs) {
       it(`L-1, ${name} (extensie): alle actieknoppen uit tijdens versturen en controle, daarna weer aan`, async () => {
-        const page = await loadPage(state);
+        const page = await loadPage(state, {}, { afterSend });
         page.fns.enableActionButtons();
         await page.fns[fn](...args);
         assert.match(page.logs.join("\n"), /^SUCCES/m);
@@ -815,35 +878,10 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
       allOn(page);
     });
 
-    /** De stand na een omleiding terug van Solflare met { signature } als versleuteld antwoord. */
-    const deeplinkReturn = (pendingAction: string, index: string | null, signature: string = SIG): PageOptions => {
-      const sharedSecret = nacl.randomBytes(32);
-      const nonce = nacl.randomBytes(24);
-      const data = nacl.box.after(new TextEncoder().encode(JSON.stringify({ signature })), nonce, sharedSecret);
-      return {
-        env: { connectedWallet: null },
-        storage: {
-          "test-deeplink": JSON.stringify({
-            dappSecretKey: [],
-            dappPublicKey: [],
-            sharedSecret: Array.from(sharedSecret),
-            session: "sessie",
-            walletPublicKey: MEMBER,
-            pendingAction,
-            pendingActionStartedAt: new Date().toISOString(),
-            pendingActionTransactionIndex: index,
-            sessionCreatedAt: Date.now(),
-          }),
-          "test-deeplink-last-wallet": JSON.stringify({ walletPublicKey: MEMBER, savedAt: Date.now() }),
-        },
-        search: "?" + new URLSearchParams({ nonce: bs58.encode(nonce), data: bs58.encode(data) }).toString(),
-      };
-    };
-
     const resumes: [string, string, string | null, SquadsOpts][] = [
       ["knop 2", "propose", null, { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
       ["knop 3", "approve", "15", { latestIndex: 15, proposals: { 15: {} } }],
-      ["knop 4", "execute", "15", { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 4", "execute", "15", { latestIndex: 15, proposals: { 15: { status: 5 } } }],
       ["knop 5", "reject", "15", { latestIndex: 15, proposals: { 15: { status: 2 } } }],
     ];
     for (const [name, action, index, state] of resumes) {
@@ -894,17 +932,291 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
     });
 
     it("L-5: na de omleiding noemt de uitkomst van knop 4 het voorstelnummer", async () => {
-      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, deeplinkReturn("execute", "15"));
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 5 } } }, {}, deeplinkReturn("execute", "15"));
       await page.fns.resumeAfterLoad();
-      assert.match(page.logs.join("\n"), /^SUCCES - voorstel #15 uitgevoerd \(geland, zonder fout\)/m);
+      assert.match(page.logs.join("\n"), /^SUCCES - voorstel #15 uitgevoerd \(geland, zonder fout; op de keten Executed\)/m);
     });
 
-    it("L-5: een oudere stand zonder voorstelnummer: de controle loopt toch, en de uitkomst zegt dat het nummer ontbreekt", async () => {
-      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, deeplinkReturn("execute", null));
+    // Sectie 173 (review §172, L-4): zonder nummer valt er niets terug te lezen, dus geen SUCCES.
+    it("L-5: een oudere stand zonder voorstelnummer: de controle loopt toch, geen SUCCES, en de uitkomst zegt dat het nummer ontbreekt", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 5 } } }, {}, deeplinkReturn("execute", null));
       await page.fns.resumeAfterLoad();
       const logs = page.logs.join("\n");
-      assert.match(logs, /^SUCCES - uitgevoerd \(geland, zonder fout\); welk voorstel is niet bewaard/m);
+      assert.notMatch(logs, /^SUCCES/m);
+      assert.match(logs, /geland zonder fout, maar het voorstelnummer is niet bewaard: niet vastgesteld welk voorstel is uitgevoerd/);
       assertExactQueries(page);
+    });
+  });
+
+  // Sectie 173 (review §172): M-1 herladen midden in de controle, L-1 een uitweg uit het slot,
+  // L-2/L-3 de verbindknoppen onder het slot, L-4 knop 4 leest het voorstel terug, L-5 de
+  // betrokken knop blijft uit tot het genoemde tijdstip; en de mutaties B, C en H van de review.
+  describe("sectie 173 (review §172): herladen midden in de controle, uitweg uit het slot, knop 4 leest terug", () => {
+    const VERIFY = "test-deeplink-verify";
+    const verifyState = (page: Page) => (page.storage.has(VERIFY) ? JSON.parse(page.storage.get(VERIFY)!) : null);
+    const flush = async () => {
+      for (let i = 0; i < 300; i++) await new Promise((r) => setImmediate(r));
+    };
+    const never = () => new Promise<never>(() => undefined);
+    const off = (page: Page, id: string) => !!page.elements[id]?.disabled;
+    const onlyOff = (page: Page, ids: string[]) => {
+      for (const id of LOCKED_BUTTONS) assert.strictEqual(off(page, id), ids.includes(id), `${id} ${ids.includes(id) ? "hoort uit" : "hoort aan"}`);
+    };
+    const MULTISIG_ADDRESS = new web3.PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp");
+    const proposal15 = sdk.getProposalPda({ multisigPda: MULTISIG_ADDRESS, transactionIndex: 15n })[0].toBase58();
+
+    /** Eerste lading na een terugkeer uit Solflare; confirmTransaction antwoordt niet, dus de controle loopt nog. */
+    const midCheck = async (action: string, index: string | null, state: SquadsOpts) => {
+      const opts = deeplinkReturn(action, index);
+      const first = await loadPage(state, { confirmTransaction: never }, opts);
+      void first.fns.resumeAfterLoad();
+      await flush();
+      assert.lengthOf(first.rpc.filter((c) => c.method === "confirmTransaction"), 1, "de eerste lading startte de controle niet");
+      return { first, storage: Object.fromEntries(first.storage), search: opts.search };
+    };
+    /** Tweede lading: dezelfde opslag en dezelfde URL (de browser herlaadt met ?nonce=…&data=…). */
+    const reload = (state: SquadsOpts, mid: { storage: Record<string, string>; search?: string }, overrides: Record<string, unknown> = {}) =>
+      loadPage(state, overrides, { env: { connectedWallet: null }, storage: mid.storage, search: mid.search });
+
+    // [knop, actie, nummer, stand op de keten na het versturen]
+    const reloads: [string, string, string | null, SquadsOpts][] = [
+      ["knop 2", "propose", null, { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } }],
+      ["knop 3", "approve", "15", { latestIndex: 15, proposals: { 15: {} } }],
+      ["knop 4", "execute", "15", { latestIndex: 15, proposals: { 15: { status: 5 } } }],
+      ["knop 5", "reject", "15", { latestIndex: 15, proposals: { 15: { status: 2 } } }],
+    ];
+    for (const [name, action, index, state] of reloads) {
+      it(`M-1, ${name}: herladen midden in de controle; de tweede lading controleert, meldt de uitkomst en zet de knoppen goed`, async () => {
+        const mid = await midCheck(action, index, state);
+        const saved = verifyState(mid.first);
+        assert.isNotNull(saved, "geen te-controleren stand bewaard vóór de controle");
+        assert.strictEqual(saved.action, action);
+        assert.strictEqual(saved.signature, SIG);
+        assert.strictEqual(saved.transactionIndex, index);
+        assert.isNumber(saved.savedAt);
+
+        const page = await reload(state, mid);
+        await page.fns.resumeAfterLoad();
+        const logs = page.logs.join("\n");
+        assert.match(logs, /^SUCCES/m, `geen uitkomst na herladen:\n${logs}`);
+        assert.isNull(verifyState(page), "de stand bleef staan na het oordeel");
+        assertExactQueries(page);
+        allOff(page);
+        allOn(page);
+      });
+    }
+
+    it("M-1, knop 4: herladen, de transactie blijkt mislukt: MISLUKT, stand gewist, knoppen aan", async () => {
+      const state = { latestIndex: 15, proposals: { 15: {} } };
+      const mid = await midCheck("execute", "15", state);
+      const page = await reload(state, mid, failedTx);
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.match(logs, MISLUKT);
+      assert.notMatch(logs, /^SUCCES/m);
+      assert.isNull(verifyState(page));
+      allOn(page);
+    });
+
+    it("M-1, knop 4: herladen, uitkomst onbekend: het advies met tijdstip, stand gewist, alleen knop 4 blijft uit", async () => {
+      const state = { latestIndex: 15, proposals: { 15: {} } };
+      const mid = await midCheck("execute", "15", state);
+      const page = await reload(state, mid, { confirmTransaction: timeout, getSignatureStatuses: statuses({}) });
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.match(logs, /Wacht daarom tot ten minste \d\d:\d\d:\d\d/);
+      assert.notMatch(logs, /^SUCCES/m);
+      assert.isNull(verifyState(page));
+      onlyOff(page, ["squads-execute-btn"]);
+    });
+
+    it("M-1: de RPC faalt bij het teruglezen (geen oordeel): de stand blijft, voor het volgende laden", async () => {
+      const state = { latestIndex: 15, proposals: { 15: { status: 5 } } };
+      const mid = await midCheck("execute", "15", state);
+      const base = fakeConnection(squadsAccounts(state));
+      const page = await reload(state, mid, {
+        getAccountInfo: async (address: any, ...rest: unknown[]) => {
+          if (address.toBase58() === proposal15) throw new Error("RPC down (test)");
+          return (base.getAccountInfo as any)(address, ...rest);
+        },
+      });
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.notMatch(logs, /^SUCCES/m);
+      assert.isNotNull(verifyState(page), "de stand is gewist zonder oordeel");
+      assert.match(logs, /bij het volgende laden opnieuw/);
+    });
+
+    it("M-1: een verlopen stand wordt niet gecontroleerd en niet aan iets gekoppeld; de signature wordt wel genoemd", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 5 } } }, {}, {
+        env: { connectedWallet: null },
+        storage: {
+          [VERIFY]: JSON.stringify({ action: "execute", signature: SIG, transactionIndex: "15", savedAt: Date.now() - 31 * 60 * 1000 }),
+          "test-deeplink-last-wallet": JSON.stringify({ walletPublicKey: MEMBER, savedAt: Date.now() }),
+        },
+      });
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.lengthOf(page.rpc.filter((c) => c.method === "confirmTransaction"), 0);
+      assert.isNull(verifyState(page));
+      assert.match(logs, /verlopen/);
+      assert.include(logs, SIG);
+      assert.notMatch(logs, /^SUCCES/m);
+    });
+
+    it("M-1: een stand van een andere actie (knop 3) wordt als die actie gemeld, niet als uitvoeren", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, {
+        env: { connectedWallet: null },
+        storage: {
+          [VERIFY]: JSON.stringify({ action: "approve", signature: SIG, transactionIndex: "15", savedAt: Date.now() }),
+          "test-deeplink-last-wallet": JSON.stringify({ walletPublicKey: MEMBER, savedAt: Date.now() }),
+        },
+      });
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.match(logs, /^SUCCES - voorstel #15 status: .*goedgekeurd door/m);
+      assert.notMatch(logs, /uitgevoerd/);
+      assert.isNull(verifyState(page));
+    });
+
+    it("M-1: een nieuwe verbinding ruimt een open stand op en noemt de ongecontroleerde signature", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, {
+        storage: { [VERIFY]: JSON.stringify({ action: "approve", signature: SIG, transactionIndex: "15", savedAt: Date.now() }) },
+      });
+      page.fns.beginFreshDeeplinkConnect("execute");
+      assert.isNull(verifyState(page));
+      assert.include(page.logs.join("\n"), SIG);
+    });
+
+    it("M-1: een ongeldige stand (onbekende actie) wordt gewist zonder controle", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, {
+        env: { connectedWallet: null },
+        storage: { [VERIFY]: JSON.stringify({ action: "connect", signature: SIG, transactionIndex: null, savedAt: Date.now() }) },
+      });
+      await page.fns.resumeAfterLoad();
+      assert.lengthOf(page.rpc.filter((c) => c.method === "confirmTransaction"), 0);
+      assert.isNull(verifyState(page));
+    });
+
+    // Review §172 L-2 en mutaties B/H: knop 2 blijft na het ontgrendelen uit bij een open voorstel.
+    const open15 = { latestIndex: 15, proposals: { ...devnetNow(), 15: { status: 1 } } };
+    const heldOff: [string, Record<string, unknown>][] = [
+      ["mislukt via de websocket (geen time-out)", failedTx],
+      ["confirmTransaction zonder fout, status null (geen time-out)", { getSignatureStatuses: statuses({}) }],
+      ["time-out, uitkomst onbekend", { confirmTransaction: timeout, getSignatureStatuses: statuses({}) }],
+    ];
+    for (const [name, overrides] of heldOff) {
+      it(`L-2, knop 2 ${name}, er staat een voorstel open: na het ontgrendelen alleen knop 2 uit`, async () => {
+        const page = await loadPage(open15, overrides);
+        page.fns.enableActionButtons();
+        await rejection(page.fns.withActionButtonsLocked(() => page.fns.finishPropose(SIG)));
+        allOff(page);
+        onlyOff(page, ["propose-btn"]);
+      });
+    }
+
+    it("L-2/L-3: tijdens de controle na een deep-link-terugkeer staan ook 1 en 1b uit", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 5 } } }, {}, deeplinkReturn("execute", "15"));
+      await page.fns.resumeAfterLoad();
+      allOff(page);
+      allOn(page);
+    });
+
+    // Mutatie C: ontgrendelen zet geen knop aan zonder verbonden lid.
+    it("ontgrendelen zonder verbonden lid: de actieknoppen blijven uit, 1 en 1b gaan aan", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } });
+      await page.fns.withActionButtonsLocked(async () => undefined);
+      onlyOff(page, ACTION_BUTTONS);
+    });
+
+    it("deep-link-terugkeer van een adres dat geen lid is: na de controle blijven de actieknoppen uit", async () => {
+      const outsider = OLD_BUFFER.toBase58(); // een geldig adres dat geen lid is
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 5 } } }, {}, deeplinkReturn("execute", "15", SIG, outsider));
+      await page.fns.resumeAfterLoad();
+      assert.match(page.logs.join("\n"), /GEEN geregistreerd lid/);
+      onlyOff(page, ACTION_BUTTONS);
+    });
+
+    // L-1: een wallet die nooit antwoordt.
+    it("L-1: de wallet antwoordt nooit: na verloop van tijd een melding dat herladen kan; de knoppen blijven uit", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 1 } } }, {}, {
+        env: { connectedWallet: { publicKey: new web3.PublicKey(MEMBER), mode: "extension", walletName: "W", signAndSendTransaction: never } },
+      });
+      page.fns.enableActionButtons();
+      void page.fns.runApproveAction();
+      await flush();
+      onlyOff(page, LOCKED_BUTTONS);
+      assert.isNotEmpty(page.longTimers, "geen timer voor de uitweg");
+      assert.isAtLeast(Math.min(...page.longTimers.map((t) => t.ms)), 60_000);
+      for (const t of page.longTimers) t.fn();
+      const logs = page.logs.join("\n");
+      assert.match(logs, /pagina herladen/);
+      assert.match(logs, /mogelijk toch verstuurd/);
+      assert.match(logs, /eerst de keten/);
+      onlyOff(page, LOCKED_BUTTONS);
+    });
+
+    it("L-1: na een gewone controle geeft de timer geen melding meer", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 1 } } });
+      page.fns.enableActionButtons();
+      await page.fns.runApproveAction();
+      const before = page.logs.length;
+      for (const t of page.longTimers) t.fn();
+      assert.notMatch(page.logs.slice(before).join("\n"), /mogelijk toch verstuurd/);
+    });
+
+    // L-4: knop 4 leest het voorstel terug.
+    it("L-4, knop 4: geland zonder fout, maar #15 staat nog op Approved: geen SUCCES, wel 'niet vastgesteld'", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } });
+      const why = await rejection(page.fns.finishSquadsExecute(SIG, 15n));
+      assert.notMatch(page.logs.join("\n"), /^SUCCES/m);
+      assert.match(why, /voorstel #15 staat op de keten op Approved, niet op Executed: niet vastgesteld/);
+      assertExactQueries(page);
+    });
+
+    it("L-4, knop 4 via de deep-link: #15 Approved na terugkeer: geen SUCCES", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, deeplinkReturn("execute", "15"));
+      await page.fns.resumeAfterLoad();
+      const logs = page.logs.join("\n");
+      assert.notMatch(logs, /^SUCCES/m);
+      assert.match(logs, /niet op Executed: niet vastgesteld/);
+    });
+
+    it("L-4, knop 4 (extensie): de keten verandert niet: geen SUCCES", async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } });
+      page.fns.enableActionButtons();
+      await rejection(page.fns.runExecuteAction());
+      assert.notMatch(page.logs.join("\n"), /^SUCCES/m);
+    });
+
+    // L-5: bij "unknown" blijft de betrokken knop uit tot het genoemde tijdstip.
+    it("L-5, knop 3: uitkomst onbekend: alleen knop 3 uit tot het genoemde tijdstip, ook na opnieuw verbinden", async () => {
+      const clock = { now: Date.parse("2026-10-01T10:00:00Z") };
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: { status: 1 } } }, { confirmTransaction: timeout, getSignatureStatuses: statuses({}) }, { clock });
+      page.fns.enableActionButtons();
+      const why = await rejection(page.fns.runApproveAction());
+      const until = new Date(clock.now + 2 * 60 * 1000).toLocaleTimeString("nl-NL", { hour12: false });
+      assert.include(why, "Wacht daarom tot ten minste " + until);
+      onlyOff(page, ["approve-btn"]);
+      page.fns.enableActionButtons();
+      onlyOff(page, ["approve-btn"]);
+      clock.now += 2 * 60 * 1000 - 1000;
+      page.fns.refreshActionButtons();
+      onlyOff(page, ["approve-btn"]);
+      clock.now += 2000;
+      for (const t of page.longTimers) t.fn();
+      onlyOff(page, []);
+    });
+
+    it("L-5, knop 2: uitkomst onbekend en geen voorstel gevonden: knop 2 uit tot het genoemde tijdstip", async () => {
+      const clock = { now: Date.parse("2026-10-01T10:00:00Z") };
+      const page = await loadPage({ latestIndex: 14, proposals: devnetNow() }, { confirmTransaction: timeout, getSignatureStatuses: statuses({}) }, { clock });
+      page.fns.enableActionButtons();
+      await rejection(page.fns.withActionButtonsLocked(() => page.fns.finishPropose(SIG)));
+      onlyOff(page, ["propose-btn"]);
+      clock.now += 2 * 60 * 1000 + 1000;
+      for (const t of page.longTimers) t.fn();
+      onlyOff(page, []);
     });
   });
 

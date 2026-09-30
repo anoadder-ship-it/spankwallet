@@ -36,7 +36,8 @@ L-1), op basis van de pre-flight uit sectie 94 en de verificaties uit sectie 95.
 6. Voorstel aanmaken en goedkeuren via `admin/wallet-signer.html` (twee van de drie leden).
    Knop 3 keurt alleen het laatste voorstel goed, en alleen als het het enige open voorstel
    voor deze buffer is, geen enkel ander voorstel Approved of Executing is (welke inhoud
-   ook), en het precies de upgrade is (sectie 168/169).
+   ook), en het precies de upgrade is (sectie 168/169). Houd je daarbij aan de
+   bedieningsregels van §3 ("Bediening van de adminpagina"); ze gelden voor elke knop.
 
 ## 2. Pre-flight, direct vóór het uitvoeren (volgorde verplicht)
 
@@ -100,11 +101,37 @@ doet alleen stap 1. Controleer zelf dat het voorstel `<n>` is:
   Staat er een ander nummer dan `<n>`, dan is er een ander voorstel uitgevoerd: meteen §4
   draaien en vastleggen.
 
-Uitvoertransactie noteren. Tijdens het versturen en de controle staan alle knoppen uit
-(sectie 172). Meldt de pagina dat ze niet kon vaststellen of de transactie geland is, dan
-kan die nog landen tot haar blockhash verloopt (ongeveer 2 minuten na het versturen): wacht
-tot het tijdstip dat de pagina noemt, controleer de signature opnieuw, en klik pas daarna
-eventueel opnieuw.
+**Voer bij voorkeur uit via de desktop-extensieroute** (sectie 173): de hele stap blijft dan
+op één pagina, zonder omleiding. Sinds sectie 173 verschijnt "SUCCES - voorstel #n
+uitgevoerd" alleen als de signature zonder fout landde én voorstel #n op de keten op
+`Executed` staat; anders meldt de pagina "niet vastgesteld", met de gelezen status.
+
+Uitvoertransactie noteren.
+
+### Bediening van de adminpagina (secties 172-173; geldt voor knop 2-5)
+
+- **Tijdens een controle niets klikken, en de pagina niet sluiten of herladen.** Van het
+  versturen tot de uitkomst staan alle actieknoppen en de verbindknoppen 1 en 1b uit.
+- **Herladen alleen als de pagina het zelf voorstelt.** Staan de knoppen na 3 minuten nog
+  uit, dan meldt de pagina dat de wallet of de RPC niet antwoordt en dat herladen kan. De
+  transactie is dan mogelijk toch verstuurd: noteer de signature uit "Verstuurd. Signature:
+  …" als die er staat, en laat na het herladen eerst de keten lezen (opnieuw verbinden en
+  de voorstelstatus lezen die de pagina meldt) voordat je opnieuw klikt.
+- **Na elke stap via de Solflare-deep-link** (indienen, goedkeuren, afwijzen, uitvoeren) de
+  uitkomst op de keten laten lezen: opnieuw verbinden en de voorstelstatus lezen, of de
+  signature in een block explorer. Herlaadt de pagina of sluit het toestel het tabblad
+  tijdens de controle, dan controleert de pagina de bewaarde signature bij het volgende
+  laden zelf opnieuw (tot 30 minuten na de terugkeer). Meldt de pagina dat een
+  te-controleren transactie "gewist" is, dan heeft ze die signature niet beoordeeld:
+  controleer haar zelf.
+- **"Niet vastgesteld of de transactie geland is":** ze kan nog landen tot haar blockhash
+  verloopt (ongeveer 2 minuten na het versturen). Wacht tot het tijdstip dat de pagina
+  noemt (de betrokken knop staat tot dan uit), controleer de signature opnieuw, en klik pas
+  daarna eventueel opnieuw. Na herladen staat die knop eerder weer aan: houd het tijdstip
+  dan zelf aan.
+- **De pagina is bevroren** (sectie 173): alleen een bevinding die een verkeerde transactie
+  of een onterecht succes kan veroorzaken, leidt nog tot een wijziging. Al het andere wordt
+  een regel in deze lijst.
 
 Wat de keten **niet** afdwingt (sectie 171):
 - **De volgorde "eerst stap 1, dan knop 4" rust op de bediener.** Na de 72u kan elk lid met

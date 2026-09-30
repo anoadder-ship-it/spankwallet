@@ -74,6 +74,24 @@ is `client/` de juiste plek.
      uitkomst;
    - de verbindingsmelding begint niet meer met "SUCCES"; dat woord is voorbehouden aan een
      transactie die aantoonbaar zonder fout landde.
+
+   Sinds STATUS.md sectie 173 (daarna is de pagina bevroren: alleen een bevinding die een
+   verkeerde transactie of een onterecht succes kan veroorzaken, leidt nog tot een wijziging):
+   - na een terugkeer uit Solflare bewaart de pagina de te controleren transactie (actie,
+     signature, voorstelnummer, tijdstip) vóór de controle. Herlaadt de pagina of sluit het
+     toestel het tabblad midden in de controle, dan controleert het volgende laden opnieuw
+     (tot 30 minuten na de terugkeer). Een nieuwe verbinding of de wisknop ruimt zo'n stand
+     op en zet de niet-beoordeelde signature in de log;
+   - tijdens een controle staan ook de verbindknoppen 1 en 1b uit; de wisknop niet;
+   - staan de knoppen na 3 minuten nog uit (wallet of RPC antwoordt niet), dan zegt de
+     pagina dat herladen kan, dat de transactie mogelijk toch verstuurd is, en dat je daarna
+     eerst de keten laat lezen;
+   - knop 4 meldt "SUCCES - voorstel #n uitgevoerd" alleen als #n op de keten `Executed` is;
+   - na "niet vastgesteld of … geland" blijft de betrokken knop uit tot het genoemde tijdstip
+     (alleen zolang de pagina niet herladen wordt);
+   - bedieningsregels (niets klikken of herladen tijdens een controle, na elke deep-link-stap
+     de uitkomst op de keten laten lezen, knop 4 bij voorkeur via de desktop-extensie):
+     `docs/upgradevoorstel-sjabloon.md` §3.
 5. **Geen enkele private key verlaat ooit een apparaat** - alle drie de ondertekenpaden
    (Wallet Standard, Mobile Wallet Adapter, Solflare-deep-link) laten de wallet-extensie of
    -app zelf ondertekenen. Dit was een expliciete eis bij de echte migratie (in

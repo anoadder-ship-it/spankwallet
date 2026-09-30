@@ -98,7 +98,7 @@
       // oudere versie (een reeel risico op MIUI/HyperOS, zie https-
       // server.js voor de bijbehorende no-cache-headerfix). Handmatig
       // ophogen bij elke wijziging aan deze pagina.
-      var PAGE_BUILD = "2026-09-30T18:00:00Z-sectie-172-knoppen-uit-tijdens-controle";
+      var PAGE_BUILD = "2026-09-30T22:00:00Z-sectie-173-controle-overleeft-herladen";
       earlyLog("[debug] PAGINA-BUILD: " + PAGE_BUILD, "log-debug");
       earlyLog("[debug] pagina geladen, klassiek script draait.", "log-debug");
       earlyLog("[debug] window.isSecureContext: " + window.isSecureContext + " (origin: " + window.location.origin + ")", "log-debug");
@@ -469,6 +469,71 @@
         localStorage.removeItem(DEEPLINK_LAST_WALLET_KEY);
       }
 
+      // Sectie 173 (review §172, M-1): de te controleren transactie na een terugkeer uit Solflare,
+      // { action, signature, transactionIndex, savedAt }. Bewaard zodra het antwoord ontsleuteld
+      // is, vóór de controle; gewist pas als finish* een oordeel gaf (succes, mislukt, onbekend).
+      // Herlaadt de pagina (of sluit het toestel het tabblad) midden in de controle, dan
+      // controleert het volgende laden opnieuw. Zelfde vervaltermijn als de andere standen; een
+      // nieuwe verbinding of de wisknop ruimt hem op, met de signature in de log, zodat een oude
+      // stand nooit een latere actie labelt. Geen geheim: alleen publieke gegevens.
+      const DEEPLINK_VERIFY_KEY = "spankwallet_solflare_deeplink_verify";
+      const VERIFY_ACTIONS = { propose: "2. Voorstel indienen", approve: "3. Voorstel goedkeuren", execute: "4. Uitvoeren", reject: "5. Voorstel afwijzen" };
+
+      function saveDeeplinkVerification(verification) {
+        localStorage.setItem(DEEPLINK_VERIFY_KEY, JSON.stringify(verification));
+      }
+
+      function clearDeeplinkVerification() {
+        localStorage.removeItem(DEEPLINK_VERIFY_KEY);
+      }
+
+      // Wist een stand die NIET gecontroleerd wordt, en noemt wat er in stond: die signature is
+      // dan door de pagina niet beoordeeld.
+      function dropDeeplinkVerification(why) {
+        let raw = null;
+        try {
+          raw = localStorage.getItem(DEEPLINK_VERIFY_KEY);
+        } catch (err) {
+          raw = null;
+        }
+        if (!raw) return;
+        clearDeeplinkVerification();
+        log(
+          "[waarschuwing] Een nog niet gecontroleerde transactie van een eerdere Solflare-terugkeer is gewist (" + why +
+            "): " + raw + ". De pagina heeft deze signature niet beoordeeld en koppelt haar niet aan een latere actie; " +
+            "controleer haar zelf op de keten (bijv. een block explorer).",
+          "log-error"
+        );
+      }
+
+      function loadDeeplinkVerification() {
+        let verification = null;
+        try {
+          const raw = localStorage.getItem(DEEPLINK_VERIFY_KEY);
+          if (!raw) return null;
+          verification = JSON.parse(raw);
+        } catch (err) {
+          verification = null;
+        }
+        const valid =
+          verification !== null && typeof verification === "object" &&
+          Object.prototype.hasOwnProperty.call(VERIFY_ACTIONS, verification.action) &&
+          typeof verification.signature === "string" && /^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(verification.signature) &&
+          (verification.transactionIndex === null || (typeof verification.transactionIndex === "string" && /^\d+$/.test(verification.transactionIndex))) &&
+          (verification.action === "propose" || verification.action === "execute" || verification.transactionIndex !== null) &&
+          typeof verification.savedAt === "number";
+        if (!valid) {
+          dropDeeplinkVerification("onleesbaar of onvolledig");
+          return null;
+        }
+        const age = Date.now() - verification.savedAt;
+        if (!(age >= 0) || age > DEEPLINK_SESSION_MAX_AGE_MS) {
+          dropDeeplinkVerification("verlopen: ouder dan 30 minuten");
+          return null;
+        }
+        return verification;
+      }
+
       function encryptPayload(payload, sharedSecret) {
         const nonce = nacl.randomBytes(24);
         const messageBytes = new TextEncoder().encode(JSON.stringify(payload));
@@ -669,14 +734,23 @@
         return { timedOut, ...verdict };
       }
 
+      // Sectie 173 (review §172, M-1): een fout die een oordeel over de transactie is (mislukt,
+      // onbekend, niet vastgesteld). Na zo'n fout is de controle af en wordt een bewaarde
+      // te-controleren stand gewist; na elke andere fout (bijv. de RPC faalt) blijft hij staan.
+      function verdictError(message) {
+        const err = new Error(message);
+        err.verdict = true;
+        return err;
+      }
+
       // Sectie 171: gooit tenzij awaitConfirmation "success" gaf. Pas daarna
       // mag knop 3, 4 of 5 "SUCCES" loggen.
-      function requireLanded(result, signature, buttonLabel) {
+      function requireLanded(result, signature, buttonLabel, buttonId) {
         if (result.outcome === "success") return;
         if (result.outcome === "failed") {
-          throw new Error("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
+          throw verdictError("Transactie " + signature + " is on-chain MISLUKT: " + JSON.stringify(result.err));
         }
-        throw new Error(notLandedYetAdvice(signature, buttonLabel));
+        throw verdictError(notLandedYetAdvice(signature, buttonLabel, buttonId));
       }
 
       // Sectie 172 (review §171, L-3): bij "unknown" kan de transactie nog landen tot haar
@@ -687,13 +761,16 @@
       // de blockhash van de transactie die werkelijk verstuurd is; een "verlopen"-oordeel op
       // grond van de eigen blockhash kan dan onwaar zijn. De tijd hieronder rekent vanaf nu
       // (minstens een minuut na het versturen) en is dus ruim.
-      function notLandedYetAdvice(signature, buttonLabel) {
-        const waitUntil = new Date(Date.now() + 2 * 60 * 1000).toLocaleTimeString("nl-NL", { hour12: false });
+      // Sectie 173 (review §172, L-5): de knop (buttonId) blijft tot datzelfde tijdstip uit.
+      function notLandedYetAdvice(signature, buttonLabel, buttonId) {
+        const until = Date.now() + 2 * 60 * 1000;
+        holdButtonUntil(buttonId, until);
+        const waitUntil = new Date(until).toLocaleTimeString("nl-NL", { hour12: false });
         return (
           "Kon na herhaalde controle niet vaststellen of transactie " + signature + " geland is. Ze kan nog " +
           "landen tot haar blockhash verloopt, ongeveer 2 minuten na het versturen. Wacht daarom tot ten minste " +
           waitUntil + ", controleer dan opnieuw of deze signature geland is (bijv. via een block explorer) en " +
-          "klik pas daarna eventueel opnieuw op '" + buttonLabel + "'."
+          "klik pas daarna eventueel opnieuw op '" + buttonLabel + "'. Die knop blijft tot dat tijdstip uit."
         );
       }
 
@@ -745,13 +822,43 @@
       // van de controle (withActionButtonsLocked), ook op de deep-link-hervatroute. allowed: een
       // lid is verbonden; locks: aantal lopende acties; proposeHeldOff: finishPropose houdt knop 2
       // bewust uit (open voorstel of onleesbare scan), tot de volgende verbinding.
-      const actionButtons = { ids: ["propose-btn", "approve-btn", "squads-execute-btn", "reject-btn"], allowed: false, locks: 0, proposeHeldOff: false };
+      // Sectie 173 (review §172): connectIds (L-2/L-3): knop 1 en 1b staan uit zolang er een slot
+      // is, ongeacht allowed; verbinden of een deep-link-start kan de controle dan niet wegduwen
+      // of knop 2 aanzetten. De wisknop blijft bewust bruikbaar. heldUntil (L-5): een knop blijft
+      // na een onbekende uitkomst uit tot het genoemde tijdstip (ms), ook na opnieuw verbinden.
+      const actionButtons = { ids: ["propose-btn", "approve-btn", "squads-execute-btn", "reject-btn"], connectIds: ["connect-btn", "connect-solflare-deeplink-btn"], allowed: false, locks: 0, proposeHeldOff: false, heldUntil: {} };
 
       function refreshActionButtons() {
         const on = actionButtons.allowed && actionButtons.locks === 0;
+        const now = Date.now();
         for (const id of actionButtons.ids) {
-          document.getElementById(id).disabled = !on || (id === "propose-btn" && actionButtons.proposeHeldOff);
+          const held = now < (actionButtons.heldUntil[id] || 0);
+          document.getElementById(id).disabled = !on || held || (id === "propose-btn" && actionButtons.proposeHeldOff);
         }
+        for (const id of actionButtons.connectIds) document.getElementById(id).disabled = actionButtons.locks > 0;
+      }
+
+      // Sectie 173 (review §172, L-5): houdt de knop uit tot `until`, en zet hem daarna terug
+      // (als hij dan mag).
+      function holdButtonUntil(id, until) {
+        actionButtons.heldUntil[id] = Math.max(actionButtons.heldUntil[id] || 0, until);
+        refreshActionButtons();
+        setTimeout(refreshActionButtons, until - Date.now() + 1000);
+      }
+
+      // Sectie 173 (review §172, L-1): een wallet of RPC die niet antwoordt, houdt het slot vast.
+      // De knoppen blijven uit (de transactie kan nog lopen), maar na deze tijd zegt de pagina
+      // wat de bediener kan doen. Ruim boven een gewone controle (30 s + 10 pogingen van 3 s).
+      const ACTION_LOCK_WARNING_MS = 180000;
+
+      function lockWarning() {
+        return (
+          "[waarschuwing] De knoppen staan al meer dan 3 minuten uit: de wallet of de RPC antwoordt niet. Je kunt de " +
+          "pagina herladen, maar de transactie is dan mogelijk toch verstuurd. Staat hierboven een regel 'Verstuurd. " +
+          "Signature: …', noteer die signature. Laat na het herladen eerst de keten lezen voordat je opnieuw klikt: " +
+          "verbind opnieuw en lees de voorstelstatus die de pagina dan meldt (na een Solflare-deep-link controleert de " +
+          "pagina een bewaarde signature bij het laden zelf opnieuw)."
+        );
       }
 
       function enableActionButtons() {
@@ -763,9 +870,15 @@
       async function withActionButtonsLocked(run) {
         actionButtons.locks++;
         refreshActionButtons();
+        let done = false;
+        const warning = setTimeout(() => {
+          if (!done) log(lockWarning(), "log-error");
+        }, ACTION_LOCK_WARNING_MS);
         try {
           return await run();
         } finally {
+          done = true;
+          clearTimeout(warning);
           actionButtons.locks--;
           refreshActionButtons();
         }
@@ -899,6 +1012,13 @@
 
       connectBtn.addEventListener("click", async () => {
         log("[debug] connect-btn geklikt - handler wordt uitgevoerd.", "log-debug");
+        // Sectie 173 (review §172, L-2): de knop staat uit tijdens een controle; dit vangt een klik
+        // die toch doorkomt.
+        if (actionButtons.locks > 0) {
+          log("[debug] genegeerd: er loopt nog een controle.", "log-debug");
+          return;
+        }
+        dropDeeplinkVerification("nieuwe verbinding");
         try {
           connectedWallet = await connectWallet();
           await finishConnectUI();
@@ -918,6 +1038,7 @@
         }
         clearDeeplinkSecretState();
         clearLastWalletMarker();
+        dropDeeplinkVerification("wisknop");
         connectedWallet = null;
         actionButtons.allowed = false;
         refreshActionButtons();
@@ -947,6 +1068,8 @@
             ") - vorige sessie/geheim wordt genegeerd/overschreven.",
           "log-debug"
         );
+        // Sectie 173 (review §172, M-1): een nieuwe verbinding ruimt een open te-controleren stand op.
+        dropDeeplinkVerification("nieuwe verbinding");
         const dappKeyPair = nacl.box.keyPair();
         saveDeeplinkState({
           dappSecretKey: Array.from(dappKeyPair.secretKey),
@@ -981,6 +1104,11 @@
 
       document.getElementById("connect-solflare-deeplink-btn").addEventListener("click", () => {
         log("[debug] connect-solflare-deeplink-btn geklikt.", "log-debug");
+        // Sectie 173 (review §172, L-3): niet wegnavigeren tijdens een controle.
+        if (actionButtons.locks > 0) {
+          log("[debug] genegeerd: er loopt nog een controle.", "log-debug");
+          return;
+        }
         try {
           beginFreshDeeplinkConnect(null);
         } catch (err) {
@@ -1071,6 +1199,8 @@
         return new VersionedTransaction(combinedMessage);
       }
 
+      // Sectie 173 (review §172, M-1): elke fout die deze functie zelf gooit, is een oordeel
+      // (verdictError); een fout van de RPC tijdens het herlezen niet.
       async function finishPropose(signature) {
         log("Verstuurd. Signature: " + signature);
         const result = await awaitConfirmation(signature, () => {
@@ -1099,7 +1229,7 @@
 
           if (settingsProblems.length > 0) {
             // Knop 2 blijft uit; of de eerdere transactie landde, is dan niet gecontroleerd.
-            throw new Error(
+            throw verdictError(
               "Kon niet controleren of transactie " + signature + " een voorstel aanmaakte. " + settingsRefusal(settingsProblems)
             );
           }
@@ -1108,7 +1238,7 @@
             const open = "voorstel #" + newest.index + " (status: " + newest.statusName + ")";
             if (result.outcome === "failed") {
               // Knop 2 blijft uit - er is al een open voorstel, maar niet van deze transactie.
-              throw new Error(
+              throw verdictError(
                 failed + "Wel staat " + open + " al open voor deze buffer; dat heeft deze transactie niet " +
                   "aangemaakt. Klik NIET opnieuw op '2. Voorstel indienen'; gebruik knop 3/4 op dat voorstel."
               );
@@ -1131,7 +1261,7 @@
           }
           if (problems.length > 0) {
             // Knop 2 blijft uit: onzeker is niet hetzelfde als "geen voorstel".
-            throw new Error(
+            throw verdictError(
               failed + "Kon niet vaststellen of transactie " + signature + " een voorstel aanmaakte: " + problems.join("; ") +
                 ". Herlaad de pagina voordat je opnieuw op '2. Voorstel indienen' klikt."
             );
@@ -1143,17 +1273,17 @@
           refreshActionButtons();
 
           if (result.outcome === "success") {
-            throw new Error(
+            throw verdictError(
               "Onverwacht: transactie " + signature + " lijkt on-chain geland (geen fout), maar er is " +
                 "geen voorstel voor deze buffer gevonden. Controleer dit handmatig (bijv. via een block " +
                 "explorer) voordat je opnieuw klikt."
             );
           }
           if (result.outcome === "failed") {
-            throw new Error(failed + "Er is geen voorstel voor deze buffer aangemaakt.");
+            throw verdictError(failed + "Er is geen voorstel voor deze buffer aangemaakt.");
           }
-          throw new Error(
-            "Er is (nog) geen voorstel voor deze buffer gevonden. " + notLandedYetAdvice(signature, "2. Voorstel indienen") +
+          throw verdictError(
+            "Er is (nog) geen voorstel voor deze buffer gevonden. " + notLandedYetAdvice(signature, "2. Voorstel indienen", "propose-btn") +
               " Een retry zonder dat te weten kan een overbodig, dubbel voorstel aanmaken."
           );
         }
@@ -1267,7 +1397,7 @@
         const result = await awaitConfirmation(signature);
 
         // Sectie 171: geen SUCCES tenzij de transactie aantoonbaar zonder fout landde.
-        requireLanded(result, signature, "3. Voorstel goedkeuren");
+        requireLanded(result, signature, "3. Voorstel goedkeuren", "approve-btn");
 
         const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
@@ -1306,7 +1436,7 @@
         const result = await awaitConfirmation(signature);
 
         // Sectie 171: geen SUCCES tenzij de transactie aantoonbaar zonder fout landde.
-        requireLanded(result, signature, "5. Voorstel afwijzen");
+        requireLanded(result, signature, "5. Voorstel afwijzen", "reject-btn");
 
         const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
         const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
@@ -1366,26 +1496,41 @@
 
       // Sectie 172 (review §171, L-5): transactionIndex is het voorstel dat buildSquadsExecuteTx
       // koos, ook na een deep-link-omleiding (pendingActionTransactionIndex). null alleen bij een
-      // deep-link-stand van vóór sectie 172: de controle loopt dan toch, en de uitkomst zegt dat
-      // het nummer ontbreekt.
+      // deep-link-stand van vóór sectie 172: de controle loopt dan toch.
+      // Sectie 173 (review §172, L-4): "SUCCES - voorstel #n uitgevoerd" pas als de signature
+      // zonder fout landde EN voorstel #n op de keten op Executed staat. De signature komt van de
+      // wallet; dat zij precies #n uitvoerde, toont alleen de stand van #n. Zonder nummer valt er
+      // niets terug te lezen: dan geen SUCCES.
       async function finishSquadsExecute(signature, transactionIndex) {
         const which = transactionIndex != null ? "voorstel #" + transactionIndex : null;
         log("Verstuurd" + (which ? " (uitvoeren van " + which + ")" : "") + ". Signature: " + signature);
         const result = await awaitConfirmation(signature);
 
         // Sectie 171: geen SUCCES tenzij de transactie aantoonbaar zonder fout landde.
-        requireLanded(result, signature, "4. Uitvoeren");
+        requireLanded(result, signature, "4. Uitvoeren", "squads-execute-btn");
 
         const proof =
           "Signature: " + signature + ". Dit is GEEN bewijs dat de upgrade klopt: draai nu EXECUTE_SIGNATURE=" +
           signature + " npx ts-node --transpile-only scripts/preUpgradeChecks.ts --post en de vijf " +
           "verificaties van STATUS.md sectie 95.";
-        log(
-          which
-            ? "SUCCES - " + which + " uitgevoerd (geland, zonder fout). " + proof
-            : "SUCCES - uitgevoerd (geland, zonder fout); welk voorstel is niet bewaard over de omleiding, " +
-                "--post stelt het vast. " + proof
-        );
+        if (!which) {
+          throw verdictError(
+            "Transactie " + signature + " is geland zonder fout, maar het voorstelnummer is niet bewaard: niet " +
+              "vastgesteld welk voorstel is uitgevoerd. Klik niet opnieuw op '4. Uitvoeren'; --post stelt het vast. " + proof
+          );
+        }
+        const [proposalPda] = multisig.getProposalPda({ multisigPda: MULTISIG_PDA, transactionIndex });
+        const proposal = await multisig.accounts.Proposal.fromAccountAddress(connection, proposalPda);
+        const kind = proposal.status.__kind;
+        if (kind !== "Executed") {
+          throw verdictError(
+            "Transactie " + signature + " is geland zonder fout, maar " + which + " staat op de keten op " + kind +
+              ", niet op Executed: niet vastgesteld dat " + which + " is uitgevoerd (een achterlopende RPC kan dit " +
+              "ook geven). Klik niet opnieuw op '4. Uitvoeren'; controleer de signature en de status van " + which +
+              " op de keten. " + proof
+          );
+        }
+        log("SUCCES - " + which + " uitgevoerd (geland, zonder fout; op de keten Executed). " + proof);
         clearDeeplinkSecretState();
       }
 
@@ -1814,41 +1959,37 @@
                 (state.pendingActionStartedAt || "onbekend tijdstip") + ".",
               "log-debug"
             );
+            const index = state.pendingActionTransactionIndex || null;
             state.pendingAction = null;
+
+            if (!Object.prototype.hasOwnProperty.call(VERIFY_ACTIONS, action)) {
+              saveDeeplinkState(state);
+              log("[debug] onbekende pendingAction bij terugkeer: " + action, "log-debug");
+              return;
+            }
+            if ((action === "approve" || action === "reject") && !index) {
+              saveDeeplinkState(state);
+              throw new Error(
+                "Kan de " + (action === "approve" ? "goedkeuring" : "afwijzing") + " niet afronden: onbekend welk " +
+                  "voorstel het betrof (pendingActionTransactionIndex ontbreekt in de bewaarde deep-link-status - " +
+                  "vermoedelijk een oudere, vóór deze fix gestarte actie). Controleer handmatig on-chain welk " +
+                  "voorstel zojuist " + (action === "approve" ? "goedgekeurd" : "afgewezen") + " is."
+              );
+            }
+            if (typeof responseData.signature !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(responseData.signature)) {
+              saveDeeplinkState(state);
+              throw new Error("Het antwoord van Solflare bevat geen geldige signature: " + JSON.stringify(responseData.signature));
+            }
+
+            // Sectie 173 (review §172, M-1): eerst de te controleren transactie bewaren, dan pas
+            // pendingAction wissen en controleren. Herlaadt de pagina tijdens de controle, dan
+            // controleert resumeAfterLoad bij het volgende laden opnieuw.
+            const verification = { action, signature: responseData.signature, transactionIndex: index, savedAt: Date.now() };
+            saveDeeplinkVerification(verification);
             saveDeeplinkState(state);
 
             if (!connectedWallet) await restoreDeeplinkSessionIfPresent();
-
-            if (action === "propose") await finishPropose(responseData.signature);
-            else if (action === "approve") {
-              if (!state.pendingActionTransactionIndex) {
-                throw new Error(
-                  "Kan de goedkeuring niet afronden: onbekend welk voorstel het betrof " +
-                    "(pendingActionTransactionIndex ontbreekt in de bewaarde deep-link-status - " +
-                    "vermoedelijk een oudere, vóór deze fix gestarte actie). Controleer handmatig on-chain " +
-                    "welk voorstel zojuist goedgekeurd is."
-                );
-              }
-              await finishApprove(responseData.signature, BigInt(state.pendingActionTransactionIndex));
-            }
-            else if (action === "execute") {
-              await finishSquadsExecute(
-                responseData.signature,
-                state.pendingActionTransactionIndex ? BigInt(state.pendingActionTransactionIndex) : null
-              );
-            }
-            else if (action === "reject") {
-              if (!state.pendingActionTransactionIndex) {
-                throw new Error(
-                  "Kan de afwijzing niet afronden: onbekend welk voorstel het betrof " +
-                    "(pendingActionTransactionIndex ontbreekt in de bewaarde deep-link-status - " +
-                    "vermoedelijk een oudere, vóór deze fix gestarte actie). Controleer handmatig on-chain " +
-                    "welk voorstel zojuist afgewezen is."
-                );
-              }
-              await finishReject(responseData.signature, BigInt(state.pendingActionTransactionIndex));
-            }
-            else log("[debug] onbekende pendingAction bij terugkeer: " + action, "log-debug");
+            await verifyDeeplinkSignature(verification);
           }
         } catch (err) {
           logFullError("deeplink-resume (" + action + ")", err);
@@ -1859,14 +2000,57 @@
         }
       }
 
+      // Sectie 173 (review §172, M-1): controleert een bewaarde deep-link-transactie en wist de
+      // stand na een oordeel (succes, of een verdictError: mislukt, onbekend, niet vastgesteld).
+      // Na elke andere fout (de RPC faalt) blijft de stand staan voor het volgende laden.
+      async function verifyDeeplinkSignature(verification) {
+        const { action, signature } = verification;
+        const index = verification.transactionIndex !== null ? BigInt(verification.transactionIndex) : null;
+        try {
+          if (action === "propose") await finishPropose(signature);
+          else if (action === "approve") await finishApprove(signature, index);
+          else if (action === "execute") await finishSquadsExecute(signature, index);
+          else await finishReject(signature, index);
+        } catch (err) {
+          if (err && err.verdict) {
+            clearDeeplinkVerification();
+          } else {
+            log(
+              "[waarschuwing] De controle van transactie " + signature + " ('" + VERIFY_ACTIONS[action] + "') is niet " +
+                "afgerond: " + (err && err.message ? err.message : String(err)) + ". De transactie blijft bewaard en " +
+                "wordt bij het volgende laden opnieuw gecontroleerd (tot 30 minuten na de terugkeer uit Solflare). " +
+                "Klik niet opnieuw op '" + VERIFY_ACTIONS[action] + "'; herlaad de pagina.",
+              "log-error"
+            );
+          }
+          throw err;
+        }
+        clearDeeplinkVerification();
+      }
+
       // Sectie 172 (review §171, L-1): de knoppen staan uit vanaf het laden tot een eventuele
       // deep-link-hervatting (inclusief de controle van de verstuurde transactie) klaar is.
       // Zonder dit zette finishConnectUI ze aan vóórdat resumeDeeplinkIfNeeded de controle
       // startte, en een klik daartussen navigeerde weg en verloor de uitkomst.
+      // Sectie 173 (review §172, M-1): eerst een controle die bij het vorige laden niet afkwam.
       async function resumeAfterLoad() {
         await withActionButtonsLocked(async () => {
           if (!(await restoreDeeplinkSessionIfPresent())) {
             log("[debug] geen eerder-opgeslagen Solflare-deep-link-sessie in deze tab.", "log-debug");
+          }
+          const pending = loadDeeplinkVerification();
+          if (pending) {
+            log(
+              "De controle van transactie " + pending.signature + " ('" + VERIFY_ACTIONS[pending.action] + "'" +
+                (pending.transactionIndex !== null ? ", voorstel #" + pending.transactionIndex : "") + ", terug uit " +
+                "Solflare om " + new Date(pending.savedAt).toLocaleTimeString("nl-NL", { hour12: false }) + ") was niet " +
+                "afgerond. Ik controleer haar nu opnieuw - klik niet terwijl dit loopt."
+            );
+            try {
+              await verifyDeeplinkSignature(pending);
+            } catch (err) {
+              logFullError("hercontrole na herladen (" + pending.action + ")", err);
+            }
           }
           await resumeDeeplinkIfNeeded();
         });

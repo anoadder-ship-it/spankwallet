@@ -17279,3 +17279,207 @@ bestaat nog niet; `7jvi…` ook niet), authority naar de vault, en vlak vóór k
 geen Active-restant intussen goedgekeurd is. Aanbevolen: de restanten #1-4, 6 en 7 afwijzen
 met knop 5. Bij knop 4 via de deep-link: het nummer in "SUCCES - voorstel #n uitgevoerd"
 moet het `<n>` van de pre-flight zijn. Sectie 172 vraagt een review door een verse sessie.
+
+## 173. Opvolging review §172: de controle overleeft herladen, een uitweg uit het slot, knop 4 leest terug; laatste ronde aan de adminpagina (2026-09-30)
+
+Review van §172 (`89bb15d`) door een verse sessie, 2026-09-30. Oordeel: geen onterecht succes
+op welke route ook, en het slot wordt op elk pad dat afloopt opgeheven (`finally`); de
+desktop-extensieroute is bruikbaar, de Solflare-deep-link-route pas na M-1. Bevindingen:
+
+- **M-1** op de deep-link-route zette de pagina `pendingAction = null` vóór de controle, en
+  bewaarde de signature nergens. Herladen (of een tabblad dat MIUI/HyperOS afsluit) midden in
+  de controle verloor de uitkomst zonder melding; de knoppen stonden daarna gewoon aan;
+- **L-1** geen tijdslimiet op het slot: een wallet-popup of RPC die niet antwoordt, hield knop
+  2-5 (dus ook 5) uit tot herladen, en de pagina zei dat niet;
+- **L-2** verbinden (knop 1) tijdens een controle zette `proposeHeldOff` terug: na afloop stond
+  knop 2 aan terwijl er een voorstel open stond (de klikcontrole weigerde nog wel);
+- **L-3** knop 1b viel niet onder het slot en navigeerde tijdens de controle weg;
+- **L-4** "SUCCES - voorstel #n uitgevoerd" zonder #n terug te lezen: de fixture van de
+  §172-test had #15 op Approved, en de pagina meldde toch "uitgevoerd";
+- **L-5** bij een onbekende uitkomst stonden de knoppen meteen weer aan, terwijl de tekst zei
+  te wachten tot een tijdstip;
+- mutaties die geen test deden falen: **B** knop 2 altijd aan bij ontgrendelen, **C**
+  ontgrendelen zonder verbonden lid, **H** `proposeHeldOff` niet gezet zonder time-out, en het
+  tijdstip in de melding op "nu".
+
+Deze sectie bouwt M-1, L-1 tot en met L-5 en tests voor B, C en H. Geen wijziging aan het
+programma, `admin/upgradeProposalCheck.mjs` of de scripts. **Dit is bewust de laatste ronde
+aan de adminpagina** (punt 7).
+
+### 1. De pagina (`admin/wallet-signer.html`)
+
+- **M-1, te controleren transactie.** Na een terugkeer uit Solflare bewaart de pagina
+  `{ action, signature, transactionIndex, savedAt }` onder
+  `spankwallet_solflare_deeplink_verify`, direct na het ontsleutelen en vóór de controle (de
+  signature moet base58 zijn, 64-88 tekens; approve/reject vereisen een nummer, als voorheen).
+  `verifyDeeplinkSignature` roept de `finish*`-functie aan en wist de stand pas na een
+  **oordeel**: succes, of een `verdictError` (mislukt, onbekend, niet vastgesteld; alle fouten
+  die `requireLanded`, `finishPropose` en `finishSquadsExecute` zelf gooien). Na elke andere
+  fout (de RPC faalt bij het herlezen of teruglezen) blijft de stand staan, met de melding dat
+  het volgende laden opnieuw controleert. `resumeAfterLoad` controleert eerst zo'n stand,
+  binnen het slot, en meldt vooraf welke transactie het is. De stand verloopt na 30 minuten
+  (`DEEPLINK_SESSION_MAX_AGE_MS`, zoals de andere); een verlopen, onleesbare of onvolledige
+  stand wordt gewist zonder controle. Een nieuwe verbinding (knop 1, 1b of een actieknop op
+  de deep-link-route, via `beginFreshDeeplinkConnect`) en de wisknop ruimen hem op. Elk wissen
+  zonder controle zet de volledige stand, met de signature, in de log: de pagina heeft die
+  signature dan niet beoordeeld, en koppelt haar nooit aan een latere actie.
+- **L-2/L-3, verbindknoppen onder het slot.** `actionButtons.connectIds`: knop 1 en 1b staan
+  uit zolang er een slot is, ook tijdens `resumeAfterLoad`, en hun handlers negeren een klik
+  tijdens een slot. De wisknop blijft bewust bruikbaar.
+- **L-1, uitweg.** `withActionButtonsLocked` zet een timer van 3 minuten
+  (`ACTION_LOCK_WARNING_MS`, ruim boven een gewone controle van 30 s plus tien pogingen van
+  3 s). Loopt het slot dan nog, dan meldt de pagina dat herladen kan, dat de transactie dan
+  mogelijk toch verstuurd is (noteer de signature uit "Verstuurd. Signature: …" als die er
+  staat), en dat de bediener na het herladen eerst de keten laat lezen (opnieuw verbinden en
+  de voorstelstatus lezen; na een deep-link controleert de pagina de bewaarde signature zelf).
+  De knoppen blijven uit: de transactie kan nog lopen. Na afloop van het slot geeft de timer
+  geen melding.
+- **L-4, knop 4 leest terug.** Na "geland zonder fout" leest `finishSquadsExecute` voorstel #n
+  van de keten (commitment `confirmed`, zoals de verbinding) en meldt "SUCCES - voorstel #n
+  uitgevoerd (geland, zonder fout; op de keten Executed)" alleen als de status `Executed` is.
+  Anders: "niet vastgesteld", met de gelezen status, en de opmerking dat een achterlopende
+  RPC dit ook kan geven. Zonder nummer (een stand van vóór §172) valt er niets terug te lezen:
+  geen SUCCES meer, maar "geland zonder fout, niet vastgesteld welk voorstel". Knop 3 en 5
+  lezen ongewijzigd alleen de status terug om te tonen.
+- **L-5, knop uit tot het tijdstip.** `notLandedYetAdvice` neemt de knop mee en zet
+  `actionButtons.heldUntil`; die knop blijft uit tot hetzelfde tijdstip dat de melding noemt,
+  ook na opnieuw verbinden, en gaat daarna vanzelf terug. De andere knoppen gaan na het slot
+  gewoon aan. Knop 2 zonder gevonden voorstel valt hier ook onder.
+- `PAGE_BUILD` = `2026-09-30T22:00:00Z-sectie-173-controle-overleeft-herladen`.
+
+### 2. Tests (`tests/unit/adminPageSelection.ts`)
+
+Harnas: de opgenomen knopstanden omvatten nu ook knop 1 en 1b (`LOCKED_BUTTONS`); timers van
+een minuut of langer worden bewaard (`longTimers`) zodat een test ze zelf laat aflopen; een
+verstelbare klok (`clock`, een `Date` voor de pagina); `afterSend` verandert de keten zodra de
+wallet verstuurt (knop 4: #15 wordt Executed); `DEEPLINK_VERIFY_KEY`.
+
+Nieuw (24):
+- **M-1** per knop 2-5: de eerste lading ontsleutelt het antwoord, bewaart de stand (actie,
+  signature, nummer, tijdstip) en blijft hangen in `confirmTransaction`; de tweede lading, met
+  dezelfde opslag en dezelfde URL, controleert precies die signature, meldt SUCCES, wist de
+  stand, heeft alle zes knoppen uit tijdens de controle en daarna aan. Verder: na herladen
+  mislukt (MISLUKT, gewist, knoppen aan); na herladen onbekend (advies met tijdstip, gewist,
+  alleen knop 4 uit); de RPC faalt bij het teruglezen (geen SUCCES, stand blijft); een verlopen
+  stand (niet gecontroleerd, gewist, signature genoemd); een stand van een andere actie (knop 3
+  wordt als goedkeuren gemeld, niet als uitvoeren); een nieuwe verbinding ruimt op en noemt de
+  signature; een ongeldige stand wordt gewist zonder controle;
+- **L-2 / mutaties B en H**: knop 2 na een mislukking via de websocket, na status null (beide
+  zonder time-out) en na een time-out, met een open voorstel: na het ontgrendelen staat alleen
+  knop 2 uit;
+- **L-2/L-3**: tijdens de controle na een deep-link-terugkeer staan ook 1 en 1b uit;
+- **mutatie C**: ontgrendelen zonder verbonden lid laat de actieknoppen uit; na een
+  deep-link-terugkeer van een adres dat geen lid is, blijven ze na de controle uit;
+- **L-1**: een wallet die nooit antwoordt: alle knoppen uit, en na de timer de melding
+  (herladen, mogelijk toch verstuurd, eerst de keten); na een gewone controle geen melding;
+- **L-4**: #15 blijft Approved na een gelande uitvoering (direct, via de deep-link en via de
+  extensie): geen SUCCES, wel "niet vastgesteld";
+- **L-5**: knop 3 onbekend: alleen knop 3 uit, ook na opnieuw verbinden en één seconde vóór het
+  tijdstip; daarna aan; het tijdstip in de melding is klok + 2 minuten. Knop 2 onbekend zonder
+  voorstel: idem voor knop 2.
+
+Aangepast: de succestests van knop 4 gebruiken #15 op Executed (de L-1-extensietest via
+`afterSend`); de test "oudere stand zonder nummer" verwacht geen SUCCES meer; de regex van de
+knop-4-uitkomst volgt de nieuwe tekst; `allOff`/`allOn` omvatten 1 en 1b.
+
+### 3. Rood vóór groen
+
+Alle nieuwe en aangepaste tests tegen de pagina van §172: **32 failing**, elk om de bedoelde
+reden:
+
+| Aantal | Reden |
+|---|---|
+| 15 | 1 en 1b aan tijdens de controle (10 bestaande L-1/L-2-tests, 4 nieuwe, de hang-test) |
+| 11 | M-1: geen te-controleren stand bewaard, niet opnieuw gecontroleerd of niet opgeruimd |
+| 4 | L-4: SUCCES bij #15 Approved (3), en bij een stand zonder nummer (1) |
+| 2 | L-5: de betrokken knop stond meteen weer aan |
+
+Drie nieuwe tests waren tegen §172 al groen (mutatie C twee keer, en "na een gewone controle
+geen melding"): regressiebescherming. Twee fouten in de eerste versie van de nieuwe tests zelf
+(de gevendorde web3 exporteert geen `Keypair`; knop 3 vergt een Active-fixture) zijn vóór deze
+telling hersteld.
+
+Na de reparatie: `yarn test:unit` 252/0 (was 228, +24). Twee regexen in de tests zijn daarbij
+op de uiteindelijke tekst gezet ("; op de keten Executed", "pagina herladen").
+
+### 4. Mutatiecontrole
+
+Op een kopie buiten de repo (scratchpad), steeds één mutatie in `wallet-signer.html`, daarna
+`yarn test:unit`. De repo zelf is niet gemuteerd.
+
+| Mutatie | Failing |
+|---|---|
+| slot niet opgeheven bij een fout (geen `finally`) | 4 |
+| **B** knop 2 altijd aan bij ontgrendelen | 3 |
+| **C** ontgrendelen negeert `allowed` | 2 |
+| **H** `proposeHeldOff` niet gezet zonder time-out | 2 |
+| voorstelnummer uit een oude stand: `index - 1` opgeslagen | 1 |
+| voorstelnummer uit een oude stand: vast #14 bij de hercontrole | 10 |
+| oude te-controleren stand verloopt nooit | 1 |
+| nieuwe verbinding ruimt de stand niet op | 1 |
+| te-controleren stand nooit gewist | 10 |
+| stand niet vóór de controle bewaard | 7 |
+| stand ook gewist na een RPC-fout (geen oordeel) | 1 |
+| geen hercontrole bij het laden | 10 |
+| terugleesstuk van knop 4 weggelaten | 3 |
+| 1 en 1b niet onder het slot | 19 |
+| geen melding bij een hangend slot | 1 |
+| slotmelding ook na afloop | 1 |
+| onbekend: knop niet uit tot het tijdstip | 3 |
+| onbekend: opnieuw verbinden heft de wachttijd op | 1 |
+
+Elke mutatie geeft failing.
+
+### 5. Wat de bediener doet (bedieningsregels)
+
+Vastgelegd in `docs/upgradevoorstel-sjabloon.md` §3 en `admin/README.md`:
+- tijdens een controle niets klikken, en de pagina niet sluiten of herladen. Pas als de pagina
+  na 3 minuten zelf zegt dat herladen kan, herladen, en dan eerst de keten laten lezen;
+- na elke stap via de Solflare-deep-link (goedkeuren, afwijzen, en ook indienen) de uitkomst
+  op de keten laten lezen: opnieuw verbinden en de voorstelstatus lezen die de pagina meldt,
+  of de signature in een block explorer. Een melding "gewist zonder controle" noemt een
+  signature die de pagina niet beoordeeld heeft;
+- uitvoeren (knop 4) bij voorkeur via de desktop-extensieroute;
+- na "niet vastgesteld" wachten tot het genoemde tijdstip (de knop staat tot dan uit), en na
+  een herlaad dat tijdstip zelf aanhouden (punt 6).
+
+### 6. Open, en bevriezing
+
+**De pagina is na deze ronde bevroren.** Alleen een bevinding die een verkeerde transactie of
+een onterecht succes kan veroorzaken, leidt nog tot een wijziging; al het andere wordt een
+bedieningsregel in het sjabloon. Bewust niet gebouwd (bedieningsregel of acceptabel):
+- de wachttijd van L-5 staat alleen in het geheugen van de pagina; na herladen staat de knop
+  weer aan. De keten vangt een te vroege klik (tweede goedkeuring of afwijzing faalt, een
+  tweede uitvoering faalt, een tweede voorstel botst op hetzelfde nummer); regel: het genoemde
+  tijdstip zelf aanhouden;
+- faalt de RPC al bij het lidmaatschap tijdens het laden (review §172, P1), dan stopt het
+  module-script vóór de hercontrole; de stand en de URL blijven, dus herladen als de RPC weer
+  antwoordt controleert alsnog;
+- de melding bij een hangend slot heft het slot niet op; herladen is de uitweg;
+- knop 3 en 5 lezen niet terug of het lid in `approved`/`rejected` staat (L-4 uit §172 blijft
+  daarvoor open); ze tonen de gelezen status wel, en `--post` plus sectie 95 blijven het bewijs
+  voor de upgrade.
+
+### 7. Regressie
+
+| Suite | Uitkomst | Baseline (sectie 172) |
+|---|---|---|
+| `cargo test` | 13/0 | 13/0 |
+| `yarn test` | 377 passing, 119 pending, 0 failing | 353/119/0; +24 (alle in `adminPageSelection.ts`) |
+| `yarn test:pending-action` | 116/0 (1 pending) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 | 117/0 |
+| `yarn test:unit` | 252/0 | 228/0 (+24, idem) |
+
+`yarn test:pending-action` gaf in de eerste, aaneengesloten run exit 1 zonder één test te
+draaien: mocha startte vóór de validator luisterde (`ECONNREFUSED 127.0.0.1:8899`, direct na
+de validator van `yarn test`). Los opnieuw gedraaid: 116/0. Typecontrole: strikte
+`tsc --noEmit` over `tests/unit/adminPageSelection.ts`: schoon. `node --check` op het
+module-script van de pagina: schoon. De server op poort 8766 levert `wallet-signer.html`
+byte-identiek aan de werkmap (sha256 `1c3f614f…`).
+
+### 8. Voor upgrade 1
+
+Ongewijzigd uit §172 punt 8. Knop 4 bij voorkeur via de desktop-extensie; het nummer in
+"SUCCES - voorstel #n uitgevoerd" moet het `<n>` van de pre-flight zijn, en die melding
+verschijnt nu alleen als #n op de keten Executed is. Sectie 173 vraagt een review door een
+verse sessie.

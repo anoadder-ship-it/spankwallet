@@ -17588,3 +17588,43 @@ geen lid een eigen goedkeuring hoeft te herroepen:
 
 **Niet vastgesteld:** of een lid dat een voorstel al goedkeurde, het daarna nog kan afwijzen
 (of Squads v4 de goedkeuring dan vervangt). De verdeling hierboven hangt daar niet van af.
+
+## 176. Aanvulling: de zes oude voorstellen afgewezen; eindstand van alle voorstellen (2026-10-02)
+
+**Eindstand, gelezen 2026-10-02 22:04 UTC** (slot 506778559 confirmed; stemmen en geschiedenis
+nagelezen op finalized, slot 506778645; alleen lezen, `voorstellen.mjs` in de privénotities
+plus de transacties van de zes proposal-accounts):
+- Rejected: #1, 2, 3, 4, 6, 7, 9, 12, 14; Executed: #5, 10, 11, 13; Cancelled: #8; #15 bestaat
+  niet. Niets staat op Active, Approved of Executing; geen blockers voor knop 3/4 en de
+  pre-flight (§169);
+- `transactionIndex` 14, threshold 2, time_lock 259200 s, stale 0, leden `2jDz…`, `3zZc…`,
+  `CP2f…`; de multisig is autonoom (config_authority is het nuladres).
+
+**Wie heeft afgewezen** (elke afwijzing is één geslaagde `ProposalReject`, ondertekend door
+het lid zelf; tijden in UTC op 2026-10-01):
+
+| # | Afgewezen door | Rejected sinds | Goedkeuring die blijft staan |
+|---|---|---|---|
+| 1 | `2jDz…` (11:29:20), `CP2f…` (11:31:03) | 11:31:03, slot 506257676 | `3zZc…` |
+| 2 | `2jDz…` (11:38:30), `3zZc…` (12:49:50) | 12:49:50, slot 506277869 | geen |
+| 3 | `2jDz…` (11:42:06), `3zZc…` (12:02:14) | 12:02:14, slot 506265679 | `CP2f…` |
+| 4 | `2jDz…` (11:43:09), `3zZc…` (12:03:01) | 12:03:01, slot 506265875 | `CP2f…` |
+| 6 | `2jDz…` (11:43:41), `3zZc…` (12:04:26) | 12:04:26, slot 506266237 | geen |
+| 7 | `2jDz…` (11:43:59), `3zZc…` (12:04:54) | 12:04:54, slot 506266356 | geen |
+
+Dit komt overeen met de mededeling van Michel (#1 door `2jDz…` en `CP2f…`; #2, 3, 4, 6, 7
+door `2jDz…` en `3zZc…`); geen verschil met de keten. Het wijkt af van de verdeling in §175:
+daar zou `CP2f…` ook #2 afwijzen, dat deed `3zZc…`.
+
+**Van goedkeuren naar afwijzen kan.** #2 was door `3zZc…` goedgekeurd (2026-08-11, slot
+483031410; §175 las die goedkeuring nog). Na de afwijzing door `3zZc…` zelf (slot 506277869)
+is `approved` van #2 leeg en staat `3zZc…` onder `rejected`: Squads v4 vervangt de
+goedkeuring van een lid door zijn afwijzing. Het punt "niet vastgesteld" aan het eind van
+§175 vervalt daarmee.
+
+**Route** (mededeling van Michel, niet uit de keten af te lezen): de stemmen van `2jDz…` en
+`3zZc…` zijn via de desktop-extensieroute gegeven.
+
+**Open punt, vóór echt geld:** de drie ondertekenaars verdelen over drie aparte apparaten,
+bij voorkeur één hardwarewallet. Dat gaat via voorstellen van de multisig zelf, en pas na
+upgrade 1: een goedgekeurd configuratievoorstel blokkeert de poort (§169).

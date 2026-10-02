@@ -17628,3 +17628,35 @@ goedkeuring van een lid door zijn afwijzing. Het punt "niet vastgesteld" aan het
 **Open punt, vóór echt geld:** de drie ondertekenaars verdelen over drie aparte apparaten,
 bij voorkeur één hardwarewallet. Dat gaat via voorstellen van de multisig zelf, en pas na
 upgrade 1: een goedgekeurd configuratievoorstel blokkeert de poort (§169).
+
+## 177. Aanvulling: buffer-authority van upgrade 1 overgedragen aan de vault (2026-10-02)
+
+**Overdracht.** De authority van buffer `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5` is van
+de operatorsleutel `G1qgHzMxNHqewWEKzEoV46GUXjDrsuD4P8LQ97T6gNXp` overgegaan op de vault
+`89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`. Transactie
+`51bwiK7ZYmU3LDenpn8xgUbMbJNvGzZNthVVnpJqcL7K22C7ZCrZv8Ni1WZtXV6kVpxbJQqPgj2NMvtDrpM82BB8`,
+slot 506780254 (2026-10-02 22:11:31 UTC), finalized, status Ok: één instructie van de
+upgradeable loader (`SetAuthority`, data `04000000`), ondertekend door `G1qg…`, log
+"New authority Some(89MEwqhf…)". Direct ervoor (slot 506780219) stonden #1, 2, 3, 4, 6 en 7 nog
+op Rejected en stond niets op Active, Approved of Executing.
+
+**Controle achteraf** (alleen lezen, finalized):
+- CLI (`solana program show`): authority `89MEwqhf…`, saldo 3,7452046 SOL, 737.080 bytes;
+- `check_buffer.py` (privénotities; de verwachte authority is nu een argument) op een verse
+  dump, met de vault als verwachte authority: GROEN (variant Buffer, authority Some en gelijk
+  aan de vault, sha256 `33598b3d…` over 737.080 bytes, rest 0 bytes);
+- tegenproef: hetzelfde script met `G1qg…` als verwachte authority geeft nu ROOD (alleen de
+  authority-regel). Vóór de overdracht was dat omgekeerd: groen met `G1qg…`, rood met de vault;
+- `bufferProblems` (`scripts/lib/upgradeBuffer.ts`, de functie van de pre-flight, met dezelfde
+  verwachting als `checkProposalTimelock.ts`), slot 506780425: 0 afwijkingen. Vóór de
+  overdracht (slot 506779133) precies één: de authority.
+
+**Het programma zelf is ongewijzigd:** `9ma6…`, authority de vault, laatst gedeployed in slot
+501303135.
+
+**Gevolgen.** `G1qg…` kan de buffer niet meer wijzigen, sluiten of opnieuw overdragen; dat
+kan alleen nog via een voorstel van de multisig (2 van 3, 72 uur). De huur van de buffer
+(3,7452046 SOL, precies het rent-vrije minimum voor 737.117 bytes) gaat bij het uitvoeren van
+de upgrade naar het spill-adres van het voorstel, en dat moet volgens de pre-flight de vault
+zijn (§167); zij komt dus niet terug bij de operatorsleutel. Dat is de werking van de loader,
+niet iets wat nu op de keten te lezen is.

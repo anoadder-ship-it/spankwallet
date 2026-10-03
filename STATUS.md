@@ -17660,3 +17660,53 @@ kan alleen nog via een voorstel van de multisig (2 van 3, 72 uur). De huur van d
 de upgrade naar het spill-adres van het voorstel, en dat moet volgens de pre-flight de vault
 zijn (§167); zij komt dus niet terug bij de operatorsleutel. Dat is de werking van de loader,
 niet iets wat nu op de keten te lezen is.
+
+## 178. Aanvulling: voorstel #15 (upgrade 1) ingediend en goedgekeurd; de timelock loopt (2026-10-02)
+
+**Verloop** (alle drie transacties finalized, status Ok; tijden in UTC op 2026-10-02):
+
+| Tijd | Slot | Instructie | Ondertekenaar | Handtekening |
+|---|---|---|---|---|
+| 22:20:01 | 506782349 | `VaultTransactionCreate` + `ProposalCreate` (knop 2) | `2jDz…` | `5gfg3jiEdhMUVWtdqs9jYtrD7wV7nmbzoFHLdvx7DwVQ96rcpiULd1pbeN9bry5dxDJtvDhK2hi7t17AjopfCnfb` |
+| 22:22:46 | 506783024 | `ProposalApprove` | `2jDz…` | `3LpYFsvkDdHqUviRASrWH2Vdkqzn6EXGQyEBD724vESn4pcCCnbCqcu8fCyBf3CDhA4Nzh8Eq54geXHG4GSgLa1c` |
+| 22:23:40 | 506783244 | `ProposalApprove` | `3zZc…` | `XQGpjEzagQXmRm1vzQ6espa3JRfxBU94qaYckxPqKnGbmuHRrBFHnjSgBAhu37vVdsfDNReskshgL7p2QLmddLm` |
+
+De indientransactie bevat precies één `VaultTransactionCreate` (log "transaction index: 15")
+en één `ProposalCreate`, verder alleen twee ComputeBudget-instructies; memo "SpankWallet
+upgrade 1 (STATUS.md sectie 153-162, build 33598b3d)". Sinds #14 is alleen #15 bijgekomen
+(`transactionIndex` 15, #16 bestaat niet). Proposal `GEB8Yv3YphjPLFhK6fEgaZtL5bTENcbPRBQKRN6wP8fn`,
+VaultTransaction `DpDcb5TQDYPV2KoPa4JViya19ftSdQPktZ5AHHz6rR4g`.
+
+**Stand.** #15 staat sinds 22:23:40 UTC (unix 1790979820) op Approved, `approved` = `2jDz…`,
+`3zZc…`, `rejected` en `cancelled` leeg. Vroegst mogelijke uitvoering: 2026-10-05 22:23:40 UTC
+(2026-10-06 00:23:40 CEST; unix 1791239020). Geen ander voorstel op Active, Approved of
+Executing.
+
+**Afwijking van de afgesproken volgorde.** De afspraak was: indienen, dan de onafhankelijke
+controle, dan pas goedkeuren. Beide goedkeuringen zijn gegeven vóórdat die controle draaide
+(22:26:52 UTC, slot 506784028). Volgens de mededeling van Michel gaf hij ze zelf: de stemmen
+van `2jDz…` en `3zZc…` zijn via de desktop-extensieroute gegeven (zoals in §176). De controle is dus
+achteraf gedaan, niet vooraf; zij vond geen afwijking, maar heeft de goedkeuringen niet
+kunnen tegenhouden als dat wel zo was geweest.
+
+**Onafhankelijke controle achteraf** (`controleVoorstel.mjs 15` in de privénotities; leest
+met de SDK-deserializers, niet met `admin/upgradeProposalCheck.mjs`): exit 0, alle 22
+controles OK. Precies één instructie van de upgradeable loader, data `03000000` (Upgrade),
+zeven accounts: programdata `5bqc…`, programma `9ma6…`, buffer `F5nh…`, spill de vault, rent,
+clock, authority de vault als enige ondertekenaar; vault-index 0, geen lookup-tables, geen
+ephemeral signers, geen bytes na de structuur. VaultTransaction-account 346 bytes, sha256
+`079959ae413d567398c15c2622b56af98da27186131393402e0511ec7bcebfb4`; Proposal-account 358 bytes,
+sha256 `609d7e7e1fcf41f34dfdb18b752e9c6546d43562e79f5e7ffdde55539ba7fa51` (verandert bij elke
+stem).
+
+**Buffer en programma** (finalized, slot 506784040): buffer `F5nh…` authority de vault,
+sha256 `33598b3d…` over 737.080 bytes, rest 0 bytes (`check_buffer.py` groen, `bufferProblems`
+0 afwijkingen); programma `9ma6…` authority de vault, laatst gedeployed in slot 501303135.
+
+**Pre-flight-proef** (`TRANSACTION_INDEX=15 … preUpgradeChecks.ts --pre`, 22:30:57 UTC volgens
+de Clock-sysvar, slot 506785035): ROOD, exit 1, met als enige reden "TIMELOCK NIET
+VERSTREKEN" (nog 258.763 s). Alle eerdere toetsen van stap 1 waren groen: instellingen van de
+multisig, #15 het laatste en enige uitvoerbare voorstel, precies deze upgrade, de buffer.
+Stap 2 draait dan niet (het script stopt bij de eerste fout); los gedraaid
+(`checkRecoveryQueueInvariant.ts --pre`, slot 506785351) is zij groen: 19 wallets, 19 vaults,
+0 PendingActions, 1 wallet met een lopende recovery (`5MoX…`, §165).

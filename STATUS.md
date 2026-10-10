@@ -17710,3 +17710,132 @@ multisig, #15 het laatste en enige uitvoerbare voorstel, precies deze upgrade, d
 Stap 2 draait dan niet (het script stopt bij de eerste fout); los gedraaid
 (`checkRecoveryQueueInvariant.ts --pre`, slot 506785351) is zij groen: 19 wallets, 19 vaults,
 0 PendingActions, 1 wallet met een lopende recovery (`5MoX…`, §165).
+
+## 179. Knop 4 gaf de wallet een Promise: één ontbrekende `await` (uitzondering op de bevriezing van §173) (2026-10-10)
+
+**Wat er gebeurde.** Op 2026-10-08 faalde knop 4 bij stap (c) van het draaiboek van upgrade 1,
+via de desktop-extensieroute, met `versionedTx.serialize is not a function`. Die melding komt
+uit de `signAndSendTransaction`-wrapper van `connectWallet`, vóór de aanroep van de wallet: er
+is niets ondertekend of verstuurd, er is geen signature, en (d)/(e) stopten op "EXECUTE_SIGNATURE
+ontbreekt". #15 staat nog op Approved (finalized gelezen 2026-10-10, slot 509601231, goedgekeurd
+door `2jDz…` en `3zZc…`, `transactionIndex` 15); de VaultTransaction is onveranderd (346 bytes,
+sha256 `079959ae…`, gelijk aan §178).
+
+**Oorzaak.** `multisig.transactions.vaultTransactionExecute` is in de gevendorde SDK een
+async-functie: hij leest eerst de VaultTransaction. `buildSquadsExecuteTx`
+(`admin/wallet-signer.html:1485`) riep hem aan zonder `await` en gaf dus een Promise door als
+`tx`; `runExecuteAction` gaf die aan de wallet-wrapper, die `versionedTx.serialize()` aanroept.
+Het deep-link-pad van de pagina (`startDeeplinkSignAndSend`, regel 1568) roept ook
+`versionedTx.serialize()` aan; daar is de fout niet in de praktijk gezien, maar de tests hieronder
+falen er op dezelfde manier.
+
+**Geïntroduceerd in `89bb15d`** (§172, review §171 L-5). Daarvóór stond er
+`return multisig.transactions.vaultTransactionExecute({…})` in de async-functie; een
+teruggegeven Promise wordt vanzelf afgewacht, dus dat werkte. §172 maakte er
+`const tx = …; return { tx, transactionIndex }` van (het voorstelnummer moest mee), en vanaf
+dan zat de Promise zelf in `tx`. `8a89572` (§173) en de review van §174 zagen het niet; de pagina
+is sinds `89bb15d` op beide paden onbruikbaar voor knop 4.
+
+**Waarom de tests het niet zagen.** Het harnas van `tests/unit/adminPageSelection.ts` verving
+`vaultTransactionExecute` sinds `ffb396b` (§168) door een **synchrone** nep, die direct een
+object teruggaf; met de `return` van vóór §172 maakte dat niets uit, na §172 verborg het de fout.
+En de nep-wallet raakte de transactie niet aan (riep geen `serialize()` aan). Elke knop-4-test
+werkte dus met een harnas dat op precies dit punt van de echte SDK en de echte wrapper afweek.
+
+**Wijziging aan de pagina** (alleen dit, na het besluit van Michel hieronder):
+```
+-        const tx = multisig.transactions.vaultTransactionExecute({
++        const tx = await multisig.transactions.vaultTransactionExecute({
+```
+en `PAGE_BUILD` van `2026-09-30T22:00:00Z-sectie-173-controle-overleeft-herladen` naar
+`2026-10-10T16:00:00Z-sectie-179-knop4-await`. Pagina sha256 `2dcfb299fba176fc…` (was
+`1c3f614f…`).
+
+**Wijziging aan de tests.**
+- De nep-bouwers krijgen dezelfde vorm als de gevendorde SDK-functie: async als die async is
+  (`vaultTransactionExecute`), synchroon als die synchroon is (`proposalApprove`).
+- De nep-wallet doet wat de echte wrapper doet: `versionedTx.serialize()`, en bewaart het
+  argument (`walletTxs`).
+- Nieuw blok "sectie 179" (3 tests): een vormcontrole (faalt als de SDK ooit niet meer async
+  is, zodat pagina en harnas dan herzien worden), en knop 4 met de **echte** gevendorde SDK tot
+  en met de wallet, via de wrapper van `connectWallet` en via het deep-link-pad: de wallet krijgt een
+  v0-transactie met precies één Squads-instructie, fee-payer het lid, met proposal en
+  VaultTransaction van #15 in de accounts.
+
+**Herkomst van de diffs.** De wijzigingen zijn in de sessie van 2026-10-08 gemaakt als
+`page.diff`/`test.diff` (en `reproKnop4.mjs`) in een scratchpad, en daar met `git apply` op de
+werkmap toegepast. Die scratchpad bestond op 2026-10-10 niet meer. De vergelijking "werkmap =
+de diffs" is daarom gedaan met een **uit het gesprekslog van die sessie herstelde kopie** (de
+uitvoer van `cat page.diff; cat test.diff`), niet met de originele bestanden: HEAD + herstelde
+diffs (via `git apply`, dat de contextregels exact toetst) is byte-identiek aan de werkmap, voor
+beide bestanden. Voor de pagina is er een onafhankelijke bevestiging: `rc-163/knop4-fout/fix.diff`
+in de privénotities (op schijf sinds 2026-10-08) is byte-identiek aan de herstelde `page.diff`
+(sha256 `ffa6f4f5…`). Voor `test.diff` bestaat zo'n kopie niet. Dat de herstelde tekst byte voor
+byte het originele bestand is (witruimte aan regeleinden, afgekapte uitvoer, latere wijzigingen
+buiten het log om), is daarmee niet bewezen; wel dat de werkmap precies de inhoud heeft die in
+het log getoond en beoordeeld is.
+
+**Rood vóór groen** (in de repo, `yarn test:unit`; de pagina daarna teruggezet en via sha256
+gecontroleerd):
+
+| Pagina | Uitkomst |
+|---|---|
+| HEAD (`1c3f614f…`), nieuwe tests | 250 passing, **5 failing**: drie bestaande knop-4-tests (L-1 extensie, L-1 mislukte transactie, L-5 deep-link) en de twee nieuwe route-tests, alle door `versionedTx.serialize is not a function` (bij de tweede in de log, waar de test een MISLUKT-melding verwacht) |
+| met de fix | **255 passing**, 0 failing |
+| M1: `transactions` → `instructions` (een instructie i.p.v. een transactie) | 248 / **7 failing** |
+| M2: `Promise.resolve(await …)` (de fout terug, anders geschreven) | 250 / **5 failing** |
+| M3: `target.index - 1n` (verkeerd voorstel) | 247 / **8 failing** |
+| M4: de bytes voor de wallet één byte korter | 253 / **2 failing** (alleen de nieuwe route-tests) |
+
+M4 laat zien dat alleen de nieuwe tests de inhoud van wat de wallet krijgt, toetsen.
+
+**Regressie** (op de definitieve pagina `2dcfb299…`, achter elkaar, tussen de anchor-suites
+gewacht tot poort 8899 vrij was):
+
+| Suite | Uitkomst | Baseline (sectie 173) |
+|---|---|---|
+| `cargo test` | 13/0 | 13/0 |
+| `yarn test` | 380 passing, 119 pending, 0 failing | 377/119/0; +3 (de nieuwe tests in `adminPageSelection.ts`) |
+| `yarn test:pending-action` | 116/0 (1 pending) | 116/0 |
+| `yarn test:spend-window-rollover` | 117/0 | 117/0 |
+| `yarn test:unit` | 255/0 | 252/0 (+3, idem) |
+
+Typecontrole: strikte `tsc --noEmit` (es2022, nodenext) over `tests/unit/adminPageSelection.ts`:
+schoon. `node --check` op het module-script en het klassieke script van de pagina: schoon. De
+server op poort 8766 (pid 3927, niet herstart) levert `wallet-signer.html` byte-identiek aan de
+werkmap (sha256 `2dcfb299fba176fc3da0fd096ca5525094ced6aa86055f0b61789c242e646557`, beide).
+
+**Uitzondering op de bevriezing van §173.** §173 punt 6 staat een wijziging alleen toe bij een
+bevinding die een verkeerde transactie of een onterecht succes kan veroorzaken. Deze fout doet
+geen van beide: knop 4 faalt vóór de wallet. De wijziging is dus een **uitzondering, door Michel
+besloten**: knop 4 is de enige route om #15 uit te voeren mét de controles van de pagina
+(pre-flight-selectie, `checkProposalReadyForAction`, de controle na versturen), en zonder deze
+regel is knop 4 onbruikbaar. Buiten de `await` en `PAGE_BUILD` is aan de pagina niets gewijzigd.
+De bevriezing geldt verder onverminderd.
+
+**De simulatie (b3) week af, en "droog getest" was onvolledig.** Stap (b3) van het draaiboek
+(`simuleerKnop4.mjs`) gaf op 2026-10-08 groen (err null, 34.479 CU) en zei "exact als
+buildSquadsExecuteTx". Dat klopte niet: het script bouwde de transactie zelf na, **mét** `await`,
+en week daarmee juist op de foutplek van de pagina af. Stap (c) gold daardoor als droog getest,
+maar de route van de pagina tot de wallet was niet beproefd: (b3) toetste de keten, niet de
+pagina. In de privénotities (`rc-163/uitvoerdag/`, geen onderdeel van deze repo):
+- `simuleerKnop4.mjs`: de onjuiste opmerking weg; het script leest `buildSquadsExecuteTx` nu
+  letterlijk uit `admin/wallet-signer.html` en draait die (voorcontroles als stubs, zoals
+  eerder), en weigert (exit 1) als er geen `VersionedTransaction` uitkomt. Een eigen nabouw is
+  er niet meer. Tegen de pagina van vóór §179: exit 1 ("een Promise: de fout van sectie 179");
+  tegen de werkmap: exit 0, err null, 34.479 CU.
+- `reproKnop4.mjs` (nieuw als stap (b3b) in `DRAAIBOEK.md`): de route van knop 4 van de pagina
+  (`runExecuteAction`, `buildSquadsExecuteTx`, de wallet-wrapper, gevendorde Buffer/web3/SDK)
+  tot en met de aanroep van een nep-wallet, met VaultTransaction #15 live (alleen lezen)
+  opgehaald. Tegen de pagina van vóór §179: exit 1 met `TypeError: versionedTx.serialize is not a
+  function`; tegen de werkmap: **groen**, de wallet krijgt 510 bytes, een v0-transactie met één
+  instructie naar Squads v4, fee-payer `2jDz…`, met proposal en VaultTransaction van #15.
+- `DRAAIBOEK.md`: (b3) beschrijft de nieuwe werking; (b3b) toegevoegd; (b2) punt 3 controleert
+  `PAGINA-BUILD` en de sha256 van de geserveerde pagina; (b3b) hoort bij de stappen die na
+  onderbreking opnieuw moeten.
+
+Grens: (b3b) beproeft de pagina tot de wallet, niet de echte extensie, de popup of het tekenen.
+Dat blijft de controle bij (c).
+
+**Stand.** Commit lokaal, niet gepusht. Sectie 179 vraagt een review door een verse sessie
+vóórdat er gepusht of knop 4 opnieuw gebruikt wordt.

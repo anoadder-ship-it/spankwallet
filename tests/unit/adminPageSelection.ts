@@ -135,6 +135,8 @@ interface Page {
   storage: Map<string, string>;
   /** Sectie 173: timers van een minuut of langer (die lopen nooit vanzelf af); de test roept fn zelf aan. */
   longTimers: { fn: () => void; ms: number }[];
+  /** Sectie 179: wat de pagina aan de wallet gaf (het argument van signAndSendTransaction). */
+  walletTxs: unknown[];
   window: { location: { search: string; pathname: string; origin: string; href: string } };
 }
 
@@ -204,11 +206,17 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
     accounts.clear();
     for (const [k, v] of squadsAccounts(options.afterSend)) accounts.set(k, v);
   };
-  const record = (kind: string) => (args: { transactionIndex: bigint }) => {
-    sent.push({ kind, transactionIndex: BigInt(args.transactionIndex) });
-    // serialize: voor de deep-link-route (startDeeplinkSignAndSend), die de transactie versleutelt.
-    return { kind, serialize: () => Uint8Array.of(1, 2, 3) };
+  // Sectie 179: de nep-bouwer heeft dezelfde vorm als de echte SDK-functie. vaultTransactionExecute
+  // is async (hij leest de VaultTransaction); een synchrone nep verborg dat de pagina hem niet afwachtte.
+  const record = (kind: string, real: (...args: any[]) => unknown) => {
+    const build = (args: { transactionIndex: bigint }) => {
+      sent.push({ kind, transactionIndex: BigInt(args.transactionIndex) });
+      // serialize: voor de deep-link-route (startDeeplinkSignAndSend), die de transactie versleutelt.
+      return { kind, serialize: () => Uint8Array.of(1, 2, 3) };
+    };
+    return real.constructor.name === "AsyncFunction" ? async (args: { transactionIndex: bigint }) => build(args) : build;
   };
+  const walletTxs: unknown[] = [];
   // Sectie 172 (review §171 M-1/I-3): elke bevestigingsaanroep wordt opgenomen, wat de test ook
   // als antwoord geeft. confirmTransaction controleert de signature zoals de gevendorde web3
   // (base58, 64 bytes; anders een Error) voordat het antwoord van de test komt.
@@ -248,13 +256,16 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
     SYSVAR_RENT_PUBKEY: web3.SYSVAR_RENT_PUBKEY,
     SYSVAR_CLOCK_PUBKEY: web3.SYSVAR_CLOCK_PUBKEY,
     connection,
-    multisig: { ...sdk, transactions: { ...sdk.transactions, vaultTransactionExecute: record("execute"), proposalApprove: record("approve") } },
+    multisig: { ...sdk, transactions: { ...sdk.transactions, vaultTransactionExecute: record("execute", sdk.transactions.vaultTransactionExecute), proposalApprove: record("approve", sdk.transactions.proposalApprove) } },
     // Een lid (sectie 170, L-2: knop 2 toetst eerst het lidmaatschap); alles wat de wallet zou
     // versturen, wordt opgenomen i.p.v. verstuurd. De wallet geeft de geldige signature SIG terug.
     connectedWallet: {
       publicKey: new web3.PublicKey(MEMBER),
       mode: "extension",
-      signAndSendTransaction: async () => {
+      // Sectie 179: zoals de echte wrapper in connectWallet (versionedTx.serialize()).
+      signAndSendTransaction: async (versionedTx: { serialize(): Uint8Array }) => {
+        versionedTx.serialize();
+        walletTxs.push(versionedTx);
         sent.push({ kind: "wallet-signAndSend", transactionIndex: -1n });
         rpc.push({ method: "wallet-signAndSend", args: [], buttons: buttons() });
         applyAfterSend();
@@ -301,7 +312,7 @@ async function loadPage(state: SquadsOpts, connectionOverrides: Record<string, u
   const sharedPath = path.join(ROOT, "admin", "upgradeProposalCheck.mjs");
   if (fs.existsSync(sharedPath)) env.upgradeCheck = require(sharedPath).createUpgradeProposalCheck(web3.PublicKey);
   const factory = new Function(...Object.keys(env), `${source}\nreturn { ${names.join(", ")} };`);
-  return { fns: factory(...Object.values(env)), sent, logs, elements, scans, rpc, storage, window, longTimers };
+  return { fns: factory(...Object.values(env)), sent, logs, elements, scans, rpc, storage, window, longTimers, walletTxs };
 }
 
 /** Sectie 173: Date met een klok die de test verzet; new Date(x) en de rest blijven echt. */
@@ -1247,4 +1258,56 @@ describe("adminpagina: knop 3/4 raken precies het voorstel dat de pre-flight toe
       }
     });
   });
+});
+
+// Sectie 179: knop 4 faalde op 2026-10-08 in de browser met "versionedTx.serialize is not a function":
+// buildSquadsExecuteTx gaf de Promise van de async SDK-functie door (sinds 89bb15d, sectie 172). De
+// tests hierboven zagen dat niet: hun nep-SDK was synchroon en hun nep-wallet raakte de transactie niet.
+describe("sectie 179: knop 4 met de echte SDK tot en met de wallet", function () {
+  this.timeout(30_000);
+
+  it("de nep-bouwers hebben dezelfde vorm (sync/async) als de gevendorde SDK", () => {
+    const real = sdk.transactions;
+    assert.strictEqual(real.vaultTransactionExecute.constructor.name, "AsyncFunction", "vaultTransactionExecute is niet meer async: herzie pagina en harnas");
+    assert.strictEqual(real.proposalApprove.constructor.name, "Function");
+    assert.strictEqual(real.proposalReject.constructor.name, "Function");
+  });
+
+  for (const [route, options] of [
+    ["extensie", {}],
+    ["deep-link", {
+      env: { connectedWallet: { mode: "deeplink", publicKey: new web3.PublicKey(MEMBER), walletName: "Solflare (test)" } },
+      storage: { "test-deeplink": JSON.stringify({ dappSecretKey: [], dappPublicKey: Array.from(new Uint8Array(32)), sharedSecret: Array.from(nacl.randomBytes(32)), session: "sessie", walletPublicKey: MEMBER, pendingAction: null, sessionCreatedAt: Date.now() }) },
+    }],
+  ] as [string, PageOptions][]) {
+    it(`${route}: de wallet krijgt een v0-transactie met precies één Squads-instructie die #15 uitvoert`, async () => {
+      const page = await loadPage({ latestIndex: 15, proposals: { 15: {} } }, {}, {
+        ...options,
+        afterSend: { latestIndex: 15, proposals: { 15: { status: 5 } } },
+        env: { ...options.env, multisig: sdk },
+      });
+      await page.fns.runExecuteAction();
+      let bytes: Uint8Array;
+      if (route === "extensie") {
+        assert.lengthOf(page.walletTxs, 1, "de wallet werd niet precies één keer aangeroepen");
+        bytes = (page.walletTxs[0] as { serialize(): Uint8Array }).serialize();
+        assert.match(page.logs.join("\n"), /^SUCCES - voorstel #15 uitgevoerd/m);
+      } else {
+        const href = new URL(page.window.location.href);
+        assert.strictEqual(href.origin + href.pathname, "https://solflare.com/ul/v1/signAndSendTransaction");
+        const state = JSON.parse(page.storage.get("test-deeplink")!);
+        const payload = nacl.box.open.after(bs58.decode(href.searchParams.get("payload")!), bs58.decode(href.searchParams.get("nonce")!), Uint8Array.from(state.sharedSecret));
+        bytes = bs58.decode(JSON.parse(Buffer.from(payload!).toString("utf8")).transaction);
+      }
+      const tx = web3.VersionedTransaction.deserialize(bytes);
+      const keys = tx.message.staticAccountKeys.map((k: { toBase58(): string }) => k.toBase58());
+      assert.strictEqual(tx.message.version, 0);
+      assert.deepEqual(tx.message.compiledInstructions.map((ix: { programIdIndex: number }) => keys[ix.programIdIndex]), [sdk.PROGRAM_ID.toBase58()]);
+      assert.strictEqual(keys[0], MEMBER, "fee-payer is niet het lid");
+      const [proposal] = sdk.getProposalPda({ multisigPda: new web3.PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp"), transactionIndex: 15n });
+      const [vaultTx] = sdk.getTransactionPda({ multisigPda: new web3.PublicKey("A5iDbqC8UvF6a88WpnEmW6w64x6fEr9JWf8CA5zR3tMp"), index: 15n });
+      assert.include(keys, proposal.toBase58(), "voorstel #15 niet in de accounts");
+      assert.include(keys, vaultTx.toBase58(), "VaultTransaction #15 niet in de accounts");
+    });
+  }
 });

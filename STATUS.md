@@ -18069,3 +18069,164 @@ CodeQL: 0 open meldingen; de analyse van 84025ce is gedraaid.
 
 **Stand.** Commit lokaal, niet gepusht. Sectie 181 vraagt een lichte review door een verse sessie,
 alleen op deze commit.
+
+## 182. Echte proef met de nieuwe adminserver: de pagina laadt, Helius geeft 429 (2026-10-11)
+
+**De proef.** Op 2026-10-11, met de code van `b802264`, door Michel op zijn eigen machine:
+- De oude server (pid 773154, van vóór §180) draaide nog; de nieuwe start gaf `EADDRINUSE`. Na het
+  stoppen van de oude startte de nieuwe en serveerde hij de lokale sleutel. Controle zoals in het
+  draaiboek: `/config.js` gaf 1 regel met de export en 0 keer het voorvoegsel van de oude sleutel; de
+  geserveerde pagina had sha256 `2dcfb299…6557`.
+- De pagina laadde alle imports. Phantom verbond als `2jDz…`.
+- Daarna gaf de Helius-RPC **429** bij `getAccountInfo` (checkMembership, de eerste lees van de
+  pagina). Knop 4 is dus nog steeds niet bruikbaar.
+
+**Het Helius-dashboard** (alleen door Michel gezien, niet door de sessie die dit schrijft): één project
+met alle zeven sleutels, status "Service halted", tegoed 1.000.000 van 1.000.000 verbruikt. De reset is
+volgens Michel over 13 dagen, rond 2026-10-24; dat is een opgave van de eigenaar, niet geverifieerd.
+- De nieuwe sleutel is in **hetzelfde project** aangemaakt: dezelfde pot. Een tweede project bleek niet
+  aan te maken. De rotatie van §180 heeft het tegoed niet teruggebracht.
+- Volgens Michel gaf `getGenesisHash` met de nieuwe sleutel eerst 200 en later 429, en gaven de
+  aanroepen van de pagina 429. Eén 200 is dus geen bewijs dat er tegoed is. Het draaiboek eist daarom
+  vóór alles vijf keer dezelfde aanroep als de pagina, alle vijf 200 (stap (b0)); één 429 betekent niet
+  uitvoeren en op een andere dag opnieuw.
+- De gelekte sleutel is volgens Michel ingetrokken: het dashboard toont hem niet meer. Dat is niet met
+  een test bewezen; een test erna gaf 429, en zonder tegoed geeft elke sleutel 429.
+- De rotatie van §180 heeft de sleutel uit de huidige bestanden van `admin/` gehaald. Of het lek dicht
+  is, hangt af van het intrekken. De gelekte sleutel staat nog in de openbare git-geschiedenis, en in
+  `client/` en `desktop/`.
+- Tijdens de uitvoerdag draait niets anders dat een sleutel uit dit Helius-project gebruikt (stap (b0)
+  van het draaiboek).
+
+**Correctie op §180: wat de pagina zonder sleutel meldt.** Ontbreekt het sleutelbestand, dan
+serveert de server de gecommitte `admin/config.js`. De pagina importeert daaruit `{ HELIUS_API_KEY }`;
+die import faalt al bij het koppelen van de module, vóórdat de `throw` in config.js kan draaien. De
+debuglog toont dus een SyntaxError: `… does not provide an export named 'HELIUS_API_KEY'`, **niet** de
+tekst "Geen Helius-sleutel …" uit config.js. §180 en het commentaar in `admin/config.js` zeggen het
+laatste; dat klopt niet. (§181 noemt alleen de fout-`config.js`, niet de melding.) Het commentaar is hier niet aangepast (deze sectie wijzigt geen code). Het
+draaiboek noemt nu de juiste melding: ze betekent dat de pagina van een oude server komt of dat het
+sleutelbestand niet is geladen.
+
+**Gepusht vóór de review.** `84025ce` (gepusht 15:59) en `b802264` (gepusht 16:15) zijn gepusht voordat
+hun review klaar was. "Commit lokaal, niet gepusht" aan het eind van §180 en §181 is daarom achterhaald.
+Voortaan geldt: **geen push vóór het oordeel van de reviewer.**
+
+**Review van `b802264`** (alleen wat het reviewrapport zei):
+- Oordeel: ja voor push, en ja voor het starten van de server (na het stoppen van de oude server).
+  Niets blokkerends.
+- Middel: `b802264` en `84025ce` zijn gepusht vóór hun review (`84025ce` om 15:59:33 en `b802264` om
+  16:15:15, volgens de reflog).
+- Laag: de server crasht bij een luisterfout met een stacktrace.
+- Laag: IPv6 is niet getest. `::` krijgt terecht de LAN-waarschuwing; `::ffff:127.0.0.1` en
+  `0:0:0:0:0:0:0:1` krijgen een vals alarm.
+- Laag: vier mutaties van de reviewer blijven groen, waaronder de volgorde van sleutel laden en adres
+  controleren.
+- Laag: de gevolgen van de LAN-blootstelling zijn smaller geformuleerd dan in de eerdere review.
+- De eerste echte beproeving van de sleutelbestand-route in een browser was toen nog niet gedaan.
+
+**Open punten, ongewijzigd:**
+- `client/` en `desktop/` bevatten de gelekte sleutel nog als terugval.
+- De git-geschiedenis is niet herschreven.
+- De lage reviewpunten van `b802264`: tests voor IPv6-adressen; een nette foutmelding bij een bezette
+  poort (nu een crash met `EADDRINUSE`, na de regel "sleutel geladen"); de volgorde "adres controleren,
+  dan pas de sleutel laden" is wel zo geschreven maar niet door een test afgedwongen; de tekst over de
+  gevolgen van de LAN-blootstelling.
+- Dependabot PR #3 (undici, alleen een ontwikkelafhankelijkheid via jsdom).
+- Upgrade 1 (#15) is niet uitgevoerd; dat wacht op Helius-tegoed en een groene (b0).
+
+## 183. Alleen-lezen audit: Alpenglow op devnet, toolchain, transactiegrootte, meldingen (2026-10-11)
+
+**Alleen een audit.** Er is niets aan code, tests, `admin/`, `programs/` of de toolchain gewijzigd. Deze
+sectie legt de bevindingen vast. Daarnaast zijn in het draaiboek (privénotities) een stap (a0) en drie
+teksten bijgewerkt, zie onderaan.
+
+**Alpenglow op devnet.** Volgens de eigenaar is devnet sinds slot 504148999 op Alpenglow (bevestigd met
+`getAgGenesisCert`) en duurt een slot ongeveer 239 ms (gemeten). Beide zijn in deze sessie niet opnieuw
+gecontroleerd. De uitvoer van de pre-flight en de simulatie van 2026-10-08 (privénotities, slots 508808963
+t/m 508847931, waaronder de simulatie van knop 4 op slot 508847739) ligt na die slot. Die runs zijn dus al
+onder Alpenglow gedaan.
+
+**Tijdvensters in het programma.**
+- In slots: alleen `MAX_SESSION_DURATION_SLOTS = 1_512_000` (`state.rs:447`; §156 noemt nog regel 445).
+  Bij 400 ms is dat ~7 dagen, bij 239 ms ~4,2 dagen, bij 200 ms ~3,5 dagen. De grens blijft correct als
+  slotaantal, maar de werkelijke duur is korter (de veilige kant). Het commentaar bij de constante
+  (`state.rs:424-447`, "~6,4 dagen") is achterhaald. Wat ermee gebeurt (een herberekende slotgrens of
+  `unix_timestamp`) is een ontwerpkeuze **na #15**. #15 verandert er niets aan.
+- In seconden, via `Clock.unix_timestamp`: de recovery (standaard 72 uur, `state.rs:8`, controle
+  `instructions.rs:4291`), de PendingAction-timelock (24 uur, `instructions.rs:1628`, `:1807`) en het
+  SpendWindow (24 uur, `:1641`, `:1655`). Die blijven in de praktijk intact. Onder Alpenglow zet de
+  leider de tijdstempel zelf, begrensd op de tijd van de parent tot de parent plus twee keer de
+  verstreken slottijd. Een eerlijke leider gaat niet onder de parent, dus één leider wint hooguit
+  ongeveer een seconde. Een venster van 24 of 72 uur merkbaar verkorten kan alleen met langdurige
+  samenwerking van veel leiders. Die grens staat in een **concept** (SIMD-0363) en in een open
+  Agave-issue (#15441). De open vraag uit §156 is daarmee **voorlopig** beantwoord: opnieuw bekijken
+  zodra SIMD-0363 definitief is.
+
+**Confirmed en finalized.** Er is geen wijziging nodig. De `--post`-controle accepteert beide
+(`scripts/lib/programDeploySlot.ts:56`). De timelockcheck leest de Clock-sysvar en niet `getBlockTime`
+(`scripts/checkProposalTimelock.ts:168-186`). De adminpagina accepteert beide (`admin/wallet-signer.html:664`).
+`verifieer95` wacht op finalized, wat alleen sneller wordt. Kleine punten voor later, niet voor #15:
+- Onder Alpenglow is `blockTime` niet meer de Clock die transacties zien (Agave-issue #15441). Dat raakt
+  `tests/webauthnTestHelper.ts:267` (`getBlockTime` als stand-in voor de Clock) en
+  `scripts/measureSlotDuration.ts`.
+- De client valt nog terug op 400 ms per slot (`client/src/slotDuration.ts:12`).
+
+**Blockhash.** Een blockhash is 150 slots geldig. Bij ~239 ms per slot is dat ongeveer 36 seconden, waar
+het bij 400 ms ongeveer 60 seconden was. De wachttijd van 2 minuten op de pagina na een onbekende uitkomst
+(`admin/wallet-signer.html:756-772`) blijft ruim aan de veilige kant. Het draaiboek zegt nu: binnen
+ongeveer 30 seconden goedkeuren in Phantom.
+
+**Toolchain.** De RC-binary (`33598b3d…`, 737.080 bytes) is gebouwd met `cargo-build-sbf --arch v3` uit de
+geïnstalleerde toolchain (`scripts/build-devnet-buffer.sh:107-109`). Het script pint geen versies.
+STATUS noemt Agave v4.1.2 en cargo-build-sbf v4.1.0 (§3), maar **niet met welke platform-tools de RC op
+2026-09-28 gebouwd is**. Dat is onbekend, en de binary heeft geen `.comment`-sectie. De eigenaar legde op
+2026-10-11 de huidige stand vast (privénotities): cargo-build-sbf 4.1.0 met platform-tools v1.54 (rustc
+1.89.0), solana-cli 4.1.2, anchor-cli 1.1.2, rustc 1.97.1. Er zijn twee platform-tools-mappen
+geïnstalleerd, v1.52 en v1.54. Welke van de twee de RC bouwde, blijft onbekend. `Cargo.lock`
+(anchor-lang/anchor-spl 1.1.2) is sinds `63e993a` niet gewijzigd. Anchor 1.1.2 beveelt Solana 3.1.10 aan;
+hier draait 4.1.2. Met anchor-cli 1.2.x of andere platform-tools zou een nieuwe build vrijwel zeker een
+andere sha256 geven. De uitvoering van #15 raakt dat niet, want de pre-flight controleert de buffer
+on-chain tegen de vaste sha. Wel verdwijnt de mogelijkheid om `33598b3d` opnieuw te bouwen en te
+bewijzen. **Daarom geen toolchain-update vóór #15 is uitgevoerd en geverifieerd.** Het draaiboek
+controleert dat nu in stap (a0).
+
+**Transactiegrootte.** `execute_advanced` met 3 remaining accounts is 863 van 1232 bytes: 30 procent
+marge (meting in §102d). De limiet van 1232 staat alleen in tests hard gecodeerd
+(`tests/pendingAction.ts:5086`, `:5119`, `:5885`, `:5915`) en in `@solana/web3.js` 1.98.4 zelf. Groeit de
+limiet, dan valt er geen controle weg; de asserts blijven conservatief. De grootte van de transactie van
+knop 4 is niet gemeten (één Squads-instructie).
+
+**Fees en rent.** Scripts en tests lezen rent en fees live (`getMinimumBalanceForRentExemption`,
+`meta.fee`). Nergens staan 5000 lamports hard gecodeerd. De vault-delta-controle van `verifieer95`
+rekent met de echte saldi. Een gestegen rent kan daar een vals alarm geven (negatieve ProgramData-delta),
+een gedaalde rent een groter overschot. Het draaiboek zegt dat nu.
+
+**Meldingen (volgens de audit, gelezen met `gh api`).**
+- Dependabot: 6 open meldingen, alle in `undici` 7.29.0, een transitieve ontwikkelafhankelijkheid via
+  `jsdom`; opgelost in 7.29.1. Geen runtime-afhankelijkheid.
+- CodeQL: 0 open. De laatste analyse is op `b802264`.
+
+**Geheimen (volgens de audit).**
+- De oude, gelekte sleutel staat nog in `client/src/main.ts` en `desktop/src-tauri/src/rpc.rs` (al open,
+  §182) en in de geschiedenis. Andere sleutelpatronen zijn niet gevonden.
+- Op GitHub staan secret scanning en push protection aan.
+- Een Helius-sleutel is een kale UUID. Dat secret scanning die herkent, is waarschijnlijk niet zo en
+  **niet geverifieerd**.
+- Er is geen lokale pre-commit-hook. Een lokale hook op `api-key=` gevolgd door een UUID is een voorstel,
+  niet uitgevoerd.
+
+**Draaiboek (privénotities), alleen tekst:**
+- nieuwe stap (a0) "Toolchain vastleggen" vóór (a): versies opslaan in `uitvoer/a0-toolchain.txt` en
+  vergelijken met de stand van 2026-10-11; bij een afwijking niet beginnen;
+- (b0) en (a0) staan in de lijst van stappen die na een onderbreking opnieuw moeten, en in de verwijzing
+  naar alles vóór knop 4;
+- bij knop 4: de blockhash is ~36 seconden geldig, dus binnen ~30 seconden goedkeuren. Een verlopen
+  poging zonder signature doet niets op de keten: eerst nagaan dat #15 nog Approved is, dan opnieuw
+  proberen;
+- bij `verifieer95` punt 3: de zin over rent die daalt of stijgt.
+
+**Wat dit niet afdekt.** Geen uitvoering van #15. Niet gecontroleerd zijn: het echte Helius-tegoed, de
+activeringsslot en de slottijd (opgave van de eigenaar), de inhoud van de gevendorde bundels tegen npm, en
+of de rollback-binary nog deploybaar is.
+
+**Stand.** Commit lokaal, niet gepusht. Sectie 183 vraagt een lichte review door een verse sessie.

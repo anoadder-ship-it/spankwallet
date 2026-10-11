@@ -17935,3 +17935,137 @@ het volgende gebruik van de pagina: die server stoppen en opnieuw starten, met h
 
 **Stand.** Commit lokaal, niet gepusht. Sectie 180 vraagt een review door een verse sessie vóórdat
 er gepusht of de pagina voor knop 4 gebruikt wordt.
+
+## 181. Reviews van c6d0ed5 en 84025ce, en de verbeteringen aan de adminserver (2026-10-11)
+
+### Review van c6d0ed5 (§179), door een verse sessie
+
+**Oordeel: ja voor push, en ja voor knop 4 met de pagina `2dcfb299…6557` volgens het draaiboek.**
+Niets blokkerends, niets van middel. Nagedaan: een onafhankelijke bouw van #15 (rechtstreeks
+`instructions.vaultTransactionExecute` + `compileToV0Message`) is byte-identiek aan wat de pagina
+oplevert (510 bytes, 12 statische accounts); rood vóór groen (de6e460: 5 rood, c6d0ed5: 255 groen);
+`reproKnop4` en `simuleerKnop4` rood op de oude en groen op de nieuwe pagina. Lage bevindingen en wat
+ermee gedaan is:
+
+| Bevinding | Stand |
+|---|---|
+| L1: de unit-tests leggen de ondertekenaars niet vast (een andere `member` blijft groen; alleen `simuleerKnop4` vangt het, via 6005) | **open**; voorstel: `header.numRequiredSignatures === 1` toetsen of tegen een onafhankelijke bouw vergelijken |
+| L2: de unit-tests leggen de blockhash niet vast (`reproKnop4` vangt het wel) | **open**, klein risico |
+| L3: het draaiboek verwees in (b2) punt 3 en (b3) naar de hash van het latere (b3b), en (b2) punt 3 startte de server een tweede keer | **opgelost** in §180 |
+| L4: "alleen documentatie sinds c6d0ed5" werd door geen commando gecontroleerd | **opgelost** in §180 (`git diff --stat c6d0ed5 HEAD -- admin/ tests/ programs/`) |
+
+Info-punten van die review, niet uitgevoerd: een test voor de foutroute als
+`vaultTransactionExecute` gooit; in de deep-link-test `pendingActionTransactionIndex === "15"`;
+`simuleerKnop4` dezelfde weigerende proxy als `reproKnop4`; in §179 één zin dat de uitvoeringen van
+#11 en #13 (vóór `89bb15d`) niets zeggen over de huidige knop-4-route; "pid 3927" in §179 is
+verouderd. De bevriezing van de pagina geldt opnieuw onder `2026-10-10T16:00:00Z-sectie-179-knop4-await`,
+sha256 `2dcfb299fba176fc3da0fd096ca5525094ced6aa86055f0b61789c242e646557` (sinds §180 ook een unittest).
+
+### Review van 84025ce (§180), door een verse sessie
+
+**Oordeel: ja voor push; ja voor het starten van de server met deze code, onder twee voorwaarden:**
+eerst de oude server op 8766 stoppen (die serveert sinds §180 alleen de fout-`config.js`), en bewust
+kiezen wat er met de blootstelling op het LAN gebeurt (M1). Niets blokkerends. Het sleutelbestand
+is door de reviewer niet gelezen.
+
+- **M1, middel: elk apparaat op het LAN kon de sleutel ophalen.** De server luisterde op `0.0.0.0` en
+  `/config.js` antwoordt op elke methode. Gevolg: verbruik van het devnet-tegoed (geen ondertekenen,
+  geen geld); een leeg tegoed blokkeert knop 4. Het certificaat dekt `IP:127.0.0.1` en
+  `DNS:localhost` (hier zelf nagekeken: SAN `IP:192.168.178.205, IP:127.0.0.1, DNS:localhost`), maar is
+  verlopen op 2026-08-18.
+- **M2, middel: een LAN-apparaat kon de server laten stoppen (bestond al vóór §180).**
+  `ALLOWED_FILES[name]` gaf voor `/constructor`, `/__proto__`, `/toString` en `/hasOwnProperty` een
+  geërfde waarde; `path.join(ROOT, undefined)` gooide een niet-opgevangen `TypeError`. Bewezen met curl
+  op een kopie met nepsleutel; c6d0ed5 deed hetzelfde.
+- **M3, middel: de tests waren deels cirkelredenerend; 6 van 16 mutaties van de reviewer bleven groen**
+  (de sleutel loggen in het succespad en bij het starten, `listen` buiten de bewaking met de bewakingstekst
+  intact, `/config.js` vóór de allowlist via `endsWith`, de eerste 4 tekens loggen in de terugval,
+  `isFile` weg). "Nooit in een logregel" werd alleen op de weigerpaden getoetst, en "require() start
+  de server niet" was een regex op de broncode.
+- **L1** losse poortparsing (`""` gaf poort 0, `"0x2000"` gaf 8192). **L2** een FIFO op het sleutelpad
+  liet het starten hangen. **L3** wat de bestandscontroles niet afvangen (een symlink hogerop in het pad,
+  een hardlink, setuid): met de eigenaarscontrole aanvaardbaar, **niet** gewijzigd. **L4** verouderd
+  commentaar (`.gitignore`, `simuleerKnop4.mjs`). **L5** het draaiboek miste het stoppen van de oude
+  server (`pkill -f admin/https-server.js` raakt pid 773154 niet: die is gestart als
+  `node https-server.js` vanuit `admin/`). **L6** het `sed`-masker bij (f4) faalt bij een lege `$KEY`
+  (de sleutel lekt dan niet, de uitvoer is weg). **L7** de grens van §180 was onvolledig benoemd.
+- Gecontroleerd en in orde volgens de review: rood vóór groen nagedaan (15 rood, 255 → 272), geen
+  injectie mogelijk in de gegenereerde module, `open` en `fstat` op dezelfde fd, de terugval bij CRLF,
+  spatie, BOM en dubbele LF, de `--stat`-verwachting en de bash-controle in het draaiboek, de
+  maskering in de scripts.
+
+### Wat deze commit verbetert
+
+- **M2:** `Object.hasOwn(ALLOWED_FILES, name)` in `resolveAllowedFile`.
+- **M1:** standaard alleen `127.0.0.1`. `ADMIN_HTTPS_HOST` kiest een ander adres; alleen een IP-adres
+  (`net.isIP`), anders stopt de server (exit 2, `FOUT: ADMIN_HTTPS_HOST …`) vóór hij iets leest of opent.
+  Luistert hij op iets anders dan loopback, dan één waarschuwing dat `/config.js` de sleutel aan het
+  hele netwerk geeft.
+- **L1:** `ADMIN_HTTPS_PORT` alleen cijfers en 1 t/m 65535, anders exit 2 (`FOUT: ADMIN_HTTPS_PORT …`).
+- **L2:** `O_NONBLOCK` bij het openen; een FIFO valt terug als "geen gewoon bestand".
+- De start zit nu in `main(env, …)` (geëxporteerd, met `tlsOptions` alleen voor de tests); het blok
+  `require.main === module` roept alleen `main()` aan en zet een fout om in `FOUT: …` en exit 2.
+- **M3:** de tests (zie hieronder). **L4:** het commentaar in `.gitignore` en (privénotities)
+  `simuleerKnop4.mjs` regel 18. **L5, L6, M1** in het draaiboek: de oude server stoppen via
+  `ss -ltnp 'sport = :8766'` en `kill <pid>` (met de reden waarom niet `pkill -f`); de pagina is nu
+  `https://127.0.0.1:8766/wallet-signer.html` (Phantom vraagt opnieuw om verbinding, het verbonden adres
+  `2jDzaP3F…` blijft de toets; de telefoonroute vraagt `ADMIN_HTTPS_HOST=0.0.0.0`); een alinea over de
+  LAN-blootstelling; bij (f4) eerst `[ -n "$KEY" ]` en een masker dat de sleutel niet als patroon
+  gebruikt (`perl` met `\Q…\E`, uit de omgeving; beproefd met een nepsleutel, met regex-tekens en leeg);
+  de verwachte `--stat` bijgewerkt.
+
+**Tests (`tests/unit/adminConfigServing.ts`, overal nep-UUID's in een tijdelijke map):**
+- de require zelf wordt bespioneerd: `SPANKWALLET_HELIUS_KEY_FILE` op een niet-bestaand tijdelijk pad,
+  `net.Server.prototype.listen` opgenomen in plaats van uitgevoerd, het echte sleutelbestand openen
+  geweigerd; geëist: nul `listen`, nul keer het echte sleutelpad;
+- het geldige pad toetst nu álles wat via `console` en de eigen log/warn loopt, ook bij `main()`;
+- de terugval toetst ook de eerste 4 tekens (met het tijdelijke pad eruit gefilterd);
+- de URL-lijst kreeg `//config.js`, `/x/config.js`, `/../config.js` en de vier prototype-paden, plus
+  "antwoordt daarna nog"; gooit de handler, dan sluit de testserver zoals het echte proces;
+- adres en poort: standaard `127.0.0.1:8766`; `127.0.0.2` en `0.0.0.0` worden gebruikt (bij `0.0.0.0`
+  precies één waarschuwing); zes ongeldige adressen en acht ongeldige poorten (`""`, `0x2000`, `abc`,
+  `70000`, `8766.5`, `0`, `-1`, `" 8766"`) geweigerd; 1 en 65535 toegestaan; het script stopt bij een
+  ongeldig adres en een ongeldige poort met exit 2 en zonder "draait op";
+- de FIFO in een eigen proces met een time-out van 5 s.
+
+**Rood vóór groen** (`yarn test:unit`):
+
+| Stand | Uitkomst |
+|---|---|
+| de code van 84025ce + de nieuwe tests | 271 passing, **24 failing**: FIFO (SIGTERM na 5 s), URL-lijst en M2 (de handler gooit), 19x `parseListenConfig`/`main` ontbreekt, 2x het script (luistert op `0.0.0.0` bij een ongeldig adres; crasht met exit 1 i.p.v. 2 bij een ongeldige poort) |
+| met de wijziging | **295 passing**, 0 failing (baseline §180: 272/0; +23 tests) |
+
+**Mutaties** (elk apart op de definitieve server, daarna teruggezet en met `cmp` gecontroleerd):
+
+| Mutatie | Rood |
+|---|---|
+| succespad logt de sleutel (`console.log(match[1])`) | 2 |
+| `main()` logt de sleutel | 1 |
+| `listen` buiten de bewaking (bewakingstekst intact) | 2 |
+| `/config.js` vóór de allowlist via `endsWith` | 1 |
+| terugval logt de eerste 4 tekens van de inhoud | 3 |
+| `isFile`-controle weg | 1 |
+
+De pagina blijft byte-identiek: sha256 `2dcfb299…6557` vóór en na, `git diff --exit-code 84025ce --
+admin/wallet-signer.html` zonder uitvoer.
+
+**Dependabot en CodeQL** (gelezen 2026-10-11 met `gh api`): 6 open Dependabot-meldingen, alle in
+`undici@7.29.0` (1 high, 2 medium, 3 low; opgelost vanaf 7.29.1), alleen binnengekomen via
+`jsdom@29.1.1`, een devDependency van de tests; PR #3 (naar 7.30.0) staat open en is niet behandeld.
+CodeQL: 0 open meldingen; de analyse van 84025ce is gedraaid.
+
+### Eerlijke grens
+
+- De echte sleutel is nog niet door de echte server en de echte pagina gegaan; alle servertests en
+  het tweede exemplaar gebruikten nepsleutels.
+- Browser en wallet zijn niet beproefd (ook niet de nieuwe origin `https://127.0.0.1:8766` met Phantom).
+- Niet getoetst is of Helius de nieuwe sleutel accepteert. Het Helius-dashboard is in deze sessies niet
+  bekeken.
+- De oude sleutel is nog niet ingetrokken.
+- `client/` en `desktop/` zijn niet aangeraakt; daar staat de oude sleutel nog als terugval.
+- De git-geschiedenis is niet herschreven.
+- L3 en de open punten van de review van c6d0ed5 (L1, L2 en de info-punten) zijn niet uitgevoerd.
+- Alleen `yarn test:unit`; `yarn test`, de timelock-suites en `cargo test` niet.
+
+**Stand.** Commit lokaal, niet gepusht. Sectie 181 vraagt een lichte review door een verse sessie,
+alleen op deze commit.

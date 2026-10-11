@@ -8,11 +8,10 @@ test-ledger/
 admin/*.pem
 *-keypair.json
 
-# STATUS.md sectie 107/109: persoonlijke env-var-overrides (bijv. een
-# geroteerde Helius-sleutel) - de committed default blijft wél gewoon
-# staan (geen echt geheim, zie daar; admin/config.js is bewust NIET
-# gitignored, exact om diezelfde reden - een verse kloon moet zonder
-# extra stap werken). Dit is puur voor wie lokaal iets anders wil zetten
-# zonder dat per ongeluk te committen.
+# STATUS.md sectie 109/180/181: de Helius-sleutel is wél een geheim en hoort
+# nooit in git. De adminkant leest hem uit ~/.config/spankwallet/helius-devnet.key
+# (buiten de repo); admin/config.js is alleen de terugval en bevat geen sleutel.
+# client/ zet zijn sleutel in client/.env.local (hieronder genegeerd); de
+# hardcoded terugval in client/ en desktop/ verdwijnt in een latere commit.
 client/.env
 client/.env.local

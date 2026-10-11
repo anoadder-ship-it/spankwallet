@@ -5,12 +5,26 @@
 // map voor wanneer en hoe dit te gebruiken.
 const https = require("https");
 const fs = require("fs");
+const net = require("net");
 const os = require("os");
 const path = require("path");
 
-// ADMIN_HTTPS_PORT alleen voor een tweede, tijdelijk exemplaar (STATUS.md sectie 180).
-const PORT = Number(process.env.ADMIN_HTTPS_PORT ?? 8766);
 const ROOT = __dirname;
+
+// STATUS.md sectie 181 (review 84025ce, M1/L1): standaard alleen loopback.
+// ADMIN_HTTPS_HOST (een IP-adres, bijv. 0.0.0.0 voor de telefoonroute) en
+// ADMIN_HTTPS_PORT (1-65535) worden strikt gecontroleerd; anders stopt de
+// server met een duidelijke fout, vóór hij iets leest of opent.
+function parseListenConfig(env) {
+  const host = env.ADMIN_HTTPS_HOST ?? "127.0.0.1";
+  if (net.isIP(host) === 0) throw new Error(`ADMIN_HTTPS_HOST ${JSON.stringify(host)} is geen IP-adres (bijv. 127.0.0.1 of 0.0.0.0)`);
+  const portText = env.ADMIN_HTTPS_PORT ?? "8766";
+  const port = /^\d+$/.test(portText) ? Number(portText) : NaN;
+  if (!(port >= 1 && port <= 65535)) throw new Error(`ADMIN_HTTPS_PORT ${JSON.stringify(portText)} is geen poort (alleen cijfers, 1 tot en met 65535)`);
+  return { host, port };
+}
+
+const isLoopback = (host) => (net.isIPv4(host) && host.startsWith("127.")) || host === "::1";
 
 // STATUS.md sectie 180: de Helius-sleutel staat niet meer in git, maar in een
 // lokaal bestand (rechten 600, eigen eigenaar, alleen een UUID). Eén keer
@@ -28,8 +42,9 @@ function loadLocalConfig(keyFile, { uid = process.getuid(), warn = console.warn 
   };
   let fd;
   try {
-    // O_NOFOLLOW: een symlink wordt geweigerd, niet gevolgd.
-    fd = fs.openSync(keyFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    // O_NOFOLLOW: een symlink wordt geweigerd, niet gevolgd. O_NONBLOCK: een
+    // FIFO op dit pad laat het starten niet hangen (§181, L2); fstat weigert hem.
+    fd = fs.openSync(keyFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   } catch (err) {
     return fallback(err.code === "ENOENT" ? "bestand ontbreekt" : `niet te openen (${err.code})`);
   }
@@ -118,9 +133,10 @@ const ALLOWED_FILES = {
 
 function resolveAllowedFile(pathname) {
   const requestedName = pathname === "/" ? "wallet-signer.html" : pathname.replace(/^\//, "");
-  const entry = ALLOWED_FILES[requestedName];
-  if (!entry) return null;
-  return entry;
+  // Object.hasOwn: "/constructor", "/__proto__" enz. gaven anders een geërfde
+  // waarde, en path.join(ROOT, undefined) liet de server stoppen (§181, M2).
+  if (!Object.hasOwn(ALLOWED_FILES, requestedName)) return null;
+  return ALLOWED_FILES[requestedName];
 }
 
 const NO_CACHE_HEADERS = {
@@ -169,17 +185,33 @@ const createRequestHandler = (localConfig) => (req, res) => {
   });
 };
 
-module.exports = { loadLocalConfig, createRequestHandler, DEFAULT_KEY_FILE };
-
-if (require.main === module) {
-  const options = {
+// tlsOptions alleen voor de tests (zonder certificaat); anders key.pem/cert.pem.
+function main(env = process.env, { tlsOptions, log = console.log, warn = console.warn } = {}) {
+  const { host, port } = parseListenConfig(env);
+  const keyFile = env.SPANKWALLET_HELIUS_KEY_FILE ?? DEFAULT_KEY_FILE;
+  const localConfig = loadLocalConfig(keyFile, { warn });
+  if (localConfig) log(`Lokale Helius-sleutel geladen uit ${keyFile}.`);
+  if (!isLoopback(host)) {
+    warn(`WAARSCHUWING: luistert op ${host}, niet alleen loopback: /config.js geeft de Helius-sleutel aan het hele netwerk. Alleen op het eigen thuisnetwerk, nooit op een vreemd wifi.`);
+  }
+  const options = tlsOptions ?? {
     key: fs.readFileSync(path.join(__dirname, "key.pem")),
     cert: fs.readFileSync(path.join(__dirname, "cert.pem")),
   };
-  const localConfig = loadLocalConfig(DEFAULT_KEY_FILE);
-  if (localConfig) console.log(`Lokale Helius-sleutel geladen uit ${DEFAULT_KEY_FILE}.`);
   const server = https.createServer(options, createRequestHandler(localConfig));
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`HTTPS-server draait op https://0.0.0.0:${PORT}`);
+  server.listen(port, host, () => {
+    log(`HTTPS-server draait op https://${host}:${port}`);
   });
+  return server;
+}
+
+module.exports = { loadLocalConfig, createRequestHandler, parseListenConfig, main, DEFAULT_KEY_FILE };
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (err) {
+    console.error(`FOUT: ${err.message}`);
+    process.exit(2);
+  }
 }

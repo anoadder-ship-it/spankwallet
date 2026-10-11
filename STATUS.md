@@ -9756,7 +9756,7 @@ Alpenglow vastgelegd als toekomstig aandachtspunt, geen ronde nu.
 
 ## 109. Helius-sleutel verplaatst naar env var op alle drie de plekken (vervolg op sectie 107 punt 5)
 
-Gevraagd: de hardcoded Helius-devnet-sleutel (`f39fc413-6730-4848-a60f-a6685a6f04d3`) op de
+Gevraagd: de hardcoded Helius-devnet-sleutel (`f39fc413-…`) op de
 drie plekken waar hij letterlijk stond (`admin/wallet-signer.html`,
 `desktop/src-tauri/src/rpc.rs`, `client/src/main.ts`) verplaatsen naar een env var, per
 omgeving het idiomatische mechanisme, met een sane default zodat een verse kloon zonder
@@ -17839,3 +17839,99 @@ Dat blijft de controle bij (c).
 
 **Stand.** Commit lokaal, niet gepusht. Sectie 179 vraagt een review door een verse sessie
 vóórdat er gepusht of knop 4 opnieuw gebruikt wordt.
+
+## 180. Helius-sleutel uit git: de adminkant leest hem uit een lokaal bestand (2026-10-11)
+
+**Waarom.** De Helius-devnet-sleutel van sectie 107/109 stond in HEAD (`admin/config.js`,
+`client/src/main.ts`, `desktop/src-tauri/src/rpc.rs`, en voluit in sectie 109 hiervoor) en in de
+geschiedenis van de openbare repo sinds `62adc9c` (2026-08-09). Het tegoed van dat Helius-project is
+op (reset rond 2026-10-24). Sectie 107 punt 5 ("geen echte secret, hardcoded is een beperkt risico")
+klopt daarmee niet meer: wie de sleutel uit de repo haalt, verbruikt ons tegoed. Omdat de CSP van
+`admin/wallet-signer.html` alleen `devnet.helius-rpc.com` toestaat, kan knop 4 van upgrade 1 zonder
+werkende sleutel niet. Daarom: een nieuwe sleutel die nooit in git komt, daarna de oude intrekken.
+Deze sectie is alleen de adminkant.
+
+**Waar de sleutel nu staat.** `~/.config/spankwallet/helius-devnet.key`, rechten 600, eigenaar de
+gebruiker, alleen de sleutel (pad te overschrijven met `SPANKWALLET_HELIUS_KEY_FILE`). Geen enkel deel
+van de nieuwe sleutel staat in de repo, de tests, het draaiboek of deze sectie.
+
+**Wijzigingen.**
+- `admin/https-server.js`: `loadLocalConfig` leest het sleutelbestand **één keer bij het starten**
+  (`O_NOFOLLOW`, dan `fstat`: gewoon bestand, rechten precies 600, eigenaar de gebruiker, inhoud één
+  UUID met hooguit een newline). Geldig: `/config.js` is
+  `export const HELIUS_API_KEY = "<sleutel>";\n`, met dezelfde no-cache-headers. Anders één
+  waarschuwing (pad en reden, nooit inhoud) en `/config.js` valt terug op de gecommitte
+  `admin/config.js`. Het pad komt nooit uit een verzoek; de allowlist is ongewijzigd.
+  `createRequestHandler` is exporteerbaar; TLS en `listen` alleen bij `require.main === module`.
+  `ADMIN_HTTPS_PORT` (standaard 8766) alleen voor een tweede, tijdelijk exemplaar.
+- `admin/config.js`: geen sleutel meer; alleen een `throw` met "Geen Helius-sleutel: zet
+  ~/.config/spankwallet/helius-devnet.key …". De pagina toont die fout via haar `window.onerror` in de
+  debuglog, in plaats van later een onduidelijke 401.
+- `admin/wallet-signer.html`: **niet gewijzigd** (sha256 `2dcfb299fba176fc…`, de pagina van §179).
+- Sectie 109 hierboven: de voluit geschreven oude sleutel vervangen door het voorvoegsel, zoals op de
+  andere plekken in die sectie.
+- Privénotities (`rc-163/`, buiten de repo): `deel3/controleerPendingPda.mjs` leest de sleutel uit het
+  sleutelbestand met dezelfde controles (en dezelfde maskering in de uitvoer); weigerpaden beproefd
+  met nepbestanden (ontbreekt, 644, geen UUID, symlink: elk exit 2 met de reden, zonder inhoud).
+  `uitvoerdag/DRAAIBOEK.md`: zie hieronder. `simuleerKnop4.mjs` en `reproKnop4.mjs` zijn **niet**
+  gewijzigd: het draaiboek geeft ze `RPC_URL="$H"`; zonder die variabele stoppen ze met exit 2.
+
+**Rood vóór groen** (`yarn test:unit`; nieuw: `tests/unit/adminConfigServing.ts`, 15 tests met een
+willekeurig nep-UUID in een tijdelijke map, plus 1 test die de sha256 van de pagina vastzet):
+
+| Stand | Uitkomst |
+|---|---|
+| c6d0ed5 (in een losse worktree) + de nieuwe tests | 256 passing, **15 failing**: 14x "start bij require()" (geen `require.main`-bewaking, dus de module wordt niet geladen; zo raakt de test de draaiende server op 8766 niet), 1x een UUID in `admin/config.js` |
+| met de wijziging | **271 passing**, 0 failing |
+| plus de pagina-hashtest | **272 passing**, 0 failing (baseline §179: 255/0; +1 purity-check in `unitPathIsPure.ts` voor het nieuwe bestand, +15, +1) |
+
+De tests dekken: geldig bestand geeft precies de module en de headers (ook met query-string);
+ontbrekend bestand geeft byte voor byte `admin/config.js`; rechten 644/640/400, andere eigenaar, leeg,
+geen UUID, UUID met `"`, met een tweede regel, met `</script>`, en een symlink geven elk de terugval
+met precies één waarschuwing en niets van de inhoud in enige uitvoer; acht URL's naar het
+sleutelbestand (`/helius-devnet.key`, `/../…`, `/%2e%2e/…`, het absolute pad, …) en `/key.pem` geven 404;
+`admin/config.js` bevat geen UUID. Strikte `tsc --noEmit` (es2022, nodenext) over het testbestand:
+schoon.
+
+**Live, tweede exemplaar** (poort 8767, nepsleutelbestand; de server op 8766 niet aangeraakt):
+`/config.js` 200 met dezelfde vier headers, sha256 van het antwoord gelijk aan die van de verwachte
+module met de nepsleutel; `/helius-devnet.key` en `/../nep.key` 404; de pagina `2dcfb299…`. Zonder
+bestand: één `WAARSCHUWING` (… bestand ontbreekt) en `/config.js` byte-identiek aan `admin/config.js`
+(sha256 `41998ba2…`). Het echte sleutelbestand komt door `loadLocalConfig` (alleen "geldig: true"
+getoond, geen inhoud).
+
+**De pagina blijft byte-identiek.** sha256 vóór en na `2dcfb299fba176fc3da0fd096ca5525094ced6aa86055f0b61789c242e646557`;
+`git diff --exit-code c6d0ed5 -- admin/wallet-signer.html` zonder uitvoer (exit 0); en de nieuwe
+unittest zet die hash vast.
+
+**Draaiboek** (`rc-163/uitvoerdag/DRAAIBOEK.md`):
+- Voorbereiding: de sleutel uit het sleutelbestand (rechten en vorm gecontroleerd, nooit getoond) in
+  plaats van uit `admin/config.js`; `git diff --exit-code c6d0ed5 HEAD -- admin/wallet-signer.html`
+  als vaste controle naast de sha256; `git diff --stat c6d0ed5 HEAD -- admin/ tests/ programs/` moet
+  precies `admin/config.js`, `admin/https-server.js` en `tests/unit/adminConfigServing.ts` tonen;
+  bij de serverstart de regel "Lokale Helius-sleutel geladen" en geen `WAARSCHUWING`.
+- (b2) punt 3: twee curl-controles op `/config.js` (de lokale sleutel, niet de terugval; niet de oude).
+- (b3) en (b3b): aangeroepen met `RPC_URL="$H"`.
+- Twee fouten uit de review van `c6d0ed5` hersteld: (b2) punt 3 en (b3) verwezen voor de pagina-hash
+  naar (b3b), dat pas later draait; nu de vaste hash `2dcfb299…6557` uit Voorbereiding. En (b2) punt 3
+  startte de server een tweede keer (die draait al sinds Voorbereiding; een tweede start geeft
+  `EADDRINUSE`); nu één serverstart. Andere bevindingen van die review zijn in deze sessie niet bekend
+  en hier niet vastgelegd.
+
+**Wat NIET gedaan is.**
+- `client/src/main.ts` en `desktop/src-tauri/src/rpc.rs` bevatten de oude sleutel nog als terugval
+  (en de bestaande desktop-builds in `target/` ook): een latere, aparte commit.
+- De oude sleutel is **nog niet ingetrokken**. Dat doet Michel zelf, pas als niets hem meer gebruikt
+  (ook client, desktop en lokale instellingen).
+- De git-geschiedenis is **niet herschreven**. Een `git filter-repo` zou vrijwel elke commit sinds
+  `62adc9c` een nieuwe hash geven, waaronder `63e993a` (de bron van buffer `33598b3d`) en de
+  hashes die de bevroren pagina zelf noemt; na het intrekken is de oude sleutel waardeloos.
+- Alleen `yarn test:unit` gedraaid; `yarn test`, de twee timelock-suites en `cargo test` niet (de
+  wijziging raakt geen programma- of desktopcode).
+
+**Let op: de draaiende server op 8766** (gestart vóór deze wijziging) leest `config.js` bij elk
+verzoek van schijf en serveert dus nu de nieuwe `admin/config.js`, die alleen een fout gooit. Vóór
+het volgende gebruik van de pagina: die server stoppen en opnieuw starten, met het sleutelbestand.
+
+**Stand.** Commit lokaal, niet gepusht. Sectie 180 vraagt een review door een verse sessie vóórdat
+er gepusht of de pagina voor knop 4 gebruikt wordt.

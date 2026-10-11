@@ -5,15 +5,46 @@
 // map voor wanneer en hoe dit te gebruiken.
 const https = require("https");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
-const PORT = 8766;
+// ADMIN_HTTPS_PORT alleen voor een tweede, tijdelijk exemplaar (STATUS.md sectie 180).
+const PORT = Number(process.env.ADMIN_HTTPS_PORT ?? 8766);
 const ROOT = __dirname;
 
-const options = {
-  key: fs.readFileSync(path.join(__dirname, "key.pem")),
-  cert: fs.readFileSync(path.join(__dirname, "cert.pem")),
-};
+// STATUS.md sectie 180: de Helius-sleutel staat niet meer in git, maar in een
+// lokaal bestand (rechten 600, eigen eigenaar, alleen een UUID). Eén keer
+// gelezen bij het starten; het pad komt nooit uit een verzoek. Elke afwijking
+// geeft één waarschuwing zonder inhoud, en /config.js valt terug op de
+// gecommitte admin/config.js, die alleen een fout gooit.
+const DEFAULT_KEY_FILE =
+  process.env.SPANKWALLET_HELIUS_KEY_FILE ?? path.join(os.homedir(), ".config", "spankwallet", "helius-devnet.key");
+const KEY_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\n?$/i;
+
+function loadLocalConfig(keyFile, { uid = process.getuid(), warn = console.warn } = {}) {
+  const fallback = (reason) => {
+    warn(`WAARSCHUWING: geen lokale Helius-sleutel (${keyFile}: ${reason}); /config.js valt terug op admin/config.js, de pagina meldt een fout.`);
+    return null;
+  };
+  let fd;
+  try {
+    // O_NOFOLLOW: een symlink wordt geweigerd, niet gevolgd.
+    fd = fs.openSync(keyFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  } catch (err) {
+    return fallback(err.code === "ENOENT" ? "bestand ontbreekt" : `niet te openen (${err.code})`);
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return fallback("geen gewoon bestand");
+    if ((st.mode & 0o777) !== 0o600) return fallback(`rechten ${(st.mode & 0o777).toString(8)}, verwacht 600`);
+    if (st.uid !== uid) return fallback("eigenaar is niet deze gebruiker");
+    const match = fs.readFileSync(fd, "utf8").match(KEY_PATTERN);
+    if (!match) return fallback("inhoud is geen UUID");
+    return Buffer.from(`export const HELIUS_API_KEY = "${match[1]}";\n`, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 // Allowlist i.p.v. "elk bestand in ROOT, tenzij een blacklist het
 // tegenhoudt" - deze server serveert bewust maar EEN bestand
@@ -54,10 +85,10 @@ const options = {
 // directory-wildcard (die zou de hele allowlist-redenering ondermijnen).
 const ALLOWED_FILES = {
   "wallet-signer.html": { file: "wallet-signer.html", contentType: "text/html" },
-  // STATUS.md sectie 107/109: de Helius-sleutel staat hier apart, niet
-  // meer hardcoded in wallet-signer.html - zie config.js voor waarom dit
-  // bestand bewust WEL gecommit en WEL in deze allowlist staat (geen
-  // echte secret, een verse kloon moet zonder extra stap werken).
+  // STATUS.md sectie 107/109/180: de Helius-sleutel staat niet in
+  // wallet-signer.html. Sinds sectie 180 komt de inhoud van /config.js uit
+  // het lokale sleutelbestand (loadLocalConfig hierboven); alleen als dat
+  // ontbreekt of afwijkt, wordt dit gecommitte bestand geserveerd.
   "config.js": { file: "config.js", contentType: "text/javascript" },
   // STATUS.md sectie 168: voorstelselectie, gedeeld met scripts/checkProposalTimelock.ts.
   "upgradeProposalCheck.mjs": { file: "upgradeProposalCheck.mjs", contentType: "text/javascript" },
@@ -92,7 +123,14 @@ function resolveAllowedFile(pathname) {
   return entry;
 }
 
-const server = https.createServer(options, (req, res) => {
+const NO_CACHE_HEADERS = {
+  "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+  "Pragma": "no-cache",
+  "Expires": "0",
+};
+
+// localConfig: de Buffer van loadLocalConfig, of null voor de terugval.
+const createRequestHandler = (localConfig) => (req, res) => {
   // req.url kan een query-string bevatten (bijv. Solflare's deep-link-
   // antwoord: "/?nonce=...&data=..."). Eerder werd req.url === "/" pas
   // gecontroleerd VOORDAT de query-string eraf ging, dus "/?nonce=..."
@@ -104,6 +142,11 @@ const server = https.createServer(options, (req, res) => {
   if (!entry) {
     res.writeHead(404);
     res.end("Not found");
+    return;
+  }
+  if (entry.file === "config.js" && localConfig) {
+    res.writeHead(200, { "Content-Type": entry.contentType, ...NO_CACHE_HEADERS });
+    res.end(localConfig);
     return;
   }
   const filePath = path.join(ROOT, entry.file);
@@ -121,16 +164,22 @@ const server = https.createServer(options, (req, res) => {
     // i.p.v. hem vers op te halen - waardoor knopklikken een oudere,
     // mogelijk gefixte bug opnieuw zouden kunnen vertonen zonder dat dat
     // duidelijk is.
-    res.writeHead(200, {
-      "Content-Type": entry.contentType,
-      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-      "Pragma": "no-cache",
-      "Expires": "0",
-    });
+    res.writeHead(200, { "Content-Type": entry.contentType, ...NO_CACHE_HEADERS });
     res.end(data);
   });
-});
+};
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`HTTPS-server draait op https://0.0.0.0:${PORT}`);
-});
+module.exports = { loadLocalConfig, createRequestHandler, DEFAULT_KEY_FILE };
+
+if (require.main === module) {
+  const options = {
+    key: fs.readFileSync(path.join(__dirname, "key.pem")),
+    cert: fs.readFileSync(path.join(__dirname, "cert.pem")),
+  };
+  const localConfig = loadLocalConfig(DEFAULT_KEY_FILE);
+  if (localConfig) console.log(`Lokale Helius-sleutel geladen uit ${DEFAULT_KEY_FILE}.`);
+  const server = https.createServer(options, createRequestHandler(localConfig));
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`HTTPS-server draait op https://0.0.0.0:${PORT}`);
+  });
+}

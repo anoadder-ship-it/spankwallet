@@ -1,16 +1,13 @@
-// STATUS.md sectie 107/109: was hardcoded in wallet-signer.html zelf, nu
-// hier apart - uitsluitend zodat rotatie ooit één bestand is i.p.v. drie
-// (samen met client/src/main.ts en desktop/src-tauri/src/rpc.rs). GEEN
-// echte secret-hantering: dit is een gratis, devnet-only Helius-sleutel
-// (bevestigd in sectie 107 punt 5) - vandaar dat dit bestand BEWUST WEL
-// gecommit is (niet .gitignored), zodat een verse kloon zonder enige
-// configuratiestap werkt. Wordt dit ooit een echte, geheime sleutel: dan
-// hoort dit bestand alsnog naar .gitignore verplaatst te worden, met een
-// los, ongecommit exemplaar per signer-apparaat - vandaag is dat niet
-// nodig.
+// STATUS.md sectie 180: de Helius-sleutel staat niet (meer) in git. De
+// eerdere, gecommitte sleutel (sectie 107/109) bleek wél een geheim: hij
+// stond openbaar en het tegoed was op. admin/https-server.js serveert
+// /config.js nu uit een lokaal bestand buiten de repo
+// (~/.config/spankwallet/helius-devnet.key, rechten 600, alleen de sleutel;
+// pad te overschrijven met SPANKWALLET_HELIUS_KEY_FILE), als
+// `export const HELIUS_API_KEY = "...";`.
 //
-// Geen build-stap voor wallet-signer.html zelf (de esm.sh-vendoring in
-// vendor/*.mjs is een eenmalige, losstaande esbuild-stap om die
-// bundels te PRODUCEREN - dit bestand hier is gewoon platte, direct
-// bruikbare JS, net als wallet-signer.html zelf).
-export const HELIUS_API_KEY = "f39fc413-6730-4848-a60f-a6685a6f04d3";
+// Dit gecommitte bestand is alleen de terugval als dat lokale bestand
+// ontbreekt of afwijkt: het gooit een fout, zodat de pagina dat meteen
+// meldt (window.onerror in de debuglog) in plaats van later een
+// onduidelijke 401 van de RPC. Zet hier nooit een sleutel in.
+throw new Error("Geen Helius-sleutel: zet ~/.config/spankwallet/helius-devnet.key (rechten 600, alleen de sleutel) en herstart admin/https-server.js");

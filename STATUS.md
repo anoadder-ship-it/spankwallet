@@ -18230,3 +18230,78 @@ activeringsslot en de slottijd (opgave van de eigenaar), de inhoud van de gevend
 of de rollback-binary nog deploybaar is.
 
 **Stand.** Commit lokaal, niet gepusht. Sectie 183 vraagt een lichte review door een verse sessie.
+
+## 184. Stand na 2026-10-11: draaiboek van #15 goedgekeurd, bewaking, nieuwe Helius-sleutel, SBPF op devnet, accountbeveiliging (2026-10-13)
+
+**Alleen documentatie.** Deze sectie wijzigt geen code, tests, `admin/`, `programs/` of scripts. De feiten
+hieronder zijn opgaven van de eigenaar, tenzij er "gemeten" staat met een datum; de sessie die dit schrijft
+heeft niets op het netwerk gecontroleerd.
+
+**Voorstel #15 (upgrade 1): nog niet uitgevoerd.** #15 (de upgrade naar de RC `63e993a…`, via de
+Squads-multisig) staat nog op Approved (§178). Het uitvoerdraaiboek (privénotities, buiten git) is na §183
+in drie rondes aangescherpt, onder meer:
+- de Helius-RPC wordt exact gecontroleerd, en de proxy- en curl-instellingen van de machine worden genegeerd;
+- de uitvoer van elke stap wordt gecontroleerd voordat de volgende stap begint.
+
+Het draaiboek is offline getest en door een onafhankelijke review goedgekeurd. #15 kan eerder dan
+2026-10-24 worden uitgevoerd (zie de correctie op §182 hieronder).
+
+**Bewaking van #15.** Sinds 2026-10-13 draait er doorlopend een bewaking van #15: alleen lezen, elke 10
+minuten, via de publieke devnet-RPC (dus niet via de Helius-sleutel). Ze draait ook na een herstart van de
+machine door. Laatste meting op 2026-10-13: #15 Approved, geen ander voorstel open, multisig, buffer en
+programma ongewijzigd ten opzichte van §178.
+
+**Helius-sleutel vervangen (2026-10-13).** De sleutel uit §180 is bij het opruimen van een Helius-account per
+ongeluk ingetrokken. Er is een nieuwe sleutel gemaakt, in een **eigen Helius-project, alleen voor
+spankwallet**, en die is op devnet getest. Daarnaast zijn oude, ongebruikte en gelekte sleutels uit andere
+projecten ingetrokken. De sleutel staat, zoals sinds §180, alleen in het lokale sleutelbestand van de
+adminkant; deze sectie noemt geen sleutelwaarde.
+
+**Correctie op §182: Helius-tegoed en een tweede project.** §182 zegt dat een tweede project "niet aan te
+maken" bleek, dat de nieuwe sleutel uit dezelfde pot put als de andere, en dat #15 "wacht op Helius-tegoed"
+(reset rond 2026-10-24). Dat is achterhaald: de sleutel van nu staat in een eigen project. #15 hangt daardoor
+niet meer af van de reset van het oude project. De controles van het draaiboek blijven gelden.
+
+**Correctie op §183: "Commit lokaal, niet gepusht."** Achterhaald: `955adb3` (secties 182 en 183) staat op
+`origin/main`.
+
+**Devnet en SBPF-versies (gemeten op 2026-10-12).**
+- Devnet draait agave 4.4.0-beta.0.
+- De feature SIMD-0500 (`B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g`, "geen deploys van SBPF v0-v2 meer")
+  staat op devnet niet aan.
+- De spankwallet-binaries, het terugvalbestand en de RC `63e993a…`, zijn allebei SBPF v3 (ELF `e_flags` 3).
+  De RC is gebouwd met `--arch v3` (§183). #15 valt dus niet onder SIMD-0500, ook niet als die feature vóór
+  de uitvoering aangaat. Hetzelfde geldt voor een terugval naar het terugvalbestand.
+
+**Accountbeveiliging (algemeen).** Alle klassieke GitHub-tokens van het account zijn ingetrokken. Secret
+scanning en push protection staan aan op alle openbare repo's van het account, ook op deze (zie §183).
+
+**Open punten, ongewijzigd ten opzichte van §182 en §183:**
+- `client/` en `desktop/` bevatten de oude, gelekte sleutel nog als terugval; de git-geschiedenis is niet
+  herschreven.
+- De lage reviewpunten van `b802264` (§182).
+- Dependabot: `undici` (§183).
+- Geen toolchain-update vóór #15 is uitgevoerd en geverifieerd (§183).
+
+## 185. active-defense vertrouwt het spankwallet-programma op devnet; layout tussen 1fb3134 en de RC (2026-10-13)
+
+**Wat er is gebeurd.** Een ander project, active-defense (privé), is op 2026-10-13 op devnet geüpgraded.
+Sindsdien vertrouwt het het spankwallet-programma `9ma6vQVA71yUD6jqvyMuYXnMBYGoE7u9bTUbBYEMGBK9` als
+wallet-programma; dat staat in de vertrouwensconfig van active-defense op devnet. Er is niets aan spankwallet
+veranderd. Wel heeft spankwallet nu een afnemer die zijn accounts leest. Dat geldt voor elke upgrade van
+spankwallet vanaf #15.
+
+**Accountlayout (gemeten op 2026-10-12, in deze sessie lokaal nagelezen in `programs/spankwallet/src/state.rs`
+op beide commits).** Tussen spankwallet-commit `1fb3134` en de RC van #15 (`63e993a`):
+- `WalletAccount` krijgt drie velden **achteraan**, na `session_epoch`: `spend_threshold_lamports` (u64),
+  `disarmed` (bool) en `recovery_nonce_snapshot` (u64). De velden ervoor veranderen niet van plaats.
+- `PasskeysAccount` blijft gelijk.
+
+Omdat de nieuwe velden alleen achteraan komen, was de volgorde van #15 en de active-defense-upgrade vrij.
+
+**Ontwerppunt vóór mainnet.** active-defense leest `disarmed` en `recovery_state` van spankwallet niet. Doet
+het dat later wel, dan is het alleen betrouwbaar met een gedeelde definitie van de accounts, bijvoorbeeld
+`declare_program!` op basis van de IDL van spankwallet, of iets gelijkwaardigs. Zonder zo'n definitie kan
+een volgende layoutwijziging de lezer aan de andere kant stil breken. Dit is een ontwerpkeuze, niet uitgevoerd.
+
+**Stand.** Commit lokaal, niet gepusht. Secties 184 en 185 vragen een lichte review door een verse sessie.

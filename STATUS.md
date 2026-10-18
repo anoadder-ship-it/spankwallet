@@ -18305,3 +18305,91 @@ het dat later wel, dan is het alleen betrouwbaar met een gedeelde definitie van 
 een volgende layoutwijziging de lezer aan de andere kant stil breken. Dit is een ontwerpkeuze, niet uitgevoerd.
 
 **Stand.** Commit lokaal, niet gepusht. Secties 184 en 185 vragen een lichte review door een verse sessie.
+
+## 186. Upgrade 1 (voorstel #15) uitgevoerd op devnet (2026-10-18)
+
+**Alleen documentatie.** Deze sectie wijzigt geen code, tests, `admin/`, `programs/`, scripts of het
+draaiboek. De feiten hieronder komen uit de lokale uitvoerbestanden van het draaiboek van 2026-10-18 (14:26
+tot 14:44 lokale tijd), tenzij anders vermeld. Bestanden van een eerdere poging zijn niet gebruikt.
+
+**Uitkomst: #15 is uitgevoerd, de RC `63e993a…` draait op devnet.**
+- Uitvoertransactie `5fzfhNoNb1V5tb4U6DVw5yFpBpgWUKB7APjKtqeutvSnjkbfnSiVkoC2ftrF6GFPbrsaq7eLgXPdUQhwRJRVDyZ6`:
+  slot 512437288, blockTime 2026-10-18T12:34:15Z, `err` null. Squads `VaultTransactionExecute` naar de
+  BPF Upgradeable Loader (in de simulatie van (b3): "Upgraded program 9ma6vQ…").
+- ProgramData `5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq`: 754893 bytes, `last_deploy_slot` 512437288
+  (gelijk aan de slot van de uitvoertransactie; was 501303135 sinds #13, §148). De sha256 van de eerste
+  737080 bytes is `33598b3ddb179d680cc26e8318ac9b60002808e7044234c472481a00974ae76f`, de reproduceerbare
+  build van `63e993a` (§163); de rest is 17768 bytes.
+- Buffer `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5` is gesloten: 3745204600 lamports naar de vault,
+  ProgramData -0.
+- De upgrade authority blijft de vault `89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`.
+- Voorstel #15 staat op Executed; `multisig.transactionIndex` blijft 15.
+- Uitgevoerd door lid `2jDzaP3FbW5583hb4FeGZVU9MYseqBeFHwxycjzcvT7Q` via knop 4 van de adminpagina, via de
+  desktop-extensieroute. Pagina `admin/wallet-signer.html`, sha256 `2dcfb299…6557`, PAGINA-BUILD
+  `2026-10-10T16:00:00Z-sectie-179-knop4-await`. Dat 2jDz… de enige ondertekenaar is, staat niet in de
+  uitvoerbestanden; de sessie die dit schrijft heeft dat op 2026-10-18 nagelezen via de publieke devnet-RPC
+  (`getTransaction`, finalized: één vereiste handtekening, `2jDzaP3F…`).
+
+**Controles per stap (18 oktober).** Alleen (b3) en (b3b) leggen een exit-code vast (beide 0); bij de andere
+stappen staat de uitkomstregel in het bestand.
+
+| Stap | Wat | Uitkomst |
+|---|---|---|
+| (b0) | Helius-RPC bereikbaar | 5× HTTP 200 |
+| (a0) | toolchain vastgelegd | solana-cli 4.1.2, anchor-cli 1.1.2, platform-tools v1.54 |
+| (a) | verse dump (publieke RPC, slot 512435703) tegen de referentiedump (slot 505218089) | 50 accounts, ruw en per veld gelijk |
+| (a2) | PendingAction-PDA's van de 19 wallets | groen: geen PendingAction, op beide RPC's |
+| (b) | `--pre`: timelock, voorstel, buffer, recovery-/wachtrij-invariant | 2 van 2 groen; timelock ~302 uur verstreken; buffer-sha256 `33598b3d…` over 737080 bytes, rest nul |
+| (b2) | overzicht voorstellen 1-16 | #15 Approved (2jDz…, 3zZc…), #16 bestaat niet, geen blockers |
+| (b3) | simulatie van de transactie van knop 4 (Helius) | groen, `err` null, 34479 van 200000 CU (exit 0) |
+| (b3b) | paginaroute van knop 4, zonder ondertekenen of versturen | groen: één Squads-instructie voor #15, v0, 12 statische accounts (exit 0) |
+| (c) | uitvoering via knop 4 | handtekening `5fzfhNoN…` |
+| (d) | `--post`: recovery-/wachtrij-invariant | 1 van 1 groen; 50 accounts, 0 PendingAction |
+| (d2) | PendingAction-PDA's na de uitvoering | groen, op beide RPC's |
+| (e) | vijf verificaties in §95-stijl (publieke RPC) | alle vijf OK |
+| (f1) | dump na de uitvoering (publieke RPC, slot 512439503) tegen de referentie | 50 accounts, ruw en per veld gelijk |
+| (f2) | dump via Helius (slot 512439605) tegen (f1) | 50 accounts, ruw en per veld gelijk |
+| (f3) | de vijf verificaties via Helius | alle vijf OK |
+| (f4) | `--post` via Helius | groen: 50 accounts, 0 PendingAction |
+
+Kanttekeningen bij de bestanden:
+- In het bestand van (f4) staan de kop `=== --post stap 1/1` en de slotregel "Alle 1 stap(pen) van --post
+  groen." niet; de GROEN-regel staat er wel. Bij (d) staan beide wel.
+- Van de uitvoerbestanden is dat van (a2) het laatste vóór (c): het is van 14:30 en de slots (512436387 publiek, 512436389
+  Helius) liggen na die van (b3b) (512436023) en vóór de uitvoering (512437288).
+- De accountlayout verandert niet bij deze upgrade: (a) en (f1) zijn allebei gelijk aan dezelfde referentie,
+  vóór en na de uitvoering. Dit is de upgrade zonder migratie uit §163.
+- De wallet `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ` heeft vóór en na de uitvoering een lopende
+  recovery, zonder PendingAction; zie de open punten.
+
+**Verloop.**
+- 13 oktober: poging gestopt vóór (a2); niets verstuurd.
+- 17 oktober: groen tot en met (a2), daarna onderbroken.
+- 18 oktober: opnieuw vanaf de Voorbereiding. Vóór knop 4 is twee keer per ongeluk op knop 3 (goedkeuren)
+  geklikt. De pagina hield dat zelf tegen (`checkProposalReadyForAction`, status Approved); er ging niets naar
+  de wallet. De klok van 10 minuten tussen (b) en (c) is daarom één keer opnieuw gestart, en (b0) tot en met
+  (b3b) zijn binnen die nieuwe klok opnieuw gedraaid en groen. Daarna knop 4. Na de uitvoering hield de
+  pagina een tweede klik op knop 4 tegen (status Executed).
+
+**Bewaking.** De bewaking van #15 uit §184 (`bewaak72u`) draaide als systemd-gebruikersdienst, niet als losse
+lus zoals het draaiboek aannam. Het `pkill`-patroon van stap (c) vindt die dienst niet. De dienst is vóór (b)
+met `systemctl --user disable --now` uitgezet en blijft uit.
+
+**Observatie voor later.** Knoppen 3 en 4 van de adminpagina staan dicht op elkaar en lijken op elkaar.
+Voorstel: ze visueel scheiden. Dat is een later punt; de pagina is nu niet gewijzigd.
+
+**Correctie op §185: vergeleken met de verkeerde basis.** §185 vergeleek de layout van de RC met `1fb3134`.
+Dat is de pin van de testfixture van active-defense, niet wat er op de keten draaide. Sinds voorstel #13
+(§148) draaide de build van `69a59a4`, en die had `spend_threshold_lamports` en `disarmed` al. #15 voegde op
+de keten dus alleen `recovery_nonce_snapshot` toe. De RC-binary is `33598b3d…` uit commit `63e993a`. Verder
+is "Commit lokaal, niet gepusht" in §185 achterhaald: `44cf6e7` (secties 184 en 185) staat op `origin/main`.
+
+**Open punten:**
+- De lopende recovery van wallet `5MoXqgBD…` opruimen onder de nieuwe code, als eigen stap met eigen
+  controles.
+- Een functionele proef op het echte programma, in §95-stijl.
+- Ontwerppunt vóór mainnet (uit §185, ongewijzigd): active-defense leest `disarmed` en `recovery_state` van
+  spankwallet niet. Dat is alleen betrouwbaar met een gedeelde definitie (`declare_program!` of
+  gelijkwaardig).
+
+**Stand.** Commit lokaal, niet gepusht.

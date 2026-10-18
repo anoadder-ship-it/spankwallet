@@ -18354,9 +18354,10 @@ stappen staat de uitkomstregel in het bestand.
 
 Kanttekeningen bij de bestanden:
 - In het bestand van (f4) staan de kop `=== --post stap 1/1` en de slotregel "Alle 1 stap(pen) van --post
-  groen." niet; de GROEN-regel staat er wel. Bij (d) staan beide wel.
-- Van de uitvoerbestanden is dat van (a2) het laatste vóór (c): het is van 14:30 en de slots (512436387 publiek, 512436389
-  Helius) liggen na die van (b3b) (512436023) en vóór de uitvoering (512437288).
+  groen." niet, en dat is verwacht. Het draaiboek roept in (f4) `scripts/checkRecoveryQueueInvariant.ts`
+  rechtstreeks aan (met de Helius-RPC), niet via `scripts/preUpgradeChecks.ts` zoals in (d). Alleen
+  `preUpgradeChecks.ts` drukt die kop en slotregel af; de GROEN-regel komt uit het invariant-script zelf en
+  staat er wel.
 - De accountlayout verandert niet bij deze upgrade: (a) en (f1) zijn allebei gelijk aan dezelfde referentie,
   vóór en na de uitvoering. Dit is de upgrade zonder migratie uit §163.
 - De wallet `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ` heeft vóór en na de uitvoering een lopende
@@ -18367,9 +18368,14 @@ Kanttekeningen bij de bestanden:
 - 17 oktober: groen tot en met (a2), daarna onderbroken.
 - 18 oktober: opnieuw vanaf de Voorbereiding. Vóór knop 4 is twee keer per ongeluk op knop 3 (goedkeuren)
   geklikt. De pagina hield dat zelf tegen (`checkProposalReadyForAction`, status Approved); er ging niets naar
-  de wallet. De klok van 10 minuten tussen (b) en (c) is daarom één keer opnieuw gestart, en (b0) tot en met
-  (b3b) zijn binnen die nieuwe klok opnieuw gedraaid en groen. Daarna knop 4. Na de uitvoering hield de
-  pagina een tweede klik op knop 4 tegen (status Executed).
+  de wallet. De klok van 10 minuten tussen (b) en (c) is daarom één keer opnieuw gestart.
+- 18 oktober, tweede ronde (lokale tijd; de tijden zijn de bestandstijden van de uitvoerbestanden, behalve
+  de start van de klok en de eerste run van (a), die opgaven van de eigenaar zijn): (b0) 14:26, (a0) 14:27,
+  (a) twee keer gedraaid rond 14:27 (laatste run 14:27:58), nieuwe klok gestart om 14:28:10, (b) 14:28,
+  (b2) 14:28, (b3) 14:29, (b3b) 14:29, alle groen. (a2) was in die ronde overgeslagen en is om 14:30:42
+  alsnog gedraaid, groen op beide RPC's (slots 512436387 publiek en 512436389 Helius, na (b3b) op 512436023).
+  Daarna knop 4: de uitvoertransactie heeft blockTime 12:34:15Z, 14:34:15 lokaal, binnen de klok.
+- Na de uitvoering hield de pagina een tweede klik op knop 4 tegen (status Executed).
 
 **Bewaking.** De bewaking van #15 uit §184 (`bewaak72u`) draaide als systemd-gebruikersdienst, niet als losse
 lus zoals het draaiboek aannam. Het `pkill`-patroon van stap (c) vindt die dienst niet. De dienst is vóór (b)

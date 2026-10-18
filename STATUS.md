@@ -18317,11 +18317,14 @@ tot 14:44 lokale tijd), tenzij anders vermeld. Bestanden van een eerdere poging 
   slot 512437288, blockTime 2026-10-18T12:34:15Z, `err` null. Squads `VaultTransactionExecute` naar de
   BPF Upgradeable Loader (in de simulatie van (b3): "Upgraded program 9ma6vQ…").
 - ProgramData `5bqcgypDa4fa4oVAYPLeYFocy9dyg1b49G9zmaGnwKEq`: 754893 bytes, `last_deploy_slot` 512437288
-  (gelijk aan de slot van de uitvoertransactie; was 501303135 sinds #13, §148). De sha256 van de eerste
-  737080 bytes is `33598b3ddb179d680cc26e8318ac9b60002808e7044234c472481a00974ae76f`, de reproduceerbare
-  build van `63e993a` (§163); de rest is 17768 bytes.
-- Buffer `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5` is gesloten: 3745204600 lamports naar de vault,
-  ProgramData -0.
+  (gelijk aan de slot van de uitvoertransactie; was 501303135 sinds #13, §148). De 754893 bytes zijn de
+  header van 45 bytes, daarna 737080 bytes RC-binary en daarna 17768 bytes zero-padding (45 + 737080 +
+  17768 = 754893). De sha256 van die 737080 bytes na de header is
+  `33598b3ddb179d680cc26e8318ac9b60002808e7044234c472481a00974ae76f`, de reproduceerbare build van
+  `63e993a` (§163). Dat de 17768 bytes erna allemaal nul zijn, heeft de sessie die dit schrijft op
+  2026-10-18 nagelezen via de publieke devnet-RPC (`getAccountInfo`, finalized).
+- Buffer `F5nh9UdF4XqYzN9pX9hL8YHLrrPKjH2HCwt87TgZdG5` is gesloten: 3745204600 lamports naar de vault, en
+  het saldo van ProgramData bleef gelijk.
 - De upgrade authority blijft de vault `89MEwqhfdqaz45Zoov6jsMkjmTiRZpCyKNq1yGMeVQcw`.
 - Voorstel #15 staat op Executed; `multisig.transactionIndex` blijft 15.
 - Uitgevoerd door lid `2jDzaP3FbW5583hb4FeGZVU9MYseqBeFHwxycjzcvT7Q` via knop 4 van de adminpagina, via de
@@ -18360,26 +18363,40 @@ Kanttekeningen bij de bestanden:
   staat er wel.
 - De accountlayout verandert niet bij deze upgrade: (a) en (f1) zijn allebei gelijk aan dezelfde referentie,
   vóór en na de uitvoering. Dit is de upgrade zonder migratie uit §163.
+- ComputeBudget: de echte uitvoertransactie heeft 13 statische accounts in plaats van de 12 van (b3b). De
+  wallet heeft er twee ComputeBudget-instructies vóór gezet (`SetComputeUnitPrice` 375000 micro-lamports
+  en `SetComputeUnitLimit` 200000, waarvan 199700 overblijft voor de Squads-instructie). (b3) noemde dit
+  vooraf al als afwijking 3. De Squads-instructie verbruikte 34479 CU, gelijk aan de simulatie; met de
+  twee ComputeBudget-instructies erbij is het totaal 34779 CU. Dit staat niet in de uitvoerbestanden: de
+  sessie die dit schrijft heeft het op 2026-10-18 nagelezen via de publieke devnet-RPC (`getTransaction`,
+  finalized).
 - De wallet `5MoXqgBDcVrsmSfCmHJ6dfX64P7wroZkV53GB2DcZJuZ` heeft vóór en na de uitvoering een lopende
   recovery, zonder PendingAction; zie de open punten.
 
 **Verloop.**
-- 13 oktober: poging gestopt vóór (a2); niets verstuurd.
-- 17 oktober: groen tot en met (a2), daarna onderbroken.
+- 13 oktober (opgave van de eigenaar): poging gestopt vóór (a2); niets verstuurd.
+- 17 oktober (opgave van de eigenaar): groen tot en met (a2), daarna onderbroken.
 - 18 oktober: opnieuw vanaf de Voorbereiding. Vóór knop 4 is twee keer per ongeluk op knop 3 (goedkeuren)
-  geklikt. De pagina hield dat zelf tegen (`checkProposalReadyForAction`, status Approved); er ging niets naar
-  de wallet. De klok van 10 minuten tussen (b) en (c) is daarom één keer opnieuw gestart.
+  geklikt (opgave van de eigenaar). De pagina hield dat zelf tegen (`checkProposalReadyForAction`, status
+  Approved); er ging niets naar de wallet. De klok van 10 minuten tussen (b) en (c) is daarom één keer
+  opnieuw gestart.
 - 18 oktober, tweede ronde (lokale tijd; de tijden zijn de bestandstijden van de uitvoerbestanden, behalve
   de start van de klok en de eerste run van (a), die opgaven van de eigenaar zijn): (b0) 14:26, (a0) 14:27,
   (a) twee keer gedraaid rond 14:27 (laatste run 14:27:58), nieuwe klok gestart om 14:28:10, (b) 14:28,
   (b2) 14:28, (b3) 14:29, (b3b) 14:29, alle groen. (a2) was in die ronde overgeslagen en is om 14:30:42
   alsnog gedraaid, groen op beide RPC's (slots 512436387 publiek en 512436389 Helius, na (b3b) op 512436023).
   Daarna knop 4: de uitvoertransactie heeft blockTime 12:34:15Z, 14:34:15 lokaal, binnen de klok.
-- Na de uitvoering hield de pagina een tweede klik op knop 4 tegen (status Executed).
+- Afwijking van de volgorde in het draaiboek: na een onderbreking schrijft het draaiboek "(b0), (a0), (a),
+  (a2), (b), (b3) en (b3b) opnieuw" voor, met (a2) vóór (b). In de tweede ronde van 18 oktober liep (a2) pas
+  na (b3b). Dat is onschadelijk: (a2) leest alleen, was groen op beide RPC's, liep vóór (c) en binnen de
+  klok, en (b) stap 2/2 gaf al "PendingAction-accounts: 0".
+- Na de uitvoering hield de pagina een tweede klik op knop 4 tegen (status Executed; opgave van de
+  eigenaar).
 
-**Bewaking.** De bewaking van #15 uit §184 (`bewaak72u`) draaide als systemd-gebruikersdienst, niet als losse
-lus zoals het draaiboek aannam. Het `pkill`-patroon van stap (c) vindt die dienst niet. De dienst is vóór (b)
-met `systemctl --user disable --now` uitgezet en blijft uit.
+**Bewaking.** Opgave van de eigenaar: de bewaking van #15 uit §184 (`bewaak72u`) draaide als
+systemd-gebruikersdienst, niet als losse lus zoals het draaiboek aannam, en is vóór (b) met
+`systemctl --user disable --now` uitgezet en blijft uit. Het `pkill`-patroon van stap (c) vindt zo'n dienst
+niet.
 
 **Observatie voor later.** Knoppen 3 en 4 van de adminpagina staan dicht op elkaar en lijken op elkaar.
 Voorstel: ze visueel scheiden. Dat is een later punt; de pagina is nu niet gewijzigd.

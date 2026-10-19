@@ -18430,6 +18430,12 @@ openbare repo. Zulke verwijzingen komen voortaan niet meer in STATUS; een sectie
 "privénotities, buiten git", zoals §184 al deed. De tekst van deze secties en de git-geschiedenis zijn niet
 herschreven.
 
+**Regel voor lokale paden buiten de repo (keuze van de beheerder, 19 oktober 2026).** In STATUS van deze
+openbare repo komen voortaan ook geen lokale paden buiten de repo naar sleutels, back-ups of configuratie. Een
+sectie noemt dan alleen de soort, bijvoorbeeld "de upgradesleutel, buiten git" of "een back-up, buiten git".
+Eerdere secties met zulke paden worden niet met terugwerkende kracht gecorrigeerd: de git-geschiedenis blijft
+openbaar, en een correctie haalt daar niets uit weg.
+
 **Correctie op §186: twee lage reviewpunten.**
 - L1, bewaking. §186 schrijft dat de bewaking als systemd-gebruikersdienst draaide, "niet als losse lus
   zoals het draaiboek aannam". Dat is half juist. Het klopt dat de bewaking een systemd-gebruikersdienst

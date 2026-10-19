@@ -18429,4 +18429,13 @@ openbare repo. Zulke verwijzingen komen voortaan niet meer in STATUS; een sectie
 "privénotities, buiten git", zoals §184 al deed. De tekst van §163 en de git-geschiedenis zijn niet
 herschreven.
 
+**Correctie op §186: twee lage reviewpunten.**
+- L1, bewaking. §186 schrijft dat de bewaking als systemd-gebruikersdienst draaide, "niet als losse lus
+  zoals het draaiboek aannam". Dat is half juist. Het klopt dat de bewaking een systemd-gebruikersdienst
+  was en vóór (b) is uitgezet. Maar het draaiboek van de uitvoerdag nam niet alleen een losse lus aan: het
+  behandelde beide gevallen (regels 128 en 374-386 van dat draaiboek).
+- L2, keuzes van de eigenaar. "Opnieuw vanaf de Voorbereiding" (bij het verloop van 18 oktober) en "via de
+  desktop-extensieroute" (bij de uitvoering) waren keuzes van de eigenaar op de uitvoerdag. §186 had ze als
+  keuze van de eigenaar moeten markeren.
+
 **Stand.** Commit lokaal, niet gepusht.

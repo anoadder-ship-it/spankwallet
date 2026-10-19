@@ -18416,3 +18416,17 @@ is "Commit lokaal, niet gepusht" in §185 achterhaald: `44cf6e7` (secties 184 en
   gelijkwaardig).
 
 **Stand.** Commit lokaal, niet gepusht.
+
+## 187. Correcties op eerdere secties (2026-10-19)
+
+**Alleen documentatie.** Deze sectie wijzigt geen code, tests, `admin/`, `programs/` of scripts. De tekst van
+eerdere secties blijft staan zoals hij is gepusht; wat daarin niet klopt, wordt hier gecorrigeerd.
+
+**Correctie op §163: verwijzingen naar privénotities.** Bij "Bewaard" noemt §163 twee bestandspaden, voor de
+geverifieerde .so en voor de keypair van de buffer. Die paden wijzen naar privénotities van de eigenaar buiten
+de repo; ze staan niet in de repo en zijn niet openbaar. Het zijn geen geheimen, maar ze horen niet in een
+openbare repo. Zulke verwijzingen komen voortaan niet meer in STATUS; een sectie schrijft dan alleen
+"privénotities, buiten git", zoals §184 al deed. De tekst van §163 en de git-geschiedenis zijn niet
+herschreven.
+
+**Stand.** Commit lokaal, niet gepusht.

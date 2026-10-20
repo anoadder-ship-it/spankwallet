@@ -18450,3 +18450,140 @@ openbaar, en een correctie haalt daar niets uit weg.
 (`60357fe`, gepusht op 2026-10-18).
 
 **Stand.** Commits lokaal, niet gepusht. Sectie 187 vraagt vóór de push een review door een verse sessie.
+
+## 188. Dependabot: rustls, brace-expansion bijgewerkt; stream-json getoetst aan het gebruik (2026-10-20)
+
+**Alleen afhankelijkheden en documentatie.** Deze sectie en de twee commits ervoor wijzigen geen code, tests,
+`admin/`, `programs/`, scripts, `Cargo.toml` of `package.json`. Gewijzigd zijn alleen
+`desktop/src-tauri/Cargo.lock` (D2), `package-lock.json` (D3) en `STATUS.md` (deze sectie). Er is geen
+GitHub-actie uitgevoerd; de nummers en advisories van de meldingen zijn een opgave van de beheerder, niet
+in deze sessie met `gh` gecontroleerd.
+
+**Nulmeting op `5208acc`.**
+- `desktop/src-tauri`: `cargo build --offline` geslaagd; `cargo test --offline`: 8 geslaagd, 1 mislukt. De
+  mislukte test is `rpc::tests::rpc_client_reaches_real_devnet`: die maakt een echte verbinding met een
+  Helius-devnet-RPC en kreeg `401`. Zonder die test: 8 van 8 geslaagd.
+- Hoofdmap: de twee jsdom-tests (`npx ts-mocha -p ./tsconfig.json --no-config tests/thresholdBanner.ts
+  tests/thresholdChangePanel.ts`): 26 passing. `npm run test:unit` (ts-mocha met `.mocharc.unit.yml`,
+  zonder validator, alleen een nep-RPC op 127.0.0.1): 295 passing. `--no-config` is nodig omdat
+  `.mocharc.yml` anders de validatorbewakers laadt.
+
+**Keuze van de beheerder (20 oktober 2026): de netwerktest wordt voortaan altijd overgeslagen** met
+`cargo test --offline -- --skip rpc_client_reaches_real_devnet`. De vergelijkingsbasis voor Rust is 8 van 8.
+
+**D2, `84a7dc8` "deps(desktop): rustls 0.23.43 -> 0.23.45 (Dependabot #43)".** GHSA-2mjx-qc3c-rqvc (TLS 1.3
+handshake messages accepted across encryption level boundaries), kwetsbaar >= 0.23.13 < 0.23.45. rustls
+loopt via `hyper-rustls` → `reqwest` → `reqwest-middleware` → `solana-rpc-client` naar
+`spankwallet-desktop` (`cargo tree --offline -i rustls`, na de wijziging: `rustls v0.23.45`).
+- `cargo update -p rustls --precise 0.23.45` (netwerk naar crates.io). De diff van `Cargo.lock` heeft twee
+  wijzigingen: `rustls` 0.23.43 → 0.23.45 (versie en checksum), en bij `tempfile` 3.27.0 de afhankelijkheid
+  `getrandom 0.4.3` → `getrandom 0.3.4`. `tempfile` 3.27.0 accepteert `getrandom >=0.3.0, <0.5`; cargo koos
+  bij het opnieuw oplossen de al aanwezige 0.3.4. Er zijn geen crates bijgekomen of verdwenen; beide
+  getrandom-versies stonden al in de lockfile.
+- **Keuze van de beheerder (20 oktober 2026):** die bijkomende wijziging bij `tempfile` is geaccepteerd. De
+  sessie had na het zien van de diff gestopt en niet gecommit, zoals de opdracht voorschreef.
+- Na `cargo fetch` (rustls 0.23.45 ophalen): `cargo build --offline` geslaagd; `cargo test --offline --
+  --skip rpc_client_reaches_real_devnet`: 8 geslaagd, 0 mislukt, 1 uitgefilterd. Gelijk aan de nulmeting
+  zonder de netwerktest. Geen `tauri bundle`, geen installers.
+
+**D3, `31235a2` "deps: brace-expansion -> 2.1.7 (Dependabot #46, ontwikkelafhankelijkheid)".**
+GHSA-q2hr-2g5m-vwhr, kwetsbaar >= 2.0.0 < 2.1.7. Pad: `mocha@10.8.2` → `minimatch@5.1.9` →
+`brace-expansion`; alleen een ontwikkelafhankelijkheid van de tests.
+- `npm update brace-expansion` in de hoofdmap. De diff van `package-lock.json` raakt alleen
+  `node_modules/brace-expansion`: 2.1.4 → 2.1.7 (versie, `resolved`, `integrity`). `npm ls brace-expansion
+  --all` toont daarna `brace-expansion@2.1.7`.
+- jsdom-tests: 26 passing; `npm run test:unit`: 295 passing. Gelijk aan de nulmeting.
+
+**S5: stream-json getoetst aan het gebruik.** Meldingen #39-#42, #47 en #48: `stream-json` 1.9.1 in
+`package-lock.json`, `desktop/package-lock.json` en `client/package-lock.json`, scope runtime.
+GHSA-hqr4-qq8f-hg3x (JSONC parser/verifier, DoS) en GHSA-mjw6-4jj6-33hc (prototype pollution in
+`Assembler`); opgelost pas in 3.6.0 (major). De toets hieronder is in deze sessie zelfstandig gemeten,
+alleen lezend.
+
+(a) `npm ls stream-json jayson --all`, in de hoofdmap, `desktop/` en `client/` hetzelfde:
+```
+└─┬ @solana/web3.js@1.98.4
+  └─┬ jayson@4.3.0
+    └── stream-json@1.9.1
+```
+
+(b) `grep -rn stream-json node_modules/jayson/lib`, in alle drie de mappen hetzelfde: alleen
+`node_modules/jayson/lib/utils.js` laadt stream-json:
+```
+node_modules/jayson/lib/utils.js:3:const StreamValues = require('stream-json/streamers/StreamValues');
+node_modules/jayson/lib/utils.js:4:const Verifier = require('stream-json/utils/Verifier');
+```
+Beide worden alleen gebruikt in `Utils.parseStream` (`utils.js:77-78`). `parseStream` wordt aangeroepen
+vanuit `jayson/lib/client/tcp.js:63`, `client/tls.js:62`, `server/tcp.js:39` en `server/tls.js:39`;
+`utils.js` zelf wordt geladen door `jayson/lib/index.js`, `method.js`, en de modules onder `client/` (index,
+http, tcp, tls, websocket) en `server/`. `Assembler` en `jsonc` komen in `jayson/lib` niet voor (0
+treffers in alle drie de mappen). `jayson/lib/utils.js` en `jayson/lib/client/browser/index.js` zijn in de
+drie mappen byte-gelijk (`cmp`).
+
+(c) Welke jayson-modules `@solana/web3.js` laadt, in alle builds onder `node_modules/@solana/web3.js/lib`
+(`index.browser.cjs.js`, `index.browser.esm.js`, `index.cjs.js`, `index.esm.js`, `index.native.js`,
+`index.iife.js`, `index.iife.min.js`), in alle drie de mappen hetzelfde:
+- de cjs-, esm-, browser- en native-builds laden alleen `jayson/lib/client/browser`
+  (bijvoorbeeld `index.cjs.js:15`, `index.esm.js:14`);
+- de sourcemaps noemen daarnaast `import {JSONRPCError} from 'jayson'`; dat is alleen een type (gedeclareerd
+  in `node_modules/jayson/index.d.ts`) en komt in geen gebouwde `.js` voor;
+- de iife-builds hebben de jayson-browserclient ingebakken (commentaar "Constructor for a Jayson Browser
+  Client that does not depend any node.js core libraries", `index.iife.js:16585`), zonder `require`;
+- `stream-json` en `StreamValues` komen in geen bestand onder `lib/` voor.
+
+`jayson/lib/client/browser/index.js` laadt alleen `uuid` en `../../generateRequest`; `generateRequest.js`
+laadt alleen `uuid`. Geen pad naar `utils.js` of stream-json.
+
+(d) Eigen code: `git grep -n -E "jayson|stream-json"` buiten lockfiles en `STATUS.md` geeft alleen de
+uuid-overrides onder `jayson` in `package.json:34`, `desktop/package.json:23` en `client/package.json:27`.
+Geen import van jayson of stream-json in eigen code.
+
+(e) Bundelcontrole: `npm run build -- --outDir <tijdelijke map buiten de repo> --emptyOutDir` in `desktop/`
+(`tsc && vite build`, 112 modules) en `client/` (`tsc --noEmit && vite build`, 301 modules), beide
+geslaagd; de werkboom bleef schoon en de tijdelijke map is daarna verwijderd. In de gebouwde bestanden
+(per map `index.html`, één `.js`, één `.css`):
+
+| Zoekterm | desktop | client |
+|---|---|---|
+| `stream-json` | 0 | 0 |
+| `StreamValues` | 0 | 0 |
+| `Assembler` | 0 | 0 |
+| `jsonc` (hoofdletterongevoelig) | 0 | 0 |
+| `jayson` (hoofdletterongevoelig) | 0 | 0 |
+| positieve controle: `JSON-RPC 1.0 does not support batching` (uit `jayson/lib/client/browser/index.js:57`) | 1 | 1 |
+
+De positieve controle laat zien dat de jayson-browserclient wél in beide bundels zit (geminificeerd, dus
+zonder de naam "jayson"), en dat de zoekmethode treffers vindt. Van `utils.js` en stream-json zit er niets in.
+
+(f) Conclusie per advisory.
+- **GHSA-hqr4-qq8f-hg3x (JSONC parser/verifier, DoS).** jayson gebruikt van stream-json alleen
+  `StreamValues` en `utils/Verifier`, uitsluitend in `parseStream` voor tcp/tls-clients en -servers. Die
+  modules laadt `@solana/web3.js` in geen enkele build; eigen code laadt jayson niet; de gebouwde bundels
+  van `desktop/` en `client/` bevatten niets van stream-json. Niet bereikbaar.
+- **GHSA-mjw6-4jj6-33hc (prototype pollution in `Assembler`).** `Assembler` wordt nergens in jayson geladen
+  of gebruikt, en komt in geen bundel voor. Niet bereikbaar.
+- In de hoofdmap gebruiken tests en scripts `@solana/web3.js` onder Node. Volgens `package.json` van
+  web3.js is `main` dan `lib/index.cjs.js`, en die laadt ook alleen `jayson/lib/client/browser`.
+
+**Voorstel, niet uitgevoerd.** De zes stream-json-meldingen (#39-#42, #47, #48) sluiten met
+`dismissed_reason` `not_used`, met als toelichting: "Niet bereikbaar: @solana/web3.js laadt alleen
+jayson/lib/client/browser; stream-json zit alleen achter jayson/lib/utils.js (parseStream, tcp/tls). Zie
+STATUS.md §188 Dependabot: rustls, brace-expansion bijgewerkt; stream-json getoetst aan het gebruik
+(2026-10-20)." Bij een volgende versie van `@solana/web3.js` of jayson moet de toets (b)-(e) opnieuw.
+`SECURITY.md` heeft geen tabel met bekende meldingen en is daarom niet bijgewerkt.
+
+**Overtredingen van de opdrachtregels in deze sessie.**
+- Bij de nulmeting draaide `cargo test --offline` de netwerktest `rpc_client_reaches_real_devnet` twee keer
+  (één keer voor de telling, één keer voor de details). Dat waren twee alleen-lezen `getSlot`-verzoeken naar
+  een Helius-devnet-RPC; beide kregen `401`. Er is niets verstuurd of ondertekend. De opdracht verbood
+  devnet; de sessie had de test vooraf moeten herkennen en overslaan.
+- Bij het zoeken naar de oorzaak van de `tempfile`-wijziging in D2 las de sessie de `Cargo.toml` van
+  `tempfile` 3.27.0 in het lokale cargo-register, buiten de repo. Dat is openbare crate-broncode, geen
+  privénotitie of configuratie, maar de opdracht verbood lezen buiten de repo.
+
+**Open punt: vaste terugvalwaarde voor de Helius-sleutel.** `desktop/src-tauri/src/rpc.rs` en
+`client/src/main.ts` bevatten nog een vaste terugvalwaarde voor de Helius-sleutel, voor als er bij het
+bouwen geen sleutel wordt meegegeven. Helius accepteert die sleutel niet meer (`401`, zie de nulmeting). Dit
+wordt apart opgelost door de terugvalwaarde te verwijderen.
+
+**Stand.** Commits lokaal, niet gepusht.

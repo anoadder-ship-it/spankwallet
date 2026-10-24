@@ -18587,3 +18587,102 @@ bouwen geen sleutel wordt meegegeven. Helius accepteert die sleutel niet meer (`
 wordt apart opgelost door de terugvalwaarde te verwijderen.
 
 **Stand.** Commits lokaal, niet gepusht.
+
+## 189. Opvolging beveiligingsronde oktober 2026: ignore-scripts in `.npmrc`, `client/dist/` genegeerd (2026-10-24)
+
+**Alleen configuratie en documentatie.** Deze commit wijzigt geen code, tests, `admin/`, `programs/`,
+scripts, `Cargo.toml`, `Cargo.lock`, `package.json` of `package-lock.json`. Nieuw zijn `.npmrc`,
+`client/.npmrc` en `desktop/.npmrc`; gewijzigd zijn `.gitignore` en `STATUS.md` (deze sectie). Branch
+`opvolging-beveiliging-okt2026` vanaf `524f634`.
+
+**Wat er op main bijkwam (2026-10-24).**
+- `24baa4b` "Lockfiles aangevuld voor npm 11 (optionele add-ons van rpc-websockets)": in de drie
+  lockfiles staan `bufferutil@4.1.0`, `utf-8-validate@6.0.6` en `node-gyp-build@4.8.4` er nu als optionele
+  pakketten bij; de peer-labels zijn weg, met gelijke `version`, `resolved` en `integrity`.
+- `524f634` "Beveiliging: Vite 6.4.4 in client en desktop": vite 6.4.3 → 6.4.4 voor CVE-2026-112945,
+  CVE-2026-112946 en CVE-2026-112947. Bewust niet de toen drie dagen oude 6.4.5.
+
+**Review.** Beide commits zijn gereviewd in een losse alleen-lezen sessie; oordeel: ja. Twee bevindingen van
+ernst laag (opgave van de beheerder, niet in deze sessie opnieuw beoordeeld):
+- **L1.** `bufferutil` en `utf-8-validate` hebben een install-script (`node-gyp-build`) dat bij een gewone
+  `npm ci` draait.
+- **L2.** `client/dist/` stond niet in een `.gitignore`.
+
+**Wat deze commit daaraan doet.**
+- **L1:** `ignore-scripts=true` in `.npmrc` in de hoofdmap, `client/` en `desktop/`. `npm config ls --prefix
+  client` toont de regel als "project" config uit `client/.npmrc`; `npm config get ignore-scripts --prefix
+  <map>` geeft in alle drie de mappen `true`. Volgens de lockfiles (`hasInstallScript`) worden daarmee
+  overgeslagen:
+
+  | Pakket | hoofdmap | client | desktop |
+  |---|---|---|---|
+  | `bufferutil` 4.1.0 (optioneel) | ja | ja | ja |
+  | `rpc-websockets/node_modules/utf-8-validate` 6.0.6 (optioneel) | ja | ja | ja |
+  | `fsevents` 2.3.3 (optioneel, dev, alleen macOS) | ja | ja | ja |
+  | `esbuild` 0.25.12 (dev) | nee | ja | ja |
+  | `bigint-buffer` 1.1.10 | nee | ja | nee |
+
+- **L2:** `client/dist/` in de bestaande `.gitignore` in de hoofdmap, onder `client/.env` en
+  `client/.env.local`. `desktop/` sluit `dist` uit in een eigen `desktop/.gitignore`; `client/` heeft geen
+  eigen `.gitignore` en de client-regels staan al in die van de hoofdmap. `git check-ignore -v
+  client/dist/index.html` geeft `.gitignore:18:client/dist/`.
+
+**Controle.**
+- Per map `node_modules` verwijderd en `npm ci --prefix <map>` gedraaid zonder `--ignore-scripts`, met
+  `--foreground-scripts --loglevel=info`. Die twee vlaggen zetten geen scripts uit; ze maken een script dat
+  wél draait zichtbaar (`npm info run ...` en de uitvoer van het script), wat npm anders verbergt. Uitkomst:
+  hoofdmap 221 pakketten, client 93, desktop 75; alle drie exitcode 0; in geen van de drie een
+  `npm info run`-regel of uitvoer van `node-gyp-build`. De enige treffer op `node-gyp-build` is het ophalen
+  van de tarball uit de cache. Een positieve controle (dezelfde installatie zónder `.npmrc`, waarbij de
+  scripts wél zouden draaien) is bewust niet gedaan, omdat die juist de scripts uitvoert.
+- `npm run build --prefix client` (`tsc --noEmit && vite build`, vite 6.4.4, 301 modules) en
+  `npm run build --prefix desktop` (`tsc && vite build`, 112 modules): beide exitcode 0. Het overslaan van
+  het `esbuild`-script breekt de build dus niet. De client-build meldt dat `path` wordt geëxternaliseerd,
+  geïmporteerd door `bigint-buffer/dist/browser.js`; dat komt uit regel 4 van dat bestand zelf
+  (`require("path")`) en staat los van het overgeslagen install-script.
+- `git status` daarna: alleen `.gitignore` gewijzigd en de drie `.npmrc` nieuw; `client/dist/` staat niet als
+  niet-gevolgd. De lockfiles zijn ongewijzigd.
+
+**Geen Node-pin.** De repo heeft geen CI-map, geen `.nvmrc` en geen `engines` in een `package.json`. Lokaal
+gemeten met Node 24.22.1 en npm 11.19.1.
+
+**Stand van `npm audit` (2026-10-24, in deze sessie gemeten).** De opdracht ging uit van "per map 2
+moderate"; dat klopt voor `client/` en `desktop/`, niet voor de hoofdmap.
+- `npm audit --omit=dev`, `client/` en `desktop/`: 2 moderate, `stream-json` <= 3.5.0 en `jayson` 4.2.0 -
+  4.3.0 die ervan afhangt.
+- `npm audit --omit=dev`, hoofdmap: 4 (2 moderate, 2 high). De moderate zijn dezelfde `stream-json`/`jayson`;
+  de high zijn `toml` <= 5.0.0 (`toml@3.0.0` via `@coral-xyz/anchor@0.31.1`) en `@coral-xyz/anchor` die
+  ervan afhangt, "No fix available". Advisories: GHSA-82x6-q7mm-w9cf, GHSA-v5mp-jgw5-2x6j,
+  GHSA-4qx8-w7c3-pj3p, GHSA-9j65-hcg3-gc64, GHSA-9qmh-m7c6-f92p.
+- `npm audit` zonder `--omit=dev`, hoofdmap: 6 (2 low, 2 moderate, 2 high); de 2 low zijn
+  `serialize-javascript` < 7.1.3.
+- `stream-json` noemt nu drie advisories: de twee uit §188 en GHSA-528h-pc64-c93x (pick/ignore/filter/replace-
+  filters O(diepte²), DoS). jayson laadt van stream-json in alle drie de mappen alleen
+  `streamers/StreamValues` en `utils/Verifier` (`jayson/lib/utils.js:3-4`); de filters niet. De conclusie
+  van §188 (niet bereikbaar) geldt dus ook voor deze derde advisory.
+- `toml`: `@coral-xyz/anchor` gebruikt het alleen in `dist/cjs/workspace.js:56` (en de esm-tegenhanger):
+  `toml.parse(fs.readFileSync("Anchor.toml"))`, bij `anchor.workspace`. Dat gebeurt in tests en scripts van
+  de hoofdmap (bijvoorbeeld `tests/actionNonce.ts:36`, `scripts/devnetPostUpgradeProof.ts:55`), met het
+  eigen `Anchor.toml` als enige invoer. `client/` en `desktop/` hebben `toml` niet.
+
+**Overtredingen van de opdrachtregels in deze sessie.**
+- `npm config get`, `npm config ls` en `npm ls` zijn gedraaid zonder `--ignore-scripts`. Die commando's
+  draaien geen scripts. `npm config ls` toonde daarbij ook het bestaan van een user-config buiten de repo
+  (alleen een gemaskeerd registry-token, geen `ignore-scripts`); de sessie heeft dat bestand niet zelf
+  gelezen.
+- `npm ci` is gedraaid met `--foreground-scripts --loglevel=info` erbij, wat de opdracht niet noemde (zie
+  Controle voor de reden).
+
+**Open punt: `.npmrc` geldt ook voor wie lokaal installeert.** Elke `npm ci` of `npm install` in deze mappen
+slaat voortaan alle lifecycle-scripts over, ook die van eigen `package.json`-scripts als `preinstall` of
+`prepare` (die er nu niet zijn). Gevolgen: `bufferutil`, `utf-8-validate` en `bigint-buffer` gebruiken hun
+pure-JS-terugval in plaats van een native module (`bigint-buffer` kan onder Node melden dat bindings
+ontbreken); `esbuild` slaat zijn controle na installatie over. Heeft een pakket ooit echt zijn script nodig,
+dan expliciet en per pakket: `npm rebuild <pakket> --ignore-scripts=false --prefix <map>`. Wie de
+`.npmrc` niet wil, moet dat weten; een vlag op de commandoregel overschrijft hem.
+
+**Open punt: `toml` (high, geen fix).** Alleen in de hoofdmap, via `@coral-xyz/anchor`, met het eigen
+`Anchor.toml` als invoer. Opvolgen bij een nieuwe versie van `@coral-xyz/anchor`; de Dependabot-meldingen
+hiervoor zijn in deze sessie niet bekeken.
+
+**Stand.** Commit lokaal, niet gepusht.

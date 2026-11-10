@@ -83,16 +83,6 @@ export function showConfirmationCard(
     const card = document.createElement("div");
     card.className = options.tone === "danger" ? "preview-card preview-card-danger" : "preview-card";
 
-    const fieldsHtml = options.fields
-      .map(
-        (f) => `
-      <div class="preview-field">
-        <label class="preview-label" for="preview-input-${f.id}">${f.label}</label>
-        <input id="preview-input-${f.id}" class="preview-input" type="text" value="${f.defaultValue}" autocomplete="off" spellcheck="false" />
-      </div>`
-      )
-      .join("");
-
     const friction = options.friction ?? "click";
     const holdDurationMs = options.holdDurationMs ?? DEFAULT_HOLD_DURATION_MS;
     const confirmBtnClass = friction === "hold" ? "preview-btn preview-confirm preview-confirm-hold" : "preview-btn preview-confirm";
@@ -104,7 +94,7 @@ export function showConfirmationCard(
     card.innerHTML = `
       <div class="preview-eyebrow">${options.eyebrow}</div>
       <div class="preview-headline" id="preview-headline"></div>
-      ${fieldsHtml}
+      <div class="preview-fields" id="preview-fields"></div>
       <div class="preview-error" id="preview-error"></div>
       <div class="preview-actions">
         <button type="button" class="preview-btn preview-deny" id="preview-deny-btn">${options.denyLabel ?? "Weiger"}</button>
@@ -112,6 +102,36 @@ export function showConfirmationCard(
       </div>
     `;
     root.appendChild(card);
+
+    // Velden via DOM-API's opbouwen (label.textContent / input.value), NOOIT
+    // via innerHTML-interpolatie. Een veldlabel of default-waarde kan keten- of
+    // gebruikersdata bevatten; een `"` in een `value="..."`-attribuut zou anders
+    // uit het attribuut breken en markup/handlers injecteren op precies het
+    // scherm dat de ondertekenaar moet beschermen. textContent/.value parsen
+    // nooit als HTML, dus dit is injectie-immuun ongeacht de inhoud - robuuster
+    // dan per-context escapen (escapeHtml() dekt `"` bewust niet, zie daar).
+    const fieldsContainer = card.querySelector<HTMLElement>("#preview-fields")!;
+    for (const f of options.fields) {
+      const fieldWrap = document.createElement("div");
+      fieldWrap.className = "preview-field";
+
+      const labelEl = document.createElement("label");
+      labelEl.className = "preview-label";
+      labelEl.htmlFor = `preview-input-${f.id}`;
+      labelEl.textContent = f.label;
+
+      const inputEl = document.createElement("input");
+      inputEl.id = `preview-input-${f.id}`;
+      inputEl.className = "preview-input";
+      inputEl.type = "text";
+      inputEl.value = f.defaultValue;
+      inputEl.autocomplete = "off";
+      inputEl.spellcheck = false;
+
+      fieldWrap.appendChild(labelEl);
+      fieldWrap.appendChild(inputEl);
+      fieldsContainer.appendChild(fieldWrap);
+    }
 
     const headlineEl = card.querySelector<HTMLElement>("#preview-headline")!;
     const errorEl = card.querySelector<HTMLElement>("#preview-error")!;

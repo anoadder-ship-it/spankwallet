@@ -18686,3 +18686,105 @@ dan expliciet en per pakket: `npm rebuild <pakket> --ignore-scripts=false --pref
 hiervoor zijn in deze sessie niet bekeken.
 
 **Stand.** Commit lokaal, niet gepusht.
+
+## 190. Externe review van de kernpaden + hardening van de bevestigingskaart (2026-11-09/10)
+
+Uitgevoerd in een losse reviewsessie (Claude, cloud-omgeving), op een kale clone van
+`main` @ `c2a275f`. Statische review: de code is gelezen, niet gebouwd met `anchor build` en
+niet tegen een validator gedraaid.
+
+**Gelezen.**
+
+| onderdeel | wat |
+|---|---|
+| `programs/spankwallet/src/state.rs`, `lib.rs` | volledig |
+| `instructions.rs` regels 1–1370 | WebAuthn/secp256r1-verificatie, nonce, `init_wallet`, `execute` + spend-window-poort, `transfer_token`, allowlist, `execute_advanced` |
+| `instructions.rs` regels 4109–5121 | recovery (initiate/cancel/finalize), `add_session_key`, `remove_session_key`, `close_*`, de drie `_via_session`-instructies |
+| `client/src/` | `challenge.ts`, `webauthnSign.ts`, `secp256r1.ts`, `passkey.ts`, `execute.ts`, `executeAdvanced.ts`, `executePreview.ts`, `executeAdvancedPreview.ts`, `confirmationCard.ts` |
+
+**Niet gelezen (dus geen uitspraak over).** `instructions.rs` regels 1370–4109 (hunt, de
+`initiate_*`/`confirm_pending_action`/`finalize_*`-bodies van de wachtrij, freeze/unfreeze,
+drempelwijziging, passkey-beheer), `desktop/` (Tauri, `fee_payer.rs`), `admin/`, `scripts/`,
+`tests/`, en de overige branches.
+
+**Uitkomst op wat gelezen is: geen bevinding die fondsen raakt.** Nagelopen en in orde:
+de precompile-binding (bericht = authenticatorData ‖ SHA-256(clientDataJSON), UV-vlag,
+`webauthn.get`, challenge), de nonce in elke challenge, de `require!(false)`-blokkades op
+de directe `transfer_token`/`execute_advanced`, de volledige binding van het CPI-doel
+(programma, accounts met vlaggen, data), de sessielimieten (`checked_add` vóór de
+overdracht, epoch-check, sessie-PDA gebonden aan wallet + sleutel), en de verplichte
+passkeys-wis in `finalize_recovery`. De fail-open-opmerking bij `action_nonce` (sectie 85)
+is nagerekend en opent geen replay: 0 is ook de juiste startwaarde.
+
+**Wijziging (1 bestand): `client/src/confirmationCard.ts`.** De velden van de kaart werden
+als HTML-string opgebouwd met `f.label` en `value="${f.defaultValue}"` ongeëscaped in
+`innerHTML`. Vandaag niet misbruikbaar: elke aanroeper geeft een base58-adres of een getal
+mee. Maar `escapeHtml()` in datzelfde bestand escaped geen `"`, dus een latere default met
+een aanhalingsteken zou uit het attribuut breken, op het scherm dat de ondertekenaar moet
+beschermen. De velden worden nu met DOM-API's gebouwd (`textContent`, `.value`); de id's
+zijn gelijk gebleven, dus de live-headline en de validatie werken ongewijzigd. `eyebrow`,
+`denyLabel` en `confirmLabel` staan nog als string in `innerHTML`: dat zijn vaste teksten
+uit de broncode. Gecontroleerd met `node --check`; **niet in een browser getest.**
+
+**Open punt: Helius-sleutel in de broncode.** `client/src/main.ts` regel 109 heeft een
+devnet-API-sleutel als terugvalwaarde achter `VITE_HELIUS_API_KEY`. `.env` en `.env.local`
+staan in `.gitignore`, deze terugvalwaarde niet. Gevolg hooguit dat iemand het quotum
+opmaakt. Voorstel: sleutel bij Helius vervangen en de terugvalwaarde weghalen. Niet
+gewijzigd in deze sessie.
+
+**Opmerking over reikwijdte.** `client/src/main.ts` is een devnet-proefopstelling (airdrops,
+vaste bedragen van 1000 lamports), geen productie-UI. De bevestigingskaarten en de
+tekenfuncties zijn herbruikbaar en zijn als zodanig beoordeeld; hoe een latere productie-UI
+ze aan elkaar knoopt, is niet beoordeeld.
+
+**`npm audit` (hoofdmap, 2026-11-09):** 2 high, 2 moderate, 2 low; de high-meldingen zijn
+`toml` via `@coral-xyz/anchor` (zelfde open punt als sectie 189) en de `jayson`/`stream-json`-
+keten (sectie 188).
+
+**Stand.** Wijziging als patch aangeleverd; niet gecommit, niet gepusht.
+
+
+## 191. Correctie op sectie 190: de Helius-sleutel is geen open punt (2026-11-10)
+
+Sectie 190 noemde de Helius-sleutel in `client/src/main.ts` regel 109 een open punt en stelde
+voor de terugvalwaarde weg te halen. Dat was onvolledig: de reviewsessie had secties 107 en
+109 niet gelezen.
+
+**Wat al besloten was (secties 107 punt 5 en 109).** De sleutel hoort bij een gratis,
+devnet-only Helius-account en is geen geheim. De terugvalwaarde staat bewust in de broncode,
+op drie plekken (`client/src/main.ts`, `admin/config.js`, `desktop/src-tauri/src/rpc.rs`),
+zodat een verse kloon zonder configuratiestap werkt. De env-var bestaat alleen om rotatie
+tot één regel te beperken.
+
+**Correctie.** Het punt in sectie 190 vervalt als open punt. Het voorstel om de
+terugvalwaarde weg te halen is ingetrokken; het ging tegen het besluit van sectie 109 in.
+Het gevolg dat 190 noemde (iemand kan het quotum van het devnet-account opmaken) klopt en
+was in 107 al aanvaard.
+
+**Wat wel blijft gelden, ongewijzigd uit 109.** Zodra er een Helius-sleutel komt die geld
+kost of mainnet bedient, mag die niet als terugvalwaarde in de broncode en hoort
+`admin/config.js` naar `.gitignore`. Een sleutel in een browser-client is altijd zichtbaar
+voor de gebruiker; de bescherming daarvan is een beperking bij Helius zelf (toegestane
+domeinen), niet het verbergen in de code.
+
+**Browsertest van de kaart (open punt uit 190).** `client/src/confirmationCard.ts` is met
+esbuild gebundeld en in headless Chromium (Playwright) geladen, los van de rest van de client.
+Dezelfde test is gedraaid op de oude versie (`c2a275f`) en op de nieuwe.
+
+| controle | oud (`c2a275f`) | nieuw |
+|---|---|---|
+| veldlabel en default met `"><img src=x onerror=...>`: handler uitgevoerd | ja | nee |
+| geïnjecteerde `img`/`script`-elementen in de kaart | 4 | 0 |
+| invoerveld en label tonen de tekst letterlijk | nee | ja |
+| live-headline volgt de invoer, geëscaped | ja | ja |
+| ongeldige invoer: foutmelding, kaart blijft staan | ja | ja |
+| Bevestig geeft de waarden terug en ruimt de kaart op; Weiger geeft `null` | ja | ja |
+| hold-modus: losse klik en te vroeg loslaten bevestigen niet; volledig vasthouden wel | niet gemeten | ja |
+
+De oude versie was dus wel degelijk injecteerbaar zodra een label of default een `"` bevat;
+de nieuwe niet. Geen pagina-fouten in de nieuwe versie.
+
+**Niet gedaan:** de kaart in de volledige client met de eigen CSS, een echte passkey-ceremonie
+erna, en andere browsers dan Chromium.
+
+Geen codewijziging in deze sectie.

@@ -18874,3 +18874,109 @@ Chrome; de gebouwde productiebundel in een browser (alleen gebouwd, de test liep
 programma-deel van §190 opnieuw nalezen; `npm audit` opnieuw draaien; de `node --check` uit §190 nadoen.
 
 **Stand.** Commit lokaal, niet gepusht. Sectie 192 vraagt vóór de push een review door een verse sessie.
+
+## 193. De 9 Dependabot-meldingen na de push van 190-192; ronde 1: rustls en serialize-javascript bijgewerkt (2026-11-11)
+
+**Aanleiding.** Bij de push van `c2a275f..e97ab80` meldde GitHub 9 kwetsbaarheden op `main` (4 hoog, 1 middel,
+4 laag); §190 noemde er 6 uit `npm audit`. De meldingen zijn gelezen met `gh api` (alleen lezen) en per
+melding getoetst aan de lockbestanden en het gebruik in de repo. De volgorde van de rondes hieronder is een
+besluit van de cloudsessie, genomen na dat overzicht.
+
+**Correctie op §192: "Commit lokaal, niet gepusht."** Achterhaald: 190 t/m 192 staan op `origin/main`
+(`e97ab80`).
+
+**De 9 open meldingen.**
+
+| # | ernst | pakket | lockbestand | pad | waar terecht | eerder in STATUS |
+|---|---|---|---|---|---|---|
+| 49, 50, 51 | hoog | `toml` 3.0.0 (fix 5.0.1): drie DoS-advisories in `toml.parse()` | `package-lock.json` (hoofdmap) | `@coral-xyz/anchor@0.31.1` → `toml` | alleen tests en scripts van de hoofdmap | §189 noemt de advisories uit `npm audit`; de meldingen zelf waren niet bekeken |
+| 57 | hoog | `toml` 3.0.0: prototype pollution (GHSA-h895, 2026-11-11) | idem | idem | idem | nieuw; verwant aan #22 (afgewezen als `tolerable_risk`) |
+| 54 | middel | `rustls` 0.23.45 (fix 0.23.46): Debug-weergave toont TLS-geheimen | `desktop/src-tauri/Cargo.lock` | `reqwest`/`hyper-rustls` → `solana-rpc-client` en `tauri` → `spankwallet-desktop` | desktop-app (TLS naar de RPC) | nieuw; §188 D2 was de vorige rustls-melding (#43) |
+| 53, 55, 56 | laag | `rustls` 0.23.45: ECH-afwijzing, terugval naar klassiek X25519, Brotli-decompressie | idem | idem | desktop-app | nieuw |
+| 52 | laag | `serialize-javascript` 7.1.0 (fix 7.1.3): `</script` aan het eind van een functie | `package-lock.json` (hoofdmap), development | `mocha@10.8.2` → `serialize-javascript` (override) | alleen de testrunner | §189 noemt het pakket, zonder beoordeling |
+
+Gemeten in de repo: `client/` en `desktop/` hebben `toml` en `serialize-javascript` niet in hun lockbestand;
+`admin/vendor/` en de bouwmappen bevatten geen `toml.parse` of `serialize-javascript`; de `Cargo.lock` van het
+programma bevat geen `rustls`. `toml` wordt alleen aangeroepen in `anchor.workspace`, met het eigen
+`Anchor.toml` als enige invoer (§189). Dependabot ziet `toml` als "runtime" omdat de hoofdmap
+(`spankwallet-tests`) anchor onder `dependencies` heeft.
+
+**Waarom 6 en 9.** `npm audit` telt pakketten, ook de pakketten die ervan afhangen, en alleen npm: `toml` en
+`@coral-xyz/anchor` (hoog), `stream-json` en `jayson` (middel), `serialize-javascript` en `mocha` (laag).
+Dependabot telt open advisories per lockbestand, ook uit Cargo: 4 voor `toml` (waarvan #57 nieuw), 1 voor
+`serialize-javascript`, 4 voor `rustls`. Niet in de 9: anchor, jayson en mocha (Dependabot meldt alleen het
+kwetsbare pakket zelf), `stream-json` (#19-21, #39-42, #47, #48 afgewezen als `not_used`, §188) en de oudere
+`toml`-meldingen #22 en #23 (afgewezen als `tolerable_risk`).
+
+**Oordeel: geen melding raakt de live wallet of de gebruiker.** Het programma op de keten, de client en de
+adminkant bevatten geen van deze pakketten.
+- `toml` (#49-51, #57): alleen tests en scripts op de eigen machine; invoer is het eigen `Anchor.toml`. #57
+  is de ernstigste, omdat vervuiling van `Object.prototype` een heel scriptproces raakt, maar dat vraagt een
+  kwaadaardig `Anchor.toml` in de repo.
+- `rustls` #54: de desktopcode heeft geen `{:?}` of `dbg!`; of afhankelijkheden een TLS-sessie zo weergeven,
+  is niet in hun broncode nagelezen. Ook dan gaat het om TLS-geheimen van een RPC-verbinding, niet om
+  wallet-sleutels.
+- `rustls` #53: ECH moet expliciet worden ingesteld; in onze code gebeurt dat niet. De standaard van
+  `reqwest` is niet in de broncode nagelezen.
+- `rustls` #55: de lock bevat `ring` en geen `aws-lc-rs`; naar verwachting wordt er dan geen hybride
+  post-quantum-share aangeboden (niet in de broncode van rustls nagelezen). Ook anders blijft het een
+  klassiek veilige verbinding.
+- `rustls` #56: `rustls` heeft in de lock geen `brotli`-afhankelijkheid, dus deze functie zit er niet in.
+- `serialize-javascript` #52: alleen mocha, om tussen workers te serialiseren; er komt geen HTML uit.
+- De desktop-app werkt nu sowieso niet tegen Helius door de dode terugvalsleutel (§188, §192).
+
+**Leeftijd van de doelversie.** De repo heeft hier geen eigen regel voor; de `.npmrc` in de drie mappen
+bevat alleen `ignore-scripts=true`. Gevolgd is de regel uit de opdracht: geen versie jonger dan 14 dagen.
+`rustls` 0.23.46: gepubliceerd 2026-10-14 (crates.io, niet teruggetrokken), 28 dagen. `serialize-javascript`
+7.1.3: gepubliceerd 2026-10-22 (npm), 20 dagen. Beide bruikbaar.
+
+**Ronde 1a, `615dbaf` "deps(desktop): rustls 0.23.45 -> 0.23.46 (Dependabot #53-#56)".**
+`cargo update -p rustls --precise 0.23.46` (netwerk naar crates.io). De diff van `Cargo.lock` is alleen
+`rustls`: versie en checksum; de lijst met afhankelijkheden is ongewijzigd.
+
+| controle | vóór | na |
+|---|---|---|
+| `cargo test --offline -- --skip rpc_client_reaches_real_devnet` | 8 passed, 1 overgeslagen | 8 passed, 1 overgeslagen |
+| `cargo check` | - | schoon |
+| `cargo tree -i rustls` | - | `rustls v0.23.46`, via `hyper-rustls`, `reqwest`, `tokio-rustls` |
+
+De netwerktest is overgeslagen omdat hij de dode terugvalsleutel gebruikt (`401`, §188).
+
+**Ronde 1b, `c724003` "deps: serialize-javascript override -> 7.1.3 (Dependabot #52, ontwikkelafhankelijkheid)".**
+De bestaande override in `package.json` van de hoofdmap van `^7.0.3` naar de vaste versie `7.1.3`;
+`npm install --ignore-scripts`. De diff van `package-lock.json` is alleen `serialize-javascript` (versie,
+`resolved`, `integrity`); `npm ls` toont `serialize-javascript@7.1.3 overridden` onder `mocha@10.8.2`.
+
+| controle | vóór (7.1.0) | na (7.1.3) |
+|---|---|---|
+| `npm run test:unit` | 295 passing | 295 passing |
+| het voorbeeld uit de advisory (`toString()` eindigt op `</script`, `space: 2`): `</script` onge-escaped in de uitvoer | ja | nee |
+
+Het voorbeeld op 7.1.0 is gedraaid op een tijdelijk uitgepakt pakket in `node_modules/` (genegeerd), daarna
+verwijderd.
+
+**Dependabot.** Geen melding met de hand gesloten. Dependabot sluit #52-#56 zelf zodra de gepushte
+lockbestanden opnieuw gescand zijn.
+
+**Volgende rondes (besluit, nog niet uitgevoerd).**
+- Ronde 2, pas na de push van ronde 1 en met een eigen review: `toml` naar 5.0.1 via een override in de
+  hoofdmap (#49-51, #57). Controles: `anchor.workspace` laadt het echte `Anchor.toml` met dezelfde
+  program-id's; de unit-tests groen; een test dat het document uit GHSA-h895 `Object.prototype` niet meer
+  vervuilt; alleen `package.json` en `package-lock.json` in de diff. Slaagt een controle niet: terugdraaien
+  en een voorstel om de meldingen met reden af te wijzen, zoals #22 en #23.
+- Ronde 3: de dode terugvalsleutel verwijderen uit `client/src/main.ts` en `desktop/src-tauri/src/rpc.rs`,
+  zoals eerder besloten (fout bij een lege of ongeldige sleutel, geen compileerfout, netwerktest overslaan
+  zonder sleutel, het cargo-configuratiebestand van de desktop in `.gitignore`), met de vier lage punten uit
+  de review van 192.
+- `programs/` en `admin/` worden in geen ronde aangeraakt.
+
+**Open punt: de desktop leest de Helius-sleutel nog niet bij het starten uit een bestand buiten git.** Tot dat
+er is, worden bundels van de client en binaries van de desktop met een geldige sleutel niet gedeeld: Vite zet
+een `VITE_*`-waarde letterlijk in de bundel, en `option_env!` zet hem in het binary.
+
+**Niet gedaan.** `npm audit` niet opnieuw gedraaid; de broncode van `rustls`, `reqwest` en `toml` niet
+gelezen. De netwerkregisters zijn alleen gebruikt om `rustls` 0.23.46 en `serialize-javascript` 7.1.3 (en
+voor het voorbeeld 7.1.0) op te halen en hun publicatiedatum te lezen; `cargo` las daarbij zoals altijd het
+lokale cargo-register en de toolchain.
+
+**Stand.** Commits lokaal, niet gepusht. Sectie 193 vraagt vóór de push een review door een verse sessie.

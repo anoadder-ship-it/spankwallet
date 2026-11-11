@@ -18891,7 +18891,7 @@ besluit van de cloudsessie, genomen na dat overzicht.
 |---|---|---|---|---|---|---|
 | 49, 50, 51 | hoog | `toml` 3.0.0 (fix 5.0.1): drie DoS-advisories in `toml.parse()` | `package-lock.json` (hoofdmap) | `@coral-xyz/anchor@0.31.1` → `toml` | alleen tests en scripts van de hoofdmap | §189 noemt de advisories uit `npm audit`; de meldingen zelf waren niet bekeken |
 | 57 | hoog | `toml` 3.0.0: prototype pollution (GHSA-h895, 2026-11-11) | idem | idem | idem | nieuw; verwant aan #22 (afgewezen als `tolerable_risk`) |
-| 54 | middel | `rustls` 0.23.45 (fix 0.23.46): Debug-weergave toont TLS-geheimen | `desktop/src-tauri/Cargo.lock` | `reqwest`/`hyper-rustls` → `solana-rpc-client` en `tauri` → `spankwallet-desktop` | desktop-app (TLS naar de RPC) | nieuw; §188 D2 was de vorige rustls-melding (#43) |
+| 54 | middel | `rustls` 0.23.45 (fix 0.23.46): Debug-weergave toont TLS-geheimen | `desktop/src-tauri/Cargo.lock` | `hyper-rustls`/`tokio-rustls` → `reqwest` → `reqwest-middleware` → `solana-rpc-client` → `spankwallet-desktop` (`cargo tree --offline --locked -i rustls`; geen pad via `tauri`) | desktop-app (TLS naar de RPC) | nieuw; §188 D2 was de vorige rustls-melding (#43) |
 | 53, 55, 56 | laag | `rustls` 0.23.45: ECH-afwijzing, terugval naar klassiek X25519, Brotli-decompressie | idem | idem | desktop-app | nieuw |
 | 52 | laag | `serialize-javascript` 7.1.0 (fix 7.1.3): `</script` aan het eind van een functie | `package-lock.json` (hoofdmap), development | `mocha@10.8.2` → `serialize-javascript` (override) | alleen de testrunner | §189 noemt het pakket, zonder beoordeling |
 
@@ -18905,8 +18905,13 @@ programma bevat geen `rustls`. `toml` wordt alleen aangeroepen in `anchor.worksp
 `@coral-xyz/anchor` (hoog), `stream-json` en `jayson` (middel), `serialize-javascript` en `mocha` (laag).
 Dependabot telt open advisories per lockbestand, ook uit Cargo: 4 voor `toml` (waarvan #57 nieuw), 1 voor
 `serialize-javascript`, 4 voor `rustls`. Niet in de 9: anchor, jayson en mocha (Dependabot meldt alleen het
-kwetsbare pakket zelf), `stream-json` (#19-21, #39-42, #47, #48 afgewezen als `not_used`, §188) en de oudere
-`toml`-meldingen #22 en #23 (afgewezen als `tolerable_risk`).
+kwetsbare pakket zelf), de `stream-json`-meldingen en de oudere `toml`-meldingen #22 en #23. Volgens `gh api`
+(alleen lezen, 2026-11-12) staan die elf meldingen alle op `dismissed`:
+- #19-21 (`stream-json`, `not_used`) en #22, #23 (`toml`, `tolerable_risk`): afgewezen op 2026-09-14;
+  vastgelegd in §138.
+- #39-42, #47, #48 (`stream-json`): afgewezen op 2026-10-20 tussen 13:18:11 en 13:18:17 UTC, met
+  `dismissed_reason` `not_used` en een toelichting die naar §188 verwijst. §188 bevat alleen het voorstel
+  daartoe ("Voorstel, niet uitgevoerd"); de afwijzing zelf staat in geen enkele sectie van STATUS.md.
 
 **Oordeel: geen melding raakt de live wallet of de gebruiker.** Het programma op de keten, de client en de
 adminkant bevatten geen van deze pakketten.
@@ -18954,6 +18959,9 @@ De bestaande override in `package.json` van de hoofdmap van `^7.0.3` naar de vas
 
 Het voorbeeld op 7.1.0 is gedraaid op een tijdelijk uitgepakt pakket in `node_modules/` (genegeerd), daarna
 verwijderd.
+
+`serialize-javascript` 7.1.4 bestaat (2026-10-23); de override blijft bewust vast op 7.1.3, de versie die de
+melding oplost en die getest is; een latere versie vraagt een eigen wijziging.
 
 **Dependabot.** Geen melding met de hand gesloten. Dependabot sluit #52-#56 zelf zodra de gepushte
 lockbestanden opnieuw gescand zijn.

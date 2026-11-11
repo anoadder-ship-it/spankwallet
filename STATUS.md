@@ -18794,7 +18794,8 @@ Geen codewijziging in deze sectie.
 **Alleen documentatie, plus één commentaar.** In `client/src/confirmationCard.ts` is alleen het commentaar
 bij de velden aangepast; het gedrag is ongewijzigd. De tekst van secties 190 en 191 blijft staan; wat daarin
 niet klopt, wordt hier gecorrigeerd. Uitgevoerd in een verse lokale sessie (Claude) als review van
-`f751167`; de beheerder en de reviewsessie van 190 en 191 hebben het oordeel daarna bevestigd.
+`f751167`. De cloudsessie die 190 en 191 schreef, heeft het oordeel daarna bevestigd; de eigenaar heeft de
+opdracht voor deze sectie gegeven.
 
 **Correctie op §191: de terugvalsleutel van Helius is wél een open punt.** §191 steunde op secties 107 en
 109 en miste 180, 184 en 188. Volgens die latere secties:

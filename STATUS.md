@@ -18788,3 +18788,88 @@ de nieuwe niet. Geen pagina-fouten in de nieuwe versie.
 erna, en andere browsers dan Chromium.
 
 Geen codewijziging in deze sectie.
+
+## 192. Correctie op sectie 191 (Helius-sleutel) en browsertest van de kaart in de echte client (2026-11-11)
+
+**Alleen documentatie, plus één commentaar.** In `client/src/confirmationCard.ts` is alleen het commentaar
+bij de velden aangepast; het gedrag is ongewijzigd. De tekst van secties 190 en 191 blijft staan; wat daarin
+niet klopt, wordt hier gecorrigeerd. Uitgevoerd in een verse lokale sessie (Claude) als review van
+`f751167`; de beheerder en de reviewsessie van 190 en 191 hebben het oordeel daarna bevestigd.
+
+**Correctie op §191: de terugvalsleutel van Helius is wél een open punt.** §191 steunde op secties 107 en
+109 en miste 180, 184 en 188. Volgens die latere secties:
+- §180: de sleutel bleek wél een geheim. Hij stond openbaar en het tegoed was op. De adminkant leest de
+  sleutel sindsdien uit een lokaal bestand buiten git; `admin/config.js` bevat geen sleutel meer, alleen een
+  `throw`. "Op drie plekken, waaronder `admin/config.js`" in §191 klopt dus niet: de terugvalwaarde staat nog
+  op twee plekken, `client/src/main.ts` en `desktop/src-tauri/src/rpc.rs`. §180 kondigde al aan dat die in een
+  latere commit verdwijnen.
+- §184: de sleutel uit §180 is ingetrokken; de nieuwe sleutel staat in een eigen Helius-project en alleen in
+  het lokale sleutelbestand.
+- §188: Helius geeft op de terugvalsleutel `401`. Open punt: de terugvalwaarde verwijderen.
+
+Gevolg: het quotumrisico dat §190 noemde en §191 "aanvaard" noemde, bestaat niet meer, want de sleutel werkt
+niet. Wat overblijft is een dode sleutel in de broncode, en een bouw zonder `VITE_HELIUS_API_KEY` (client) of
+`HELIUS_API_KEY` (desktop) geeft een programma dat pas bij het eerste RPC-verzoek met `401` faalt. Het voorstel
+in §190 om de terugvalwaarde weg te halen was dus juist; alleen "sleutel bij Helius vervangen" was al gedaan
+(§184). De intrekking van dat voorstel in §191 vervalt; het open punt is dat van §188. Ook het commentaar
+boven de sleutel in `client/src/main.ts` is verouderd: het noemt de sleutel geen geheim en
+`admin/wallet-signer.html` als derde plek.
+
+**Correctie op §190: "Stand. Wijziging als patch aangeleverd; niet gecommit, niet gepusht."** Achterhaald: de
+wijziging staat in `f751167`, lokaal, niet gepusht.
+
+**Aanvulling op §191: geen Stand-regel.** De stand van 190 en 191: in `f751167`, lokaal, niet gepusht.
+
+**Commentaar in `confirmationCard.ts`.** Er stond "escapeHtml() dekt `"` bewust niet, zie daar". Dat
+`escapeHtml()` geen `"` escapet, klopt: het leest de `innerHTML` van een tekstknoop terug, en daarin worden
+alleen `&`, `<`, `>` en de harde spatie geëscaped. Dat het bewust zo is, staat nergens. Het woord "bewust" en
+de verwijzing zijn weg; het commentaar zegt nu waarom `"` blijft staan.
+
+**Browsertest in de echte client (open punt uit 191).** Opzet: de Vite-devserver van `client/` op 127.0.0.1,
+dus met de echte `index.html` (met de CSP), `main.ts` en `style.css`; headless Google Chrome 157 via
+Playwright (playwright-core 1.62.1, een lokale installatie buiten de repo). Al het verkeer buiten 127.0.0.1
+werd geblokkeerd; er vertrok geen enkel extern verzoek. Via de stapknoppen is de kaart niet te bereiken
+zonder devnet en passkey (airdrop, `init_wallet`). Daarom zijn in de geladen pagina aangeroepen:
+`showConfirmationCard` rechtstreeks, `showExecutePreview` (klik) en `showAddAllowedProgramPreview` (hold,
+danger) met een vervangende connection die voor elk account `null` teruggeeft. Dezelfde test is gedraaid op
+`f751167` en op `c2a275f` (losse worktree, daarna verwijderd).
+
+Kwaadaardige invoer: label `Label "q" <b …>vet</b> & <img … onerror=…>` en default
+`a"><img … onerror=…>&amp;<script>…</script>`.
+
+| controle | oud (`c2a275f`) | nieuw (`f751167`) |
+|---|---|---|
+| geïnjecteerde elementen in de kaart | 4 | 0 |
+| inline handler uitgevoerd | nee (CSP) | nee |
+| invoerveld en label tonen de tekst letterlijk | nee | ja |
+| `type=text`, `autocomplete=off`, `spellcheck=false` op dat veld | nee (attributen weggevallen) | ja |
+| headline echoot de default letterlijk, zonder elementen | nee (toont `a`) | ja |
+| getypte `"` en `<`: headline volgt letterlijk, niets geïnjecteerd | ja | ja |
+| ongeldige invoer: foutmelding, kaart blijft staan | ja | ja |
+| Bevestig geeft de waarden letterlijk terug en ruimt op; Weiger geeft `null` | ja | ja |
+| `showExecutePreview`: standaardwaarden en labels als voorheen | ja | ja |
+| hold-kaart: `"` en `<` in het veld injecteren niets | ja | ja |
+| hold: losse klik, loslaten na 900 ms, cursor wegschuiven, Enter 500 ms bevestigen niet | ja | ja |
+| hold: muis ongeveer 2,1 s en Enter 2,2 s vasthouden bevestigen | ja | ja |
+| CSS van de client op de velden (marge 14px, monospace, radius 6px) | ja | ja |
+| paginafouten | 0 | 0 |
+
+Nieuw: 28 van 28 controles groen. Oud: 5 rood (de rijen 1 en 3 t/m 5). De nieuwe wrapper `.preview-fields`
+verandert de opmaak niet: de stylesheet heeft geen selectors op directe kinderen van de kaart.
+
+**CSP-nuance bij rij 1 van de tabel in §191.** "Handler uitgevoerd: ja" gold alleen voor de losse test, zonder
+de pagina. In de echte client blokkeert de CSP (`script-src 'self'`, zonder `'unsafe-inline'`) inline
+handlers; ook met `c2a275f` liep de `onerror` niet. Chrome meldt: "Executing inline event handler violates
+the following Content Security Policy directive 'script-src 'self''". Wat in de echte client wél gebeurde,
+was markup-injectie op het tekenscherm: vreemde elementen in de kaart, een invoerveld dat `a` toonde in plaats
+van de waarde, en losse attribuuttekst onder het veld. De wijziging van `f751167` blijft dus nodig; de CSP is
+een tweede laag, geen vervanging.
+
+**Typecheck en bouw van de client.** `tsc --noEmit`: exit 0, ook na de commentaarwijziging. `vite build`:
+exit 0, met de bestaande waarschuwing dat `path` voor `bigint-buffer` is geëxternaliseerd.
+
+**Niet gedaan.** De route via de stapknoppen met devnet en een echte passkey-ceremonie; andere browsers dan
+Chrome; de gebouwde productiebundel in een browser (alleen gebouwd, de test liep op de devserver); het
+programma-deel van §190 opnieuw nalezen; `npm audit` opnieuw draaien; de `node --check` uit §190 nadoen.
+
+**Stand.** Commit lokaal, niet gepusht. Sectie 192 vraagt vóór de push een review door een verse sessie.

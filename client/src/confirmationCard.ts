@@ -109,7 +109,8 @@ export function showConfirmationCard(
     // uit het attribuut breken en markup/handlers injecteren op precies het
     // scherm dat de ondertekenaar moet beschermen. textContent/.value parsen
     // nooit als HTML, dus dit is injectie-immuun ongeacht de inhoud - robuuster
-    // dan per-context escapen (escapeHtml() dekt `"` bewust niet, zie daar).
+    // dan per-context escapen (escapeHtml() escapet `"` niet: het leest de
+    // innerHTML van een tekstknoop terug, en daarin blijven aanhalingstekens staan).
     const fieldsContainer = card.querySelector<HTMLElement>("#preview-fields")!;
     for (const f of options.fields) {
       const fieldWrap = document.createElement("div");

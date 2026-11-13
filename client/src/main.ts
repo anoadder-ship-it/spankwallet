@@ -97,17 +97,38 @@ let lastCredentialId2: Uint8Array | null = null;
 let lastSessionKeypair: Keypair | null = null;
 let lastSessionExpirySlot: bigint | null = null;
 
-// STATUS.md sectie 107/109: was hardcoded op drie plekken (hier,
-// admin/wallet-signer.html, desktop/src-tauri/src/rpc.rs) - nu een
-// env-var, uitsluitend zodat rotatie ooit één regel is i.p.v. drie
-// bestanden. GEEN echte secret-hantering: dit is een gratis, devnet-only
-// Helius-sleutel (bevestigd in sectie 107 punt 5) - de hardcoded waarde
-// hieronder is bewust de terugvaloptie, niet een placeholder, zodat een
-// verse kloon zonder enige configuratiestap blijft werken. Eigen sleutel
-// zetten: client/.env.local (Vite laadt dit automatisch, .gitignored) met
-// VITE_HELIUS_API_KEY=<sleutel>.
-const HELIUS_API_KEY = import.meta.env.VITE_HELIUS_API_KEY ?? "f39fc413-6730-4848-a60f-a6685a6f04d3";
-const connection = new Connection(`https://devnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`, "confirmed");
+// Helius-devnet-RPC (STATUS.md sectie 194). De sleutel is een geheim en hoort
+// nooit in git; het besluit uit secties 107/109 dat hij "geen echte secret"
+// was en als vaste terugvalwaarde in de broncode mocht staan, is vervangen
+// (§180, §188, §192, §194). Zet hem in client/.env.local (genegeerd door
+// .gitignore) als VITE_HELIUS_API_KEY=<sleutel>; Vite leest dat bestand bij
+// `npm run dev` en `npm run build`. Let op: Vite zet een VITE_*-waarde
+// letterlijk in de gebouwde bundel, dus een bundel met een geldige sleutel
+// deel je niet.
+//
+// Zonder geldige sleutel (ontbreekt, leeg na trim, of geen UUID-vorm) maakt
+// de client geen verbinding: hij toont een fout in het uitvoerveld, schakelt
+// de startknop uit en stopt hier, zodat er geen enkel RPC-verzoek vertrekt en
+// geen knop een handler krijgt. De waarde zelf wordt nooit getoond.
+const HELIUS_KEY_FORMAT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function createHeliusDevnetConnection(): Connection {
+  const key = (import.meta.env.VITE_HELIUS_API_KEY ?? "").trim();
+  if (!HELIUS_KEY_FORMAT.test(key)) {
+    const reason = key === "" ? "ontbreekt of is leeg" : "heeft niet de vorm van een Helius-sleutel (UUID)";
+    const message =
+      `FOUT: VITE_HELIUS_API_KEY ${reason}. Zet de sleutel in client/.env.local als ` +
+      "VITE_HELIUS_API_KEY=<sleutel> en start de devserver opnieuw of bouw de client opnieuw. " +
+      "Er is geen verbinding met devnet gemaakt.";
+    log(message);
+    const startBtn = document.getElementById("start-btn") as HTMLButtonElement | null;
+    if (startBtn) startBtn.disabled = true;
+    throw new Error(message);
+  }
+  return new Connection(`https://devnet.helius-rpc.com/?api-key=${key}`, "confirmed");
+}
+
+const connection = createHeliusDevnetConnection();
 
 /**
  * STATUS.md sectie 135: DE ENE plek die bepaalt wat stap 24/25's paneel

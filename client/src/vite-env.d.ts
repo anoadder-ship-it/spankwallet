@@ -1,8 +1,9 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  // STATUS.md sectie 107/109: optionele override voor de hardcoded
-  // Helius-devnet-sleutel in main.ts - geen echte secret, zie daar.
+  // STATUS.md sectie 194: de Helius-devnet-sleutel, een geheim. Alleen in
+  // client/.env.local (genegeerd door .gitignore), nooit in git. Er is geen
+  // terugvalwaarde: zonder geldige sleutel maakt main.ts geen verbinding.
   readonly VITE_HELIUS_API_KEY?: string;
 }
 

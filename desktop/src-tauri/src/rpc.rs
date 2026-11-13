@@ -5,44 +5,72 @@
 // challenge-opbouw/tx-verzending, fee_payer.rs voor de airdrop-knop).
 use solana_rpc_client::rpc_client::RpcClient;
 
-// STATUS.md sectie 107/109: was hardcoded op drie plekken (hier,
-// client/src/main.ts, admin/wallet-signer.html) - nu een build-time env
-// var (`option_env!`, Rust's idiomatische equivalent van Vite's
-// import.meta.env: compile-time-opgelost, geen runtime-bestandslezing
-// nodig), uitsluitend zodat rotatie ooit één regel is i.p.v. drie
-// bestanden. GEEN echte secret-hantering: dit is een gratis, devnet-only
-// Helius-sleutel (bevestigd in sectie 107 punt 5) - de hardcoded waarde
-// hieronder is bewust de terugvaloptie, niet een placeholder, zodat een
-// verse kloon zonder enige configuratiestap blijft bouwen/werken. Eigen
-// sleutel zetten: `HELIUS_API_KEY=<sleutel> cargo build` (of via
-// `desktop/src-tauri/.cargo/config.toml`'s `[env]`-sectie voor een
-// blijvende lokale override).
-pub const HELIUS_API_KEY: &str = match option_env!("HELIUS_API_KEY") {
-    Some(key) => key,
-    None => "f39fc413-6730-4848-a60f-a6685a6f04d3",
-};
+// Helius-devnet-sleutel (STATUS.md sectie 194). De sleutel is een geheim en
+// staat niet in git; het besluit uit secties 107/109 ("geen echte secret",
+// een vaste terugvalwaarde in de broncode) is vervangen (§180, §188, §192,
+// §194). Hij wordt bij het bouwen meegegeven via `option_env!`:
+// `HELIUS_API_KEY=<sleutel> cargo build`, of blijvend lokaal via de
+// `[env]`-sectie van `desktop/src-tauri/.cargo/config.toml` (genegeerd door
+// .gitignore). Let op: `option_env!` zet de waarde letterlijk in het binary;
+// een binary met een geldige sleutel deel je niet. Zonder sleutel bouwt de app
+// gewoon (bewust geen compileerfout, §193), maar geeft rpc_client() een fout en
+// vertrekt er geen RPC-verzoek. Het lezen van de sleutel uit een bestand bij het
+// starten is een apart, nog open punt (§193).
+const HELIUS_API_KEY: Option<&str> = option_env!("HELIUS_API_KEY");
 
-pub fn devnet_rpc_url() -> String {
-    format!("https://devnet.helius-rpc.com/?api-key={HELIUS_API_KEY}")
+// Helius-sleutels hebben de vorm van een UUID (8-4-4-4-12 hexadecimale tekens).
+fn is_helius_key_format(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
-pub fn rpc_client() -> RpcClient {
-    RpcClient::new(devnet_rpc_url())
+// De foutmelding noemt de variabele en waar hij gezet wordt, nooit de waarde.
+fn devnet_rpc_url_for(key: Option<&str>) -> Result<String, String> {
+    let key = key.map(str::trim).unwrap_or("");
+    let reason = if key.is_empty() {
+        "ontbreekt of is leeg in deze build"
+    } else if !is_helius_key_format(key) {
+        "heeft in deze build niet de vorm van een Helius-sleutel (UUID)"
+    } else {
+        return Ok(format!("https://devnet.helius-rpc.com/?api-key={key}"));
+    };
+    Err(format!(
+        "HELIUS_API_KEY {reason}. Bouw de app opnieuw met HELIUS_API_KEY=<sleutel> in de omgeving, \
+         of zet hem in de [env]-sectie van desktop/src-tauri/.cargo/config.toml. \
+         Er is geen verbinding met devnet gemaakt."
+    ))
+}
+
+pub fn devnet_rpc_url() -> Result<String, String> {
+    devnet_rpc_url_for(HELIUS_API_KEY)
+}
+
+pub fn rpc_client() -> Result<RpcClient, String> {
+    devnet_rpc_url().map(RpcClient::new)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Echte devnet-RPC-aanroep (STATUS.md sectie 107/109) - bewijst niet
-    // alleen dat devnet_rpc_url() de terugvalsleutel correct opbouwt, maar
-    // ook dat die sleutel daadwerkelijk nog geldig is tegen de echte
-    // Helius-devnet-infrastructuur. Netwerkafhankelijk, bewust: dit project
-    // vertrouwt consequent op echte devnet-aanroepen i.p.v. gemockte
-    // clients (zie STATUS.md, meermaals).
+    // Echte devnet-RPC-aanroep (STATUS.md sectie 107/109/194), alleen als de
+    // build een sleutel meekreeg (HELIUS_API_KEY bij het bouwen). Zonder sleutel
+    // controleert hij alleen dat rpc_client() een fout geeft, zonder netwerk, en
+    // slaat hij de echte aanroep over; zo raakt de standaardrun het netwerk niet.
+    // Netwerkafhankelijk als er wel een sleutel is, bewust: dit project vertrouwt
+    // op echte devnet-aanroepen in plaats van gemockte clients.
     #[test]
     fn rpc_client_reaches_real_devnet() {
-        let client = rpc_client();
+        if HELIUS_API_KEY.map(str::trim).unwrap_or("").is_empty() {
+            assert!(rpc_client().is_err(), "zonder sleutel hoort rpc_client() een fout te geven");
+            eprintln!("rpc_client_reaches_real_devnet overgeslagen: geen HELIUS_API_KEY in deze build");
+            return;
+        }
+        let client = rpc_client().expect("HELIUS_API_KEY in deze build hoort een geldige sleutel te zijn");
         let slot = client.get_slot().expect("getSlot tegen echte devnet-RPC moet slagen");
         assert!(slot > 0, "een geldige devnet-slot moet positief zijn");
     }

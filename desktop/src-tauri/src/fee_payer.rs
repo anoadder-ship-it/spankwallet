@@ -213,7 +213,9 @@ pub fn request_fee_payer_airdrop(state: State<'_, FeePayerState>) -> Result<Stri
         .parse()
         .map_err(|_| FeePayerError::Internal("ongeldige fee-payer-pubkey".to_string()))?;
 
-    let rpc = crate::rpc::rpc_client();
+    // Ontbrekende of ongeldige sleutel: dezelfde leesbare Io-route als de
+    // rate-limit-melding hieronder, zodat de kaart de tekst toont.
+    let rpc = crate::rpc::rpc_client().map_err(FeePayerError::Io)?;
     match rpc.request_airdrop(&pubkey, 1_000_000_000) {
         Ok(signature) => Ok(signature.to_string()),
         Err(e) => {

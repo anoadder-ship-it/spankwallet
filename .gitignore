@@ -12,7 +12,10 @@ admin/*.pem
 # nooit in git. De adminkant leest hem uit ~/.config/spankwallet/helius-devnet.key
 # (buiten de repo); admin/config.js is alleen de terugval en bevat geen sleutel.
 # client/ zet zijn sleutel in client/.env.local (hieronder genegeerd); de
-# hardcoded terugval in client/ en desktop/ verdwijnt in een latere commit.
+# desktop krijgt hem bij het bouwen, eventueel via de [env]-sectie van
+# desktop/src-tauri/.cargo/config.toml (hieronder genegeerd). Er is geen
+# terugvalwaarde meer in de broncode (sectie 194).
 client/.env
 client/.env.local
 client/dist/
+desktop/src-tauri/.cargo/

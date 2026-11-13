@@ -86,7 +86,7 @@ pub fn prepare_execute_challenge(
     let wallet_pubkey = parse_pubkey("wallet_pda", &wallet_pda)?;
     let recipient_pubkey = parse_pubkey("recipient", &recipient)?;
 
-    let rpc = rpc_client();
+    let rpc = rpc_client().map_err(ExecuteError::RpcError)?;
     let account = rpc
         .get_account(&wallet_pubkey)
         .map_err(|e| ExecuteError::RpcError(e.to_string()))?;
@@ -201,7 +201,7 @@ pub fn execute_action(
     let fee_payer_pubkey_str = fee_payer_pubkey(&fee_payer_state)?;
     let fee_payer_pubkey_parsed = parse_pubkey("fee_payer", &fee_payer_pubkey_str)?;
 
-    let rpc = rpc_client();
+    let rpc = rpc_client().map_err(ExecuteError::RpcError)?;
     let fee_payer_balance = rpc
         .get_balance(&fee_payer_pubkey_parsed)
         .map_err(|e| ExecuteError::RpcError(e.to_string()))?;

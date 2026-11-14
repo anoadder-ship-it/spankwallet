@@ -17,10 +17,17 @@
 // opmaak-injectiegat (zie STATUS.md sectie 58 - eerder gevonden en
 // gefixt in executePreview.ts, hier gedeeld zodat elke volgende kaart
 // hem niet zelf hoeft te herimplementeren of te vergeten).
+// STATUS.md sectie 196: alle vijf de HTML-tekens, ook `"` en `'`, zodat de
+// uitvoer ook in een attribuutwaarde veilig is. De zichtbare tekst in een
+// element is gelijk aan die van de vorige versie (die las de innerHTML van een
+// tekstknoop terug en liet aanhalingstekens staan).
 export function escapeHtml(value: string): string {
-  const div = document.createElement("div");
-  div.textContent = value;
-  return div.innerHTML;
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export interface ConfirmationCardField {
@@ -109,8 +116,8 @@ export function showConfirmationCard(
     // uit het attribuut breken en markup/handlers injecteren op precies het
     // scherm dat de ondertekenaar moet beschermen. textContent/.value parsen
     // nooit als HTML, dus dit is injectie-immuun ongeacht de inhoud - robuuster
-    // dan per-context escapen (escapeHtml() escapet `"` niet: het leest de
-    // innerHTML van een tekstknoop terug, en daarin blijven aanhalingstekens staan).
+    // dan per-context escapen (escapeHtml() escapet sinds STATUS.md sectie 196
+    // ook `"` en `'`, maar DOM-functies blijven hier de regel).
     const fieldsContainer = card.querySelector<HTMLElement>("#preview-fields")!;
     for (const f of options.fields) {
       const fieldWrap = document.createElement("div");

@@ -9,11 +9,19 @@
  * ConfirmationCardField (default "text", ongewijzigd gedrag) - nodig voor
  * de fee-payer-wachtwoordkaarten (`type: "password"`), die als enige in
  * deze app een niet-zichtbaar invoerveld nodig hebben.
+ *
+ * STATUS.md sectie 196: escapeHtml escapet alle vijf de HTML-tekens (ook `"`
+ * en `'`), zodat hij ook in een attribuutwaarde veilig is. De velden van de
+ * kaart worden, net als in de client, met DOM-functies opgebouwd
+ * (`textContent` en `.value`), nooit via innerHTML.
  */
 export function escapeHtml(value: string): string {
-  const div = document.createElement("div");
-  div.textContent = value;
-  return div.innerHTML;
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export interface ConfirmationCardField {
@@ -60,16 +68,6 @@ export function showConfirmationCard(
     const card = document.createElement("div");
     card.className = options.tone === "danger" ? "preview-card preview-card-danger" : "preview-card";
 
-    const fieldsHtml = options.fields
-      .map(
-        (f) => `
-      <div class="preview-field">
-        <label class="preview-label" for="preview-input-${f.id}">${f.label}</label>
-        <input id="preview-input-${f.id}" class="preview-input" type="${f.type ?? "text"}" value="${f.defaultValue}" autocomplete="off" spellcheck="false" />
-      </div>`
-      )
-      .join("");
-
     const friction = options.friction ?? "click";
     const holdDurationMs = options.holdDurationMs ?? DEFAULT_HOLD_DURATION_MS;
     const confirmBtnClass = friction === "hold" ? "preview-btn preview-confirm preview-confirm-hold" : "preview-btn preview-confirm";
@@ -77,6 +75,22 @@ export function showConfirmationCard(
       friction === "hold"
         ? `<span class="preview-hold-fill" id="preview-hold-fill"></span><span class="preview-hold-label">${options.confirmLabel ?? "Ingedrukt houden om te bevestigen"}</span>`
         : (options.confirmLabel ?? "Bevestig en teken");
+
+    // Velden (STATUS.md sectie 196): het geraamte hieronder is vaste opmaak
+    // zonder enige variabele inhoud, met dezelfde witruimte als voorheen, zodat
+    // de opgebouwde kaart gelijk blijft. Label, id, type en beginwaarde worden
+    // daarna met DOM-functies gezet (textContent, htmlFor, id, .value), zoals
+    // in client/src/confirmationCard.ts: ze worden nooit als HTML gelezen, dus
+    // een `"` in een beginwaarde kan niet uit een attribuut breken.
+    const fieldsHtml = options.fields
+      .map(
+        () => `
+      <div class="preview-field">
+        <label class="preview-label"></label>
+        <input class="preview-input" autocomplete="off" spellcheck="false" />
+      </div>`
+      )
+      .join("");
 
     card.innerHTML = `
       <div class="preview-eyebrow">${options.eyebrow}</div>
@@ -89,6 +103,21 @@ export function showConfirmationCard(
       </div>
     `;
     root.appendChild(card);
+
+    const fieldEls = Array.from(card.children).filter((el) => el.classList.contains("preview-field"));
+    options.fields.forEach((f, i) => {
+      const labelEl = fieldEls[i].querySelector<HTMLLabelElement>("label")!;
+      labelEl.htmlFor = `preview-input-${f.id}`;
+      labelEl.textContent = f.label;
+
+      const inputEl = fieldEls[i].querySelector<HTMLInputElement>("input")!;
+      inputEl.id = `preview-input-${f.id}`;
+      inputEl.type = f.type ?? "text";
+      // defaultValue zet het value-attribuut, zoals de oude opmaak deed; .value
+      // de getoonde waarde. Geen van beide wordt als HTML gelezen.
+      inputEl.defaultValue = f.defaultValue;
+      inputEl.value = f.defaultValue;
+    });
 
     const headlineEl = card.querySelector<HTMLElement>("#preview-headline")!;
     const errorEl = card.querySelector<HTMLElement>("#preview-error")!;

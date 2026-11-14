@@ -18683,8 +18683,7 @@ dan expliciet en per pakket: `npm rebuild <pakket> --ignore-scripts=false --pref
 
 **Open punt: `toml` (high, geen fix).** Alleen in de hoofdmap, via `@coral-xyz/anchor`, met het eigen
 `Anchor.toml` als invoer. Opvolgen bij een nieuwe versie van `@coral-xyz/anchor`; de Dependabot-meldingen
-hiervoor zijn in deze sessie niet bekeken. **Bijgewerkt in §194:** opgelost met een override naar `toml`
-5.0.1 (`6b1d849`, Dependabot #49-51 en #57); dit open punt vervalt.
+hiervoor zijn in deze sessie niet bekeken.
 
 **Stand.** Commit lokaal, niet gepusht.
 
@@ -18739,7 +18738,7 @@ tekenfuncties zijn herbruikbaar en zijn als zodanig beoordeeld; hoe een latere p
 ze aan elkaar knoopt, is niet beoordeeld.
 
 **`npm audit` (hoofdmap, 2026-11-09):** 2 high, 2 moderate, 2 low; de high-meldingen zijn
-`toml` via `@coral-xyz/anchor` (zelfde open punt als sectie 189; opgelost, zie §194) en de `jayson`/`stream-json`-
+`toml` via `@coral-xyz/anchor` (zelfde open punt als sectie 189) en de `jayson`/`stream-json`-
 keten (sectie 188).
 
 **Stand.** Wijziging als patch aangeleverd; niet gecommit, niet gepusht.
@@ -18890,8 +18889,8 @@ besluit van de cloudsessie, genomen na dat overzicht.
 
 | # | ernst | pakket | lockbestand | pad | waar terecht | eerder in STATUS |
 |---|---|---|---|---|---|---|
-| 49, 50, 51 | hoog | `toml` 3.0.0 (fix 5.0.1): drie DoS-advisories in `toml.parse()` | `package-lock.json` (hoofdmap) | `@coral-xyz/anchor@0.31.1` → `toml` | alleen tests en scripts van de hoofdmap | §189 noemt de advisories uit `npm audit`; de meldingen zelf waren niet bekeken. **Opgelost in `6b1d849`, zie §194** |
-| 57 | hoog | `toml` 3.0.0: prototype pollution (GHSA-h895, 2026-11-11) | idem | idem | idem | nieuw; verwant aan #22 (afgewezen als `tolerable_risk`). **Opgelost in `6b1d849`, zie §194** |
+| 49, 50, 51 | hoog | `toml` 3.0.0 (fix 5.0.1): drie DoS-advisories in `toml.parse()` | `package-lock.json` (hoofdmap) | `@coral-xyz/anchor@0.31.1` → `toml` | alleen tests en scripts van de hoofdmap | §189 noemt de advisories uit `npm audit`; de meldingen zelf waren niet bekeken |
+| 57 | hoog | `toml` 3.0.0: prototype pollution (GHSA-h895, 2026-11-11) | idem | idem | idem | nieuw; verwant aan #22 (afgewezen als `tolerable_risk`) |
 | 54 | middel | `rustls` 0.23.45 (fix 0.23.46): Debug-weergave toont TLS-geheimen | `desktop/src-tauri/Cargo.lock` | `hyper-rustls`/`tokio-rustls` → `reqwest` → `reqwest-middleware` → `solana-rpc-client` → `spankwallet-desktop` (`cargo tree --offline --locked -i rustls`; geen pad via `tauri`) | desktop-app (TLS naar de RPC) | nieuw; §188 D2 was de vorige rustls-melding (#43) |
 | 53, 55, 56 | laag | `rustls` 0.23.45: ECH-afwijzing, terugval naar klassiek X25519, Brotli-decompressie | idem | idem | desktop-app | nieuw |
 | 52 | laag | `serialize-javascript` 7.1.0 (fix 7.1.3): `</script` aan het eind van een functie | `package-lock.json` (hoofdmap), development | `mocha@10.8.2` → `serialize-javascript` (override) | alleen de testrunner | §189 noemt het pakket, zonder beoordeling |
@@ -18967,8 +18966,7 @@ melding oplost en die getest is; een latere versie vraagt een eigen wijziging.
 **Dependabot.** Geen melding met de hand gesloten. Dependabot sluit #52-#56 zelf zodra de gepushte
 lockbestanden opnieuw gescand zijn.
 
-**Volgende rondes (besluit, nog niet uitgevoerd).** Bijgewerkt in §194: ronde 2 is uitgevoerd in
-`6b1d849` en ronde 3 in de commits van §194; de tekst hieronder is het oorspronkelijke besluit.
+**Volgende rondes (besluit, nog niet uitgevoerd).**
 - Ronde 2, pas na de push van ronde 1 en met een eigen review: `toml` naar 5.0.1 via een override in de
   hoofdmap (#49-51, #57). Controles: `anchor.workspace` laadt het echte `Anchor.toml` met dezelfde
   program-id's; de unit-tests groen; een test dat het document uit GHSA-h895 `Object.prototype` niet meer
@@ -19023,15 +19021,61 @@ bestaande vermeldingen van alleen het voorvoegsel in §109 zijn ongewijzigd en e
   de frontend toont beide als `{kind, message}`, zoals eerder. `rpc_client_reaches_real_devnet` controleert
   zonder sleutel alleen dat `rpc_client()` een fout geeft en slaat de echte aanroep over.
   `desktop/src-tauri/.cargo/` staat nu in `.gitignore`; het commentaar daar is bijgewerkt.
-- `0551bcb` regressiewacht `tests/unit/noHeliusKeyLiteral.ts`: faalt bij een UUID direct na `api-key=` of kort
-  na `helius-rpc.com` in `client/src`, `desktop/src-tauri/src` of `scripts`. Bronlijst `git ls-files --cached
-  --others --exclude-standard`. Het testbestand bevat zelf geen UUID.
+- `0551bcb` regressiewacht `tests/unit/noHeliusKeyLiteral.ts`, eerste versie: faalde alleen bij een UUID
+  direct na `api-key=` of kort na `helius-rpc.com`. Onvoldoende, zie "Regressiewacht" hieronder; vervangen
+  in `7ed9447`.
 - `83ab5ac` `client/vite.config.ts`: alleen commentaar. Er stond dat `host: false` "ongeacht CLI-vlaggen"
   alleen aan localhost bindt. Onjuist: Vite voegt CLI-opties als inline-config over de bestandsconfig heen
   (vite 6.4.5, `dist/node/cli.js` en `mergeConfig(loadResult.config, config)`), dus `vite --host` stelt de
   devserver wél bloot. Dezelfde onjuiste bewering staat in de commitboodschap van `4f24a2f` ("zet
   server.host hard op false"); die boodschap blijft zoals hij is.
-- Deze sectie, met verwijzingen naar §194 in de achterhaalde regels van §189, §190 en §193.
+- `8ac060a` eerste versie van deze sectie.
+
+Na een review door een verse sessie (alle vijf goedgekeurd, met bevindingen) volgden vóór de push:
+- `7ed9447` regressiewacht versterkt: geen enkele UUID-literal meer (zie hieronder).
+- `2f27118` desktop: vijf netwerkvrije Rust-unittests voor `is_helius_key_format` en `devnet_rpc_url_for`:
+  geldige vorm in kleine letters, hoofdletters en gemengd; afgewezen: leeg, alleen spaties, te kort, te lang,
+  een niet-hex teken, een spatie in de waarde, een streepje op de verkeerde plek, een spatie ervoor,
+  niet-ASCII van dezelfde bytelengte. Een geldige sleutel staat getrimd en alleen in de query van de URL; de
+  foutmelding bij een verkeerde vorm bevat de waarde niet, en ook geen deel ervan. De testwaarden worden uit delen
+  opgebouwd, zodat de bron geen UUID-literal bevat. De functie logt niets.
+- `356bdb7` documentatie: `README.md` (nieuwe paragraaf "Helius-sleutel voor client en desktop") en
+  `desktop/README.md` leggen uit dat de client `VITE_HELIUS_API_KEY` in `client/.env.local` nodig heeft en de
+  desktop `HELIUS_API_KEY` bij het compileren (of in de genegeerde `desktop/src-tauri/.cargo/config.toml`),
+  wat er zonder sleutel gebeurt, dat de sleutel een geheim is dat nooit in git hoort en dat een build met
+  sleutel hem letterlijk bevat. Geen waarde of voorbeeld. De oude zin in `README.md` dat je het
+  onfinality-endpoint ook in de `Connection` van `client/src/main.ts` zet, is vervangen. Het commentaar in
+  `client/vite.config.ts` noemde nog "onze huidige 5.4.21" en "bewust GEEN major-upgrade naar Vite 6+"; het
+  zegt nu dat de client sinds §100 op Vite 6 staat (nu 6.4.5), waarmee GHSA-4w7w-66w2-5vf9 gesloten is, en
+  dat `host: false` als extra verdediging blijft. Alleen commentaar.
+- De commit met deze herziene sectie. De eerste versie (`8ac060a`) had ook verwijzingen naar §194
+  toegevoegd in de al gepushte secties 189, 190 en 193. Dat strijdt met de conventie dat een correctie op
+  gepushte tekst in een nieuwe sectie hoort; die regels zijn teruggezet naar de tekst van `origin/main`
+  (nooit gepusht), en de verwijzingen staan nu alleen hier.
+
+**Verwijzingen naar eerdere secties (alleen hier, niet in die secties zelf).**
+- §189, "Open punt: `toml` (high, geen fix)": opgelost in ronde 2, `6b1d849` (override `toml` 5.0.1,
+  Dependabot #49-51 en #57); het open punt vervalt.
+- §190, `npm audit` van 2026-11-09: de high-melding voor `toml` is daarmee ook opgelost.
+- §193, de tabel met #49-51 en #57: opgelost in `6b1d849`. §193, "Volgende rondes (besluit, nog niet
+  uitgevoerd)": ronde 2 is uitgevoerd in `6b1d849`, ronde 3 in de commits van deze sectie.
+
+**Regressiewacht: de eerste versie ving de oorspronkelijke vorm niet.** De review zette in een lokale kloon
+`client/src/main.ts` en `desktop/src-tauri/src/rpc.rs` terug naar hun versie op `cd21a90`: de eerste versie
+van de test bleef groen. De oude waarde stond daar als losse terugvalconstante (`?? "<uuid>"` en
+`None => "<uuid>"`), zonder `api-key=` of `helius-rpc.com` op dezelfde regel. De tabel hieronder liet dat al
+zien ("vóór: 0"), maar de conclusie was niet getrokken. Nieuwe regel (`7ed9447`): geen enkele UUID-literal,
+hoofdletterongevoelig, waar ook op de regel, in `client/src`, `desktop/src`, `desktop/src-tauri/src`,
+`desktop/src-tauri/capabilities`, `scripts` en de html-, json- en configbestanden van client en desktop
+(`client/index.html`, `client/vite.config.ts`, `client/tsconfig.json`, `client/.npmrc`, `desktop/index.html`,
+`desktop/vite.config.ts`, `desktop/tsconfig.json`, `desktop/.npmrc`, `desktop/src-tauri/tauri.conf.json`,
+`desktop/src-tauri/build.rs`). Op HEAD staat in alle gevolgde bestanden onder `client/`, `desktop/` en
+`scripts/` geen enkele UUID, dus er is geen uitzondering nodig. Bronlijst blijft `git ls-files --cached
+--others --exclude-standard`; een treffer noemt bestand en regel, nooit de waarde. Bewijs in een
+`git clone --local` buiten de repo (`node_modules` via symlink, kloon daarna verwijderd): met `main.ts` en
+`rpc.rs` van `cd21a90` 1 failing, met beide bestanden en hun regel genoemd en 0 UUID's in de testuitvoer; op
+`7ed9447` 299 passing. Beperking: een sleutel in een andere vorm dan een UUID, of in stukken gesplitst, ziet
+de test niet.
 
 **Controles (nulmeting op `cd21a90`, daarna op deze branch).** De oude waarde is in de shell uit
 `git show main:client/src/main.ts` gehaald en alleen met `grep -c -F` geteld; hij is nooit getoond of
@@ -19044,16 +19088,19 @@ weggeschreven.
 | `client/dist`: `api-key=undefined` | 0 | 0 |
 | `npm run build --prefix desktop` | exit 0 | exit 0 |
 | `cargo check` (desktop) | schoon | schoon |
-| `cargo test --offline` (desktop) | 8 passed, netwerktest via `--skip` weggefilterd | 9 passed zonder `--skip`; de netwerktest meldt "overgeslagen", geen netwerk |
-| debug-binary zonder `HELIUS_API_KEY`: treffers oude waarde | - | 0 (ook in de lib en de test-binary) |
-| `npm run test:unit` | 295 passing | 299 passing (3 nieuwe tests plus 1 nieuwe zuiverheidscontrole van `unitPathIsPure.ts`), 0 failing |
+| `cargo test --offline` (desktop) | 8 passed, netwerktest via `--skip` weggefilterd | 9 passed op `0d48b52` zonder `--skip`; na `2f27118` 14 passed, 0 failed; de netwerktest gaat zonder sleutel alleen de foutroute na, geen netwerk |
+| debug-binary zonder `HELIUS_API_KEY`: treffers oude waarde | - | 0 (opnieuw gebouwd na `2f27118`) |
+| `npm run test:unit` | 295 passing | 299 passing (3 tests in `noHeliusKeyLiteral.ts` plus 1 nieuwe zuiverheidscontrole van `unitPathIsPure.ts`), 0 failing; ook na `7ed9447` |
 | gevolgde bestanden met de oude waarde | 2 (`main.ts`, `rpc.rs`) | 0 |
 | `api-key=` gevolgd door een UUID in gevolgde bestanden | 0 (de waarde stond als terugvalconstante, niet direct na `api-key=`) | 0 |
+| UUID-literals in de door de regressiewacht gescande bestanden | 2 (`main.ts`, `rpc.rs`) | 0 |
+| regressiewacht op `main.ts` en `rpc.rs` van `cd21a90` | - | eerste versie (`0551bcb`): groen, dus onvoldoende; `7ed9447`: 1 failing, beide bestanden genoemd |
+| vermeldingen van het voorvoegsel in `STATUS.md` | 4 (alle in §109) | 4 |
 
-Rood-groen van de regressiewacht: een nep-UUID uit `randomUUID()` in een ongevolgd, niet genegeerd tijdelijk
-bestand in `client/src` gaf 1 failing, met bestand en regel en zonder de waarde; na verwijderen weer groen.
-Het bestand is nooit toegevoegd. Oude builds in `desktop/src-tauri/target/` (89 bestanden) bevatten de oude
-waarde nog; die zijn niet aangeraakt en vallen onder `.gitignore`.
+Rood-groen van de eerste versie: een nep-UUID uit `randomUUID()` direct na `api-key=` in een ongevolgd, niet
+genegeerd tijdelijk bestand in `client/src` gaf 1 failing; na verwijderen weer groen. Het rood-groen van de
+nieuwe regel staat hierboven. Oude builds in `desktop/src-tauri/target/` bevatten de oude waarde nog; die zijn
+niet aangeraakt en vallen onder `.gitignore`.
 
 **Eerdere rondes, kort vastgelegd.**
 - Ronde 2, `6b1d849` "deps: toml override -> 5.0.1 (Dependabot #49-#51, #57)": override `toml` 5.0.1 in
@@ -19076,14 +19123,23 @@ na een `minisign`-controle van het archief. De code zit niet in het geleverde pr
 2026-11-20, wanneer `libsodium-sys-stable` 1.24.4 of nieuwer en `zip` 9.4 14 dagen oud zijn (data volgens de
 cloudsessie; door deze sessie niet in het register nagekeken).
 
+**Open vervolgpunten (bewust niet in deze ronde).**
+- Foutmeldingen van de desktop kunnen via de HTTP-bibliotheek de volledige RPC-URL bevatten, en daarmee de
+  sleutel; ze komen in de UI en het log terecht. Dat bestond al vóór deze ronde. Apart oplossen, met een
+  eigen review.
+- De desktop controleert de sleutel niet bij het starten: zonder sleutel merkt de gebruiker het pas bij de
+  eerste RPC-actie (er ontstaat dan geen handtekening). De client controleert wel bij het laden.
+- `desktop/src/feePayerUnlockCard.ts` zet een foutmelding zonder `escapeHtml` in een kop die via `innerHTML`
+  wordt geplaatst. Dat bestond al; de airdropkaart gebruikt wel `escapeHtml`.
+- Een desktop-build met sleutel bevat die sleutel in de binary (`option_env!`). Het lezen van de sleutel uit
+  een bestand bij het starten blijft het open punt van §193.
+- De eigenaar bevestigt bij Helius dat de oude sleutel ingetrokken is (zie boven).
+
 **Niet gedaan of niet getest.** De foutmelding van de client is niet in een echte browser bekeken (alleen
 gebouwd; de tekst staat 1 keer in de bundel). De desktop-app is niet gestart; het doorgeven van de fout naar
-de kaart is alleen gecompileerd, niet in de UI gezien. Er zijn geen eigen Rust-unittests voor de
-UUID-controle in `rpc.rs` toegevoegd (de opdracht vroeg hetzelfde aantal tests). Het lezen van de
-desktopsleutel uit een bestand bij het starten blijft een apart open punt (§193). De "vier lage punten uit
-de review van 192" uit het besluit voor ronde 3 zijn niet afzonderlijk nagelopen; uitgevoerd is wat de
-opdracht noemde. Het commentaar in `client/vite.config.ts` noemt nog "onze huidige 5.4.21"; dat is
-achterhaald (6.4.5) maar viel buiten deze opdracht.
+de kaart is alleen gecompileerd, niet in de UI gezien. De nieuwe README-tekst is niet in een verse kloon
+nagevolgd. De "vier lage punten uit de review van 192" uit het besluit voor ronde 3 zijn niet afzonderlijk
+nagelopen; uitgevoerd is wat de opdracht noemde.
 
-**Stand.** Commits lokaal op `fix/helius-fallback`, niet gepusht. Vóór de push een review door een verse
-sessie.
+**Stand.** Commits lokaal op `fix/helius-fallback`, niet gepusht. De eerste vijf zijn door een verse sessie
+gereviewd; de vier herstelcommits daarna nog niet.

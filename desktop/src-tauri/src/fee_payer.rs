@@ -46,22 +46,40 @@ pub struct FeePayerInfo {
     pub pubkey_base58: String,
 }
 
-#[derive(Debug, Serialize)]
+// §196: de teksten gaan bij het serialiseren naar de frontend en in de
+// Debug-weergave door de RPC-foutfilter (rpc::serialize_redacted,
+// rpc::debug_redacted), zodat geen route de sleutel naar buiten brengt.
+#[derive(Serialize)]
 #[serde(tag = "kind", content = "message")]
 pub enum FeePayerError {
     AlreadySetUp,
     NotSetUp,
     WrongPasswordOrCorrupt,
-    Io(String),
-    Internal(String),
+    Io(#[serde(serialize_with = "crate::rpc::serialize_redacted")] String),
+    Internal(#[serde(serialize_with = "crate::rpc::serialize_redacted")] String),
 }
 
+impl std::fmt::Debug for FeePayerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FeePayerError::AlreadySetUp => f.write_str("AlreadySetUp"),
+            FeePayerError::NotSetUp => f.write_str("NotSetUp"),
+            FeePayerError::WrongPasswordOrCorrupt => f.write_str("WrongPasswordOrCorrupt"),
+            FeePayerError::Io(text) => crate::rpc::debug_redacted(f, "Io", text),
+            FeePayerError::Internal(text) => crate::rpc::debug_redacted(f, "Internal", text),
+        }
+    }
+}
+
+// §196: algemene conversie voor elk fouttype (de `?`-operator). Nu loopt hier
+// geen RPC-fout langs, maar een toekomstige `?` op een RPC-resultaat zou de
+// URL met de sleutel in de tekst zetten; daarom via de filter.
 impl<E: std::fmt::Display> From<E> for FeePayerError
 where
     E: std::error::Error,
 {
     fn from(e: E) -> Self {
-        FeePayerError::Internal(e.to_string())
+        FeePayerError::Internal(crate::rpc::rpc_error_text(&e))
     }
 }
 

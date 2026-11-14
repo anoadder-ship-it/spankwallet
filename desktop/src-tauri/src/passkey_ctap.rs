@@ -44,12 +44,24 @@ use ctap_hid_fido2::{
 use rand::RngCore;
 use serde::Serialize;
 
-#[derive(Debug, Serialize)]
+// §196: geen RPC-fouten hier, maar dezelfde grens als bij FeePayerError en
+// ExecuteError: teksten gaan bij het serialiseren en in Debug door de filter.
+#[derive(Serialize)]
 #[serde(tag = "kind", content = "message")]
 pub enum PasskeyError {
     NoFidoKeyFound,
-    DeviceError(String),
-    Internal(String),
+    DeviceError(#[serde(serialize_with = "crate::rpc::serialize_redacted")] String),
+    Internal(#[serde(serialize_with = "crate::rpc::serialize_redacted")] String),
+}
+
+impl std::fmt::Debug for PasskeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PasskeyError::NoFidoKeyFound => f.write_str("NoFidoKeyFound"),
+            PasskeyError::DeviceError(text) => crate::rpc::debug_redacted(f, "DeviceError", text),
+            PasskeyError::Internal(text) => crate::rpc::debug_redacted(f, "Internal", text),
+        }
+    }
 }
 
 fn build_client_data_json(cred_type: &str, challenge_b64url: &str, origin: &str) -> Vec<u8> {

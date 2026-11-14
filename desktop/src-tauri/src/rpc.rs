@@ -79,6 +79,25 @@ pub fn redact_rpc_error_text(text: &str) -> String {
     redact_with_key(text, HELIUS_API_KEY)
 }
 
+// §196: de laatste grens. Elke tekst in een foutenum die naar de frontend gaat
+// (FeePayerError, ExecuteError, PasskeyError) wordt bij het serialiseren door
+// de filter gehaald, via `#[serde(serialize_with = ...)]` op het veld. Zo kan
+// een nieuwe foutroute die rpc_error_text() vergeet (bijvoorbeeld een `?` op
+// een RPC-resultaat via een algemene From-impl) de sleutel niet naar de UI
+// brengen. De vorm van de JSON (`{kind, message}`) blijft gelijk; de filter is
+// idempotent, dus al schoongemaakte tekst verandert niet.
+pub fn serialize_redacted<S: serde::Serializer>(text: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&redact_rpc_error_text(text))
+}
+
+// §196: Debug-weergave van een foutvariant met tekst, schoongemaakt. Gebruikt
+// door de handgeschreven Debug-impls van de foutenums, zodat ook `{:?}` (een
+// paniektekst, een toekomstige log-regel, de conversie in execute.rs) de
+// sleutel niet toont. Zelfde vorm als een afgeleide Debug: `Naam("tekst")`.
+pub fn debug_redacted(f: &mut std::fmt::Formatter<'_>, variant: &str, text: &str) -> std::fmt::Result {
+    f.debug_tuple(variant).field(&redact_rpc_error_text(text)).finish()
+}
+
 fn redact_with_key(text: &str, key: Option<&str>) -> String {
     let text = strip_url_queries(text);
     let text = redact_api_key_params(&text);
@@ -121,12 +140,20 @@ fn strip_url_queries(text: &str) -> String {
     let mut pos = 0;
     while pos < bytes.len() {
         let Some(start) = (pos..bytes.len()).find(|&i| starts_url_scheme(bytes, i)) else { break };
-        let end = (start..bytes.len()).find(|&i| is_url_end(bytes[i])).unwrap_or(bytes.len());
+        let mut end = (start..bytes.len()).find(|&i| is_url_end(bytes[i])).unwrap_or(bytes.len());
         match (start..end).find(|&i| bytes[i] == b'?') {
             Some(q) => {
                 out.push_str(&text[pos..q]);
                 out.push('?');
                 out.push_str(VERBORGEN);
+                // Idempotent (§196): een al schoongemaakte URL eindigt op
+                // `?[verborgen]` (de `[` sluit de URL af); die markering wordt
+                // niet nog eens toegevoegd. Nodig omdat een tekst nu twee keer
+                // door de filter kan gaan: bij het maken van de fout en bij het
+                // serialiseren naar de frontend.
+                if q + 1 == end && text[end..].starts_with(VERBORGEN) {
+                    end += VERBORGEN.len();
+                }
             }
             None => out.push_str(&text[pos..end]),
         }
@@ -461,6 +488,147 @@ mod tests {
         assert_hidden(&out, &key);
         assert_eq!(out, expected);
         assert_eq!(out.matches("[verborgen]").count(), n / 2);
+    }
+
+    // §196: de filter is idempotent, zodat dubbel filteren (bij het maken van de
+    // fout én bij het serialiseren) geen dubbele markering geeft.
+    #[test]
+    fn redact_is_idempotent() {
+        let key = valid_key();
+        let once = redact_with_key(
+            &format!("for url (https://devnet.helius-rpc.com/?api-key={key}): x https://a/? y"),
+            None,
+        );
+        assert_eq!(once, "for url (https://devnet.helius-rpc.com/?[verborgen]): x https://a/?[verborgen] y");
+        assert_eq!(redact_with_key(&once, None), once);
+        assert_eq!(redact_with_key(&once, Some(&key)), once);
+
+        // Willekeurige invoer uit stukken die de filter raken (xorshift, vaste
+        // start, geen extra afhankelijkheid).
+        let pieces = [
+            "http://", "HTTPS://", "?", "&", "=", "%", "api-key=", "API_KEY%3D", "%2D", "-", "/", " ", ")",
+            "(", "\"", "[", "]", "[verborgen]", "é", "😀", "a", "0f", "x=1", "devnet.helius-rpc.com",
+        ];
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let mut input = String::new();
+            for _ in 0..next(30) {
+                match next(6) {
+                    0 => input += &key,
+                    1 => input += &key.to_uppercase().replace('-', "%2d"),
+                    _ => input += pieces[next(pieces.len())],
+                }
+            }
+            for configured in [None, Some(key.as_str())] {
+                let once = redact_with_key(&input, configured);
+                assert_eq!(redact_with_key(&once, configured), once, "niet idempotent");
+                assert_hidden(&once, &key);
+            }
+        }
+    }
+
+    // §196: elke route waarlangs een fouttekst naar de frontend gaat, geeft
+    // een schone tekst, ook als de tekst er ongefilterd in is gezet.
+    fn leaky_text(key: &str) -> String {
+        format!("error sending request for url (https://devnet.helius-rpc.com/?api-key={key}): operation timed out")
+    }
+    const CLEAN_TEXT: &str =
+        "error sending request for url (https://devnet.helius-rpc.com/?[verborgen]): operation timed out";
+
+    fn json_message(value: &impl serde::Serialize) -> (String, String) {
+        let json = serde_json::to_value(value).unwrap();
+        let obj = json.as_object().expect("foutenum serialiseert als object");
+        assert_eq!(obj.len(), 2, "vorm {{kind, message}}: {json}");
+        (obj["kind"].as_str().unwrap().to_string(), obj["message"].as_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn fee_payer_error_routes_are_redacted() {
+        use crate::fee_payer::FeePayerError;
+        let key = valid_key();
+        // De algemene From-impl (de `?`-operator) voor elk fouttype.
+        let from_any: FeePayerError = std::io::Error::other(leaky_text(&key)).into();
+        match &from_any {
+            FeePayerError::Internal(text) => assert_eq!(text, CLEAN_TEXT),
+            other => panic!("onverwachte variant {other:?}"),
+        }
+        // Serialisatie naar de frontend, ook bij een ongefilterd ingezette tekst.
+        for (err, kind) in [
+            (FeePayerError::Io(leaky_text(&key)), "Io"),
+            (FeePayerError::Internal(leaky_text(&key)), "Internal"),
+            (from_any, "Internal"),
+        ] {
+            let (k, message) = json_message(&err);
+            assert_eq!((k.as_str(), message.as_str()), (kind, CLEAN_TEXT));
+            let debug = format!("{err:?}");
+            assert_hidden(&debug, &key);
+            assert_eq!(debug, format!("{kind}({CLEAN_TEXT:?})"));
+        }
+        // Varianten zonder tekst: vorm ongewijzigd.
+        assert_eq!(serde_json::to_string(&FeePayerError::NotSetUp).unwrap(), r#"{"kind":"NotSetUp"}"#);
+        assert_eq!(format!("{:?}", FeePayerError::AlreadySetUp), "AlreadySetUp");
+        // Gewone tekst blijft gewone tekst, ook met aanhalingstekens.
+        let plain = FeePayerError::Io("pad \"x\" bestaat niet".to_string());
+        assert_eq!(serde_json::to_string(&plain).unwrap(), r#"{"kind":"Io","message":"pad \"x\" bestaat niet"}"#);
+        assert_eq!(format!("{plain:?}"), r#"Io("pad \"x\" bestaat niet")"#);
+    }
+
+    #[test]
+    fn execute_error_routes_are_redacted() {
+        use crate::execute::ExecuteError;
+        use crate::fee_payer::FeePayerError;
+        let key = valid_key();
+        // De conversie van FeePayerError (Debug-vorm) in execute.rs.
+        for (inner, variant) in [
+            (FeePayerError::Io(leaky_text(&key)), "Io"),
+            (FeePayerError::Internal(leaky_text(&key)), "Internal"),
+        ] {
+            let converted = ExecuteError::from(inner);
+            match &converted {
+                ExecuteError::Internal(text) => assert_eq!(text, &format!("{variant}({CLEAN_TEXT:?})")),
+                other => panic!("onverwachte variant {other:?}"),
+            }
+            let (kind, message) = json_message(&converted);
+            assert_eq!(kind, "Internal");
+            assert_hidden(&message, &key);
+        }
+        assert!(matches!(ExecuteError::from(FeePayerError::NotSetUp), ExecuteError::FeePayerNotUnlocked));
+        // Serialisatie en Debug van elke variant met tekst.
+        for (err, kind) in [
+            (ExecuteError::InvalidPubkey(leaky_text(&key)), "InvalidPubkey"),
+            (ExecuteError::RpcError(leaky_text(&key)), "RpcError"),
+            (ExecuteError::Internal(leaky_text(&key)), "Internal"),
+        ] {
+            let (k, message) = json_message(&err);
+            assert_eq!((k.as_str(), message.as_str()), (kind, CLEAN_TEXT));
+            assert_eq!(format!("{err:?}"), format!("{kind}({CLEAN_TEXT:?})"));
+        }
+        // Al schoongemaakte tekst (de bestaande route via rpc_error_text) krijgt
+        // geen tweede markering.
+        let already = ExecuteError::RpcError(rpc_error_text(&std::io::Error::other(leaky_text(&key))));
+        assert_eq!(json_message(&already).1, CLEAN_TEXT);
+        assert_eq!(serde_json::to_string(&ExecuteError::ChallengeMismatch).unwrap(), r#"{"kind":"ChallengeMismatch"}"#);
+    }
+
+    #[test]
+    fn passkey_error_routes_are_redacted() {
+        use crate::passkey_ctap::PasskeyError;
+        let key = valid_key();
+        for (err, kind) in [
+            (PasskeyError::DeviceError(leaky_text(&key)), "DeviceError"),
+            (PasskeyError::Internal(leaky_text(&key)), "Internal"),
+        ] {
+            let (k, message) = json_message(&err);
+            assert_eq!((k.as_str(), message.as_str()), (kind, CLEAN_TEXT));
+            assert_eq!(format!("{err:?}"), format!("{kind}({CLEAN_TEXT:?})"));
+        }
+        assert_eq!(serde_json::to_string(&PasskeyError::NoFidoKeyFound).unwrap(), r#"{"kind":"NoFidoKeyFound"}"#);
     }
 
     #[test]

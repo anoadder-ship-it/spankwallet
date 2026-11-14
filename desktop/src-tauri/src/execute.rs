@@ -30,22 +30,38 @@ use tauri::State;
 
 const EXECUTE_DISCRIMINATOR: [u8; 8] = [0x82, 0xdd, 0xf2, 0x9a, 0x0d, 0xc1, 0xbd, 0x1d];
 
-#[derive(Debug, Serialize)]
+// §196: teksten gaan bij het serialiseren en in Debug door de RPC-foutfilter,
+// zoals bij FeePayerError.
+#[derive(Serialize)]
 #[serde(tag = "kind", content = "message")]
 pub enum ExecuteError {
-    InvalidPubkey(String),
+    InvalidPubkey(#[serde(serialize_with = "crate::rpc::serialize_redacted")] String),
     ChallengeMismatch,
     FeePayerNotUnlocked,
     InsufficientFeePayerBalance,
-    RpcError(String),
-    Internal(String),
+    RpcError(#[serde(serialize_with = "crate::rpc::serialize_redacted")] String),
+    Internal(#[serde(serialize_with = "crate::rpc::serialize_redacted")] String),
+}
+
+impl std::fmt::Debug for ExecuteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecuteError::InvalidPubkey(text) => crate::rpc::debug_redacted(f, "InvalidPubkey", text),
+            ExecuteError::ChallengeMismatch => f.write_str("ChallengeMismatch"),
+            ExecuteError::FeePayerNotUnlocked => f.write_str("FeePayerNotUnlocked"),
+            ExecuteError::InsufficientFeePayerBalance => f.write_str("InsufficientFeePayerBalance"),
+            ExecuteError::RpcError(text) => crate::rpc::debug_redacted(f, "RpcError", text),
+            ExecuteError::Internal(text) => crate::rpc::debug_redacted(f, "Internal", text),
+        }
+    }
 }
 
 impl From<crate::fee_payer::FeePayerError> for ExecuteError {
     fn from(e: crate::fee_payer::FeePayerError) -> Self {
         match e {
             crate::fee_payer::FeePayerError::NotSetUp => ExecuteError::FeePayerNotUnlocked,
-            other => ExecuteError::Internal(format!("{other:?}")),
+            // §196: dezelfde tekst als voorheen (de Debug-vorm), via de filter.
+            other => ExecuteError::Internal(crate::rpc::redact_rpc_error_text(&format!("{other:?}"))),
         }
     }
 }

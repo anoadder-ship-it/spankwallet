@@ -19323,14 +19323,21 @@ de omgeving. Uit `client/dist` zijn alleen exitcodes gebruikt.
 - `fad3ed5` (B5) `.gitignore`: uitzonderingen `!client/.env.example` en `!desktop/.env.example`. De test in
   `noHeliusKeyLiteral.ts` controleert nu ook dat beide niet genegeerd worden; rood-proef: met de uitzondering voor
   de client tijdelijk weg faalt hij en noemt hij het pad. De echte env-bestanden blijven genegeerd. Er is geen
-  voorbeeldbestand aangemaakt; komt er een, dan valt het onder de scan van de regressiewacht (geen UUID).
+  voorbeeldbestand aangemaakt.
 - De commit met deze sectie.
+- Aanvulling vóór de review (zelfde branch, nieuwe commit): de eerste versie van deze sectie zei dat een
+  voorbeeldbestand onder de scan van de regressiewacht zou vallen. Dat klopte niet: de scan keek alleen naar de
+  vaste lijst mappen en bestanden. `client/.env.example` en `desktop/.env.example` staan nu in die lijst
+  (`SCAN_FILES` in `noHeliusKeyLiteral.ts`); de echte env-bestanden niet. Bewijs in een tijdelijke kloon buiten
+  de repo: een `client/.env.example` met een verzonnen UUID uit `randomUUID()` maakt de test rood, met bestand
+  en regel en zonder de waarde; zonder dat bestand, en met een voorbeeldbestand met alleen een lege variabele,
+  is hij groen. Er is geen voorbeeldbestand in de repo aangemaakt. `npm run test:unit` daarna: zie de tabel.
 
 **Controles.**
 
 | controle | vóór (`main` = `9ec97f1`) | na |
 |---|---|---|
-| `npm run test:unit` | 300 passing | 307 passing, 0 failing |
+| `npm run test:unit` | 300 passing | 307 passing, 0 failing (ook na de aanvulling) |
 | `cargo check --offline` (desktop, zonder sleutel) | - | schoon, geen waarschuwingen |
 | `cargo test --offline` (desktop, zonder sleutel) | 20 passed | 25 passed, 0 failed |
 | `npm run build` in `client/` | - | exit 0 |

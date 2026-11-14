@@ -18,7 +18,8 @@ import * as path from "path";
  * die vorm wel (§194).
  *
  * Gescand: de mappen in SCAN_DIRS en de html-, json- en configbestanden van
- * client en desktop in SCAN_FILES. Bronlijst: `git ls-files --cached --others
+ * client en desktop in SCAN_FILES, plus de voorbeeldbestanden
+ * client/.env.example en desktop/.env.example (§196). Bronlijst: `git ls-files --cached --others
  * --exclude-standard`, dus gevolgde bestanden én nieuwe bestanden die nog niet
  * zijn toegevoegd; genegeerde bestanden zoals client/.env.local en
  * desktop/src-tauri/.cargo/config.toml niet, want daar hoort de sleutel juist.
@@ -41,6 +42,11 @@ const SCAN_FILES = [
   "desktop/.npmrc",
   "desktop/src-tauri/tauri.conf.json",
   "desktop/src-tauri/build.rs",
+  // §196: voorbeeldbestanden mogen gevolgd worden (uitzondering in .gitignore)
+  // en worden dus gescand. De echte env-bestanden staan hier bewust niet: ze
+  // zijn genegeerd, en git ls-files met deze exacte paden noemt ze nooit.
+  "client/.env.example",
+  "desktop/.env.example",
 ];
 
 const HEX = "[0-9a-f]";

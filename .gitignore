@@ -15,7 +15,12 @@ admin/*.pem
 # desktop krijgt hem bij het bouwen, eventueel via de [env]-sectie van
 # desktop/src-tauri/.cargo/config.toml (hieronder genegeerd). Er is geen
 # terugvalwaarde meer in de broncode (sectie 194).
-client/.env
-client/.env.local
+# Sectie 195: alle env-bestanden van client en desktop (Vite leest ook
+# .env.production, .env.development en .env.<mode>.local), en elke .cargo-map
+# die Cargo bij een desktop-build leest (hoofdmap, desktop/, desktop/src-tauri/).
+client/.env*
+desktop/.env*
 client/dist/
+/.cargo/
+desktop/.cargo/
 desktop/src-tauri/.cargo/

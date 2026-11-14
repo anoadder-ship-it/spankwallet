@@ -95,6 +95,33 @@ describe("geen UUID-literal (Helius-sleutelvorm) in client, desktop of scripts (
     }
   });
 
+  // §195: de plekken waar Vite en Cargo een sleutel lezen, zijn genegeerd. De
+  // wacht scant ze bewust niet (daar hoort de echte sleutel juist te staan, en
+  // de test leest die nooit); hij bewaakt alleen dat .gitignore ze blijft
+  // dekken en dat er geen gevolgd bestand onder de negeerregels valt.
+  it("env-bestanden van client en desktop en alle .cargo-mappen zijn genegeerd", () => {
+    const mustBeIgnored = [
+      "client/.env",
+      "client/.env.local",
+      "client/.env.production",
+      "client/.env.development",
+      "client/.env.production.local",
+      "desktop/.env",
+      "desktop/.env.local",
+      "desktop/.env.production",
+      ".cargo/config.toml",
+      "desktop/.cargo/config.toml",
+      "desktop/src-tauri/.cargo/config.toml",
+    ];
+    for (const p of mustBeIgnored) {
+      const res = spawnSync("git", ["check-ignore", "-q", "--no-index", "--", p], { cwd: ROOT, encoding: "utf8" });
+      assert.strictEqual(res.status, 0, `${p} wordt niet genegeerd door .gitignore`);
+    }
+    const tracked = spawnSync("git", ["ls-files", "-ci", "--exclude-standard"], { cwd: ROOT, encoding: "utf8" });
+    assert.strictEqual(tracked.status, 0, `git ls-files faalde: ${tracked.stderr}`);
+    assert.strictEqual(tracked.stdout, "", `gevolgde bestanden vallen onder een negeerregel: ${tracked.stdout}`);
+  });
+
   it("geen bestand bevat een UUID-literal", () => {
     const offenders: string[] = [];
     for (const file of listFiles()) {

@@ -19233,3 +19233,118 @@ geldige sleutel in een echte browser.
 
 **Stand.** Commits lokaal op `fix/sleutel-niet-in-foutmeldingen`, niet gepusht. Review door een verse sessie
 volgt.
+
+## 196. Ronde 3c: kleine bevindingen uit de review van 195 (filter lineair, foutroutes, bevestigingskaart, negeerregels) (2026-11-14)
+
+**Aanleiding.** De review van §195 vond vier kleine punten (B1, B2, B3, B5). Uitgevoerd in een lokale sessie
+(Claude) op branch `fix/ronde-3c`, vanaf `main` = `9ec97f1`. `programs/`, `admin/`, alle `Cargo.toml`, alle
+`package.json` en de lockbestanden zijn niet aangeraakt. Het bestand met de echte sleutel van de client,
+`.claude/settings.local.json` en de `.cargo`-mappen zijn niet gelezen; cargo draaide zonder `HELIUS_API_KEY` in
+de omgeving. Uit `client/dist` zijn alleen exitcodes gebruikt.
+
+**Commits.**
+- `f85b4ed` (B1) desktop: `strip_url_queries` in `rpc.rs` is lineair. Bij elke URL werd opnieuw naar `http://`
+  én `https://` gezocht vanaf de huidige positie; ontbrak een van beide, dan liep die zoektocht telkens tot het
+  einde. Nu één voorwaartse scan; het eerste schema vanaf de positie is per definitie het minimum van beide
+  zoektochten. De andere filterfuncties (`redact_api_key_params`, `replace_ignore_ascii_case`,
+  `redact_key_shaped`) nagelopen: per positie een begrensde hoeveelheid werk, dus lineair; geen wijziging. Bewijs:
+  - alle bestaande rpc-tests groen, geen verwachting aangepast (21 passed na deze commit);
+  - differentiële proef buiten de repo: de filtercode van `main` en van deze commit naast elkaar op 200.000
+    willekeurige invoeren (URL's in allerlei schrijfwijzen, api-key-parameters ook URL-gecodeerd, sleutelvormen
+    met `-` en `%2D`, afgebroken sleutelvormen, niet-ASCII, emoji, nulbytes), met zes verschillende
+    geconfigureerde sleutels: uitvoer byte voor byte gelijk (97.291 invoeren met een URL, 166.539 met
+    niet-ASCII, 170.057 door de filter gewijzigd). Controle op de proef zelf: met `https://` weggelaten uit de
+    nieuwe scan meldt hij direct een verschil;
+  - tijd op de invoer van de reviewer (2 MB, 200.000 URL's), oud tegen nieuw, uitvoer gelijk:
+
+    | build | oud | nieuw | gewone tekst van 2 MB, oud / nieuw |
+    |---|---|---|---|
+    | release | 136,3 s | 9,9 ms | 8,3 ms / 8,4 ms |
+    | debug (zoals `cargo test`) | 3630 s | 0,49 s | 0,44 s / 0,48 s |
+
+  - nieuwe unittest `redact_handles_tens_of_thousands_of_urls`: 40.000 URL's in één tekst, controleert de
+    volledige uitvoer, zonder tijdsgrens.
+- `1e061a7` (B2) desktop: geen foutroute naar de frontend buiten de filter om. Nagelopen: elke plek in
+  `desktop/src-tauri/src` waar een fout tekst wordt. Alles wat naar de frontend gaat, loopt via de drie
+  foutenums van de Tauri-commando's (`FeePayerError`, `ExecuteError`, `PasskeyError`); er is geen `println!`,
+  log-macro of paniek met een fouttekst die naar de frontend gaat. Wijzigingen:
+  - `fee_payer.rs`: de algemene `From`-impl voor elk fouttype gaat via `rpc_error_text` in plaats van
+    `e.to_string()`;
+  - `execute.rs`: de conversie van `FeePayerError` (Debug-vorm) gaat via `redact_rpc_error_text`;
+  - de laatste grens: in alle drie de enums gaat elke tekst bij het serialiseren door de filter
+    (`#[serde(serialize_with = "crate::rpc::serialize_redacted")]`), en de Debug-weergave is handgeschreven en
+    schoongemaakt (`rpc::debug_redacted`). Een vergeten `rpc_error_text` op een nieuwe route brengt de sleutel
+    dus niet meer naar de UI. De JSON-vorm `{kind, message}`, de varianten zonder tekst en de Debug-vorm
+    `Naam("tekst")` blijven gelijk;
+  - `rpc.rs`: de filter is idempotent gemaakt, want een tekst gaat nu twee keer door de filter (bij het maken van
+    de fout en bij het serialiseren). Zonder die aanpassing kreeg een al schoongemaakte URL een tweede
+    markering. Getoetst op 300.000 willekeurige invoeren: twee keer filteren geeft hetzelfde als één keer, en de
+    uitvoer wijkt alleen af van die van `f85b4ed` als de invoer de markering al bevat.
+
+  Vijf nieuwe tests: per enum elke variant met tekst via serialisatie en Debug, de `From`-impl, de conversie in
+  `execute.rs`, al schoongemaakte tekst zonder tweede markering, en idempotentie op 20.000 willekeurige invoeren.
+  Mutatieproef: filter uit de serialisatie gehaald, `From` terug naar `e.to_string()`, Debug zonder filter,
+  idempotentie uitgeschakeld: elk geeft 1 tot 3 falende tests. De expliciete filter in de conversie van
+  `execute.rs` is apart niet rood te krijgen, omdat de Debug-weergave zelf al filtert (dubbele laag).
+- `452abe0` (B3) desktop en client: `escapeHtml` escapet in beide bestanden waar hij gedefinieerd is
+  (`client/src/confirmationCard.ts`, `desktop/src/confirmationCard.ts`) alle vijf de HTML-tekens, met gewone
+  vervangingen in plaats van via een tekstknoop. Alle aanroepers (in de client 13 bestanden, in de desktop 3)
+  zetten de uitvoer in elementinhoud van een kop, nooit in een attribuut, en geven ruwe tekst mee (adressen,
+  bedragen, foutmeldingen, invoer), nooit al ge-escapete tekst; er wordt dus nergens dubbel ge-escapet. In de
+  desktopkaart gaan label en beginwaarde niet meer via innerHTML: het geraamte van een veld is vaste opmaak zonder
+  variabele inhoud, met dezelfde witruimte als voorheen, en label, id, type en waarde worden gezet met
+  `textContent`, `htmlFor`, `id`, `defaultValue` en `.value`, zoals in de client. Een omhulsel zoals in de client
+  (`#preview-fields`) is bewust niet toegevoegd, zodat opbouw en opmaak gelijk blijven.
+
+  Aanroepers van de desktopkaart (alle waarden constant of door de code berekend; geen `friction` of `tone`):
+
+  | aanroeper | eyebrow | velden: label / beginwaarde | weiger / bevestig |
+  |---|---|---|---|
+  | `executePreview.ts` | Voorstel om te ondertekenen | Bedrag (SOL) / bedrag uit lamports als getal; Ontvanger (adres) / base58-adres | standaard (Weiger / Bevestig en teken) |
+  | `feePayerSetupCard.ts`, wachtwoord | Eenmalige installatie | Wachtwoord / leeg (password); Wachtwoord (nogmaals) / leeg (password) | Later / Aanmaken |
+  | `feePayerSetupCard.ts`, financiering | Fee-payer aangemaakt | geen | Ik fund zelf / Vraag devnet-airdrop aan |
+  | `feePayerSetupCard.ts`, airdrop gelukt | Airdrop aangevraagd | geen | Doorgaan / Doorgaan |
+  | `feePayerSetupCard.ts`, airdrop mislukt | Airdrop mislukt | geen | Doorgaan / Doorgaan |
+  | `feePayerUnlockCard.ts`, ontgrendelen | Ontgrendelen | Wachtwoord / leeg (password) | Ontgrendelen / Ontgrendelen |
+  | `feePayerUnlockCard.ts`, mislukt | Ontgrendelen mislukt | geen | Opnieuw proberen / Opnieuw proberen |
+
+  Voor/na-vergelijking buiten de repo, met de jsdom die al in de repo staat (geen install): de drie echte
+  aanroepbestanden (identiek op `main` en de branch) draaiden tegen de kaart van `main` en tegen de nieuwe, met
+  een nagebootste `invoke`, door alle zeven kaarten heen: tonen, typen (met `"`, `<`, `'` in het bedrag),
+  validatiefouten, weigeren, bevestigen, mislukte en gelukte airdrop, verkeerd wachtwoord, foutmeldingen met
+  HTML-tekens. Na elk van de 19 stappen zijn de opgebouwde boom (elementen, alle attributen, invoerwaarden en
+  -types, ruwe tekstknopen inclusief witruimte) en de ruwe `textContent` gelijk, en ook de teruggegeven waarden en
+  de 9 `invoke`-aanroepen. Controle op de vergelijking zelf: drie kleine wijzigingen in de nieuwe kaart (een
+  spatie achter het label, geen `defaultValue`, geen `autocomplete`) maken haar elk rood. `escapeHtml` oud en
+  nieuw geven op 5.006 teksten dezelfde zichtbare tekst. Nieuwe unittest `tests/unit/confirmationCardEscape.ts`
+  (6 tests: `escapeHtml` in element en attribuut voor client en desktop, letterlijke weergave van label en
+  beginwaarde, opbouw van de kaart); tegen de bestanden van `main` falen er 5 en blijft de opbouwtest groen.
+  Niet aangetoond: de weergave in de echte webview van Tauri (jsdom rekent geen opmaak uit).
+- `fad3ed5` (B5) `.gitignore`: uitzonderingen `!client/.env.example` en `!desktop/.env.example`. De test in
+  `noHeliusKeyLiteral.ts` controleert nu ook dat beide niet genegeerd worden; rood-proef: met de uitzondering voor
+  de client tijdelijk weg faalt hij en noemt hij het pad. De echte env-bestanden blijven genegeerd. Er is geen
+  voorbeeldbestand aangemaakt; komt er een, dan valt het onder de scan van de regressiewacht (geen UUID).
+- De commit met deze sectie.
+
+**Controles.**
+
+| controle | vóór (`main` = `9ec97f1`) | na |
+|---|---|---|
+| `npm run test:unit` | 300 passing | 307 passing, 0 failing |
+| `cargo check --offline` (desktop, zonder sleutel) | - | schoon, geen waarschuwingen |
+| `cargo test --offline` (desktop, zonder sleutel) | 20 passed | 25 passed, 0 failed |
+| `npm run build` in `client/` | - | exit 0 |
+| `npm run build` in `desktop/` (met `tsc`) | - | exit 0 |
+| typecheck desktop-frontend (`tsc --noEmit`) | - | exit 0 |
+
+**Open (bewust niet in deze ronde).**
+- De tekstfilter is nog steeds de enige beschermlaag tegen de sleutel in foutmeldingen. De URL structureel uit de
+  fout van de HTTP-bibliotheek halen vraagt een nieuwe afhankelijkheid in `Cargo.toml` en een aparte ronde.
+- Niet getest: een echte netwerkfout, time-out of 401 in de draaiende desktop-app.
+- De desktop controleert de sleutel niet bij het starten; zonder sleutel merkt de gebruiker het pas bij de eerste
+  RPC-actie.
+- De bevestigingskaart van de desktop is na deze wijziging niet in de draaiende app bekeken. Taak van de eigenaar:
+  de app starten en de ontgrendel-, installatie-, financierings- en verstuurkaart bekijken.
+- Eyebrow en knopteksten van de desktopkaart gaan nog via innerHTML; alle huidige aanroepers geven daar constanten.
+
+**Stand.** Commits lokaal op `fix/ronde-3c`, niet gepusht. Review door een verse sessie volgt.

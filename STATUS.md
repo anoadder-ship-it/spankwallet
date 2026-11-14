@@ -19143,3 +19143,93 @@ nagelopen; uitgevoerd is wat de opdracht noemde.
 
 **Stand.** Commits lokaal op `fix/helius-fallback`, niet gepusht. De eerste vijf zijn door een verse sessie
 gereviewd; de vier herstelcommits daarna nog niet.
+
+## 195. Ronde 3b: sleutel niet in foutmeldingen, negeerregels, escape in de ontgrendelkaart (2026-11-14)
+
+**Aanleiding.** De open vervolgpunten van §194 en bevinding B1 uit de review van de vier herstelcommits van
+§194. Uitgevoerd in een lokale sessie (Claude) op branch `fix/sleutel-niet-in-foutmeldingen`, vanaf `main` =
+`32e04c4`. `programs/`, `admin/`, alle `Cargo.toml`, alle `package.json` en de lockbestanden zijn niet
+aangeraakt. Het bestand met de echte sleutel van de client en `desktop/src-tauri/.cargo/` zijn niet gelezen;
+cargo draaide zonder `HELIUS_API_KEY` in de omgeving.
+
+**Bevestigd door de eigenaar op 2026-11-14.** De oude terugvalsleutel (§188, §194) bestaat in geen van zijn
+Helius-accounts meer; vastgesteld door vergelijking op het beginstuk, zonder de waarde te tonen. Het open punt
+uit §194 ("bij Helius bevestigen dat deze sleutel ingetrokken is") vervalt daarmee. De client start met een
+geldige sleutel in een echte browser.
+
+**Commits.**
+- `50f66a8` `.gitignore`: `client/.env*`, `desktop/.env*`, `/.cargo/`, `desktop/.cargo/` (naast het al
+  genegeerde `desktop/src-tauri/.cargo/`). Vite leest ook `.env.production`, `.env.development` en
+  `.env.<mode>.local`, en Cargo leest `.cargo`-mappen in bovenliggende mappen; die werden eerder niet
+  genegeerd en niet gescand. `git ls-files -ci --exclude-standard` blijft leeg (er is geen gevolgd
+  voorbeeldbestand). `git check-ignore --no-index` bevestigt voor elk genoemd pad "genegeerd", en voor
+  `client/index.html`, `client/vite.config.ts`, `desktop/index.html` en `client/src/main.ts` "niet genegeerd".
+  De regressiewacht scant deze bestanden bewust niet, want daar hoort de echte sleutel te staan en de test
+  leest die nooit. Hij kreeg wel een test die bewaakt dat elk van deze paden genegeerd blijft en dat geen
+  gevolgd bestand onder een negeerregel valt; rood-proef: met de regel `/.cargo/` tijdelijk weg faalt hij en
+  noemt hij het pad.
+- `01dafd6` desktop: RPC-foutteksten zonder sleutel. Onderzocht: elke plek in `desktop/src-tauri/src` waar
+  een RPC-fout of de RPC-URL tekst wordt. Dat zijn vier plekken in `execute.rs` (`get_account`,
+  `get_balance`, `get_latest_blockhash`, `send_and_confirm_transaction`) en één in `fee_payer.rs`
+  (`request_airdrop`), alle naar de frontend als `{kind, message}`. Er is geen `println!`, `eprintln!` of
+  log-macro met een RPC-fout of de URL in de app, en de app installeert geen logger. Nieuw in `rpc.rs`:
+  `rpc_error_text(&e)` en `redact_rpc_error_text(text)`; alle vijf plekken gaan daar nu doorheen. Van elke
+  http(s)-URL valt de query weg (`?[verborgen]`), de waarde van elke api-key-parameter (ook URL-gecodeerd)
+  wordt vervangen, en ook de sleutel van de build zelf (hoofdletterongevoelig) en elke waarde in
+  sleutelvorm. De functie snijdt alleen op ASCII-posities, geeft geen paniek en werkt zonder sleutel.
+  `fee_payer.rs` maakt de tekst schoon vóór de rate-limit-controle; die kijkt dus niet meer naar de URL. De
+  netwerktest in `rpc.rs` gebruikt geen `expect` meer op de RPC-fout, want de Debug-weergave bevat de URL.
+  Zes nieuwe unittests, met sleutelvormige testwaarden uit delen opgebouwd: URL, HTTP-status, hoofdletters,
+  URL-gecodeerd, een losse sleutel, een geconfigureerde sleutel zonder UUID-vorm, tekst zonder sleutel blijft
+  ongewijzigd, en rare invoer (niet-ASCII, afgebroken) zonder paniek. Mutatieproef: met de schoonmaak
+  uitgeschakeld falen er vijf. De route via de bibliotheek zelf (de URL uit het fouttype halen) is niet
+  genomen: daarvoor moet de desktop-crate het fouttype van de HTTP-bibliotheek kunnen noemen, en dat vraagt
+  een extra afhankelijkheid in `Cargo.toml`. Of dat de moeite waard is, beslist de eigenaar; de tekstfilter
+  vangt dezelfde gevallen.
+- Client: geen wijziging. Vastgesteld door het lezen van de code. De client toont fouten alleen via `log()`
+  (`textContent`) als `String(err)`, en nergens met `connection.rpcEndpoint`. In de browserbuild van
+  `@solana/web3.js` 1.98.4 zet de bibliotheek de endpoint-URL in geen enkele foutmelding: een mislukte
+  `fetch` geeft de melding van de browser door (in de gangbare browsers een generieke tekst zonder URL; niet
+  in een browser nagebootst), een HTTP-foutstatus wordt `"<status> <statustekst>: <antwoord van de
+  server>"`, en websocketfouten gaan alleen naar de console. Het eigen netwerkpaneel en de console van de
+  browser tonen de URL wel; dat is de browser zelf en komt niet in de pagina. Niet nagegaan, want dat kan
+  niet zonder netwerk: of het antwoord van Helius bij een foutstatus de sleutel herhaalt.
+- `d6f5524` desktop: `feePayerUnlockCard.ts` zet de foutmelding nu via `escapeHtml` in de kop, zoals
+  `feePayerSetupCard.ts` al deed. Nagelopen: elke `innerHTML`-plek in `desktop/src` en `client/src`. In
+  `client/src` gaat alle variabele tekst in koppen via `escapeHtml`, de velden via `textContent` en `value`,
+  en `thresholdBanner.ts` via `textContent`. In `desktop/src` was dit de enige kop met onge-escapete
+  variabele tekst.
+- De commit met deze sectie.
+
+**Controles.**
+
+| controle | vóór (`main` = `32e04c4`) | na |
+|---|---|---|
+| `npm run test:unit` | 299 passing | 300 passing, 0 failing |
+| `cargo check --offline` (desktop, zonder sleutel) | schoon | schoon, geen waarschuwingen |
+| `cargo test --offline` (desktop, zonder sleutel) | 14 passed | 20 passed, 0 failed; de netwerktest gaat zonder sleutel alleen de foutroute na |
+| `npm run build` in `client/` | - | exit 0 |
+| `npm run build` in `desktop/` | - | exit 0 |
+| UUID-literals in de gewijzigde bronbestanden | 0 | 0 |
+
+**Open (bewust niet in deze ronde).**
+- De desktop controleert de sleutel niet bij het starten; zonder sleutel merkt de gebruiker het pas bij de
+  eerste RPC-actie.
+- Een desktop-build met sleutel bevat die sleutel in de binary (`option_env!`). Het lezen uit een bestand bij
+  het starten blijft het open punt van §193.
+- Een sleutel in de web-client staat altijd leesbaar in de bundel, en dus bij iedereen die de pagina laadt.
+  Taak van de eigenaar: de sleutel in het Helius-dashboard beperken tot het eigen domein.
+- Een UUID die in stukken in de broncode staat, glipt door de regressiewacht (§194).
+- `desktop/src/confirmationCard.ts` zet `label`, `defaultValue`, `eyebrow` en de knopteksten via `innerHTML`.
+  Alle huidige aanroepers geven daar constanten of door de code berekende waarden mee (een base58-adres, een
+  getal). De client bouwt de velden al met `textContent` en `value`; de desktop gelijktrekken is een aparte
+  UI-wijziging.
+- De Solana-RPC-client schrijft op debugniveau een HTTP-antwoord met de URL naar de log-facade. Dat is nu
+  stil, omdat de app geen logger installeert. Wie later een logger of een log-plugin toevoegt, moet dit
+  meenemen.
+- Niet getest: een echte netwerkfout, time-out of 401 in de draaiende desktop-app. De schoonmaak is alleen
+  getest op foutteksten in de vorm die de HTTP-bibliotheek gebruikt. De desktop-app is niet gestart, de
+  ontgrendelkaart niet in de UI bekeken.
+
+**Stand.** Commits lokaal op `fix/sleutel-niet-in-foutmeldingen`, niet gepusht. Review door een verse sessie
+volgt.

@@ -106,16 +106,21 @@ fn is_url_end(b: u8) -> bool {
     b.is_ascii_whitespace() || !b.is_ascii() || matches!(b, b')' | b'(' | b'"' | b'\'' | b'<' | b'>' | b'[' | b']' | b'`')
 }
 
+fn starts_url_scheme(bytes: &[u8], at: usize) -> bool {
+    starts_with_ignore_ascii_case(bytes, at, b"http://") || starts_with_ignore_ascii_case(bytes, at, b"https://")
+}
+
+// Lineair (§196): één voorwaartse scan. Eerder werd bij elke URL opnieuw naar
+// http:// én https:// gezocht vanaf de huidige positie; ontbrak een van beide,
+// dan liep die zoektocht telkens tot het einde (kwadratisch bij veel URL's).
+// Het eerste schema vanaf `pos` is hetzelfde als het minimum van beide
+// zoektochten, dus de uitvoer is gelijk.
 fn strip_url_queries(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
     while pos < bytes.len() {
-        let next = [b"http://".as_slice(), b"https://".as_slice()]
-            .iter()
-            .filter_map(|scheme| find_ignore_ascii_case(bytes, scheme, pos))
-            .min();
-        let Some(start) = next else { break };
+        let Some(start) = (pos..bytes.len()).find(|&i| starts_url_scheme(bytes, i)) else { break };
         let end = (start..bytes.len()).find(|&i| is_url_end(bytes[i])).unwrap_or(bytes.len());
         match (start..end).find(|&i| bytes[i] == b'?') {
             Some(q) => {
@@ -420,6 +425,42 @@ mod tests {
         // Na een niet-ASCII-teken in de URL hoort de rest niet meer bij de URL,
         // maar de sleutelvorm wordt alsnog gevangen.
         assert_hidden(&redact_with_key(&format!("https://x/é?{key}"), None), &key);
+    }
+
+    // §196: tienduizenden URL's in één tekst. Bewust geen tijdsgrens (die kan op
+    // een trage machine omvallen); de kwadratische versie deed hier in een
+    // testbuild minuten over, de lineaire is direct klaar. Gecontroleerd wordt de
+    // volledige uitvoer.
+    #[test]
+    fn redact_handles_tens_of_thousands_of_urls() {
+        let key = valid_key();
+        let n = 40_000;
+        let mut input = String::new();
+        let mut expected = String::new();
+        for i in 0..n {
+            match i % 4 {
+                0 => {
+                    input += &format!("https://devnet.helius-rpc.com/?api-key={key} ");
+                    expected += "https://devnet.helius-rpc.com/?[verborgen] ";
+                }
+                1 => {
+                    input += "https://a ";
+                    expected += "https://a ";
+                }
+                2 => {
+                    input += &format!("(HTTP://x/{i}?q={i}) ");
+                    expected += &format!("(HTTP://x/{i}?[verborgen]) ");
+                }
+                _ => {
+                    input += "tekst é ";
+                    expected += "tekst é ";
+                }
+            }
+        }
+        let out = redact_with_key(&input, Some(&key));
+        assert_hidden(&out, &key);
+        assert_eq!(out, expected);
+        assert_eq!(out.matches("[verborgen]").count(), n / 2);
     }
 
     #[test]

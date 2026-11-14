@@ -219,7 +219,9 @@ pub fn request_fee_payer_airdrop(state: State<'_, FeePayerState>) -> Result<Stri
     match rpc.request_airdrop(&pubkey, 1_000_000_000) {
         Ok(signature) => Ok(signature.to_string()),
         Err(e) => {
-            let msg = e.to_string();
+            // §195: schoongemaakt vóór de rate-limit-controle en vóór de UI,
+            // zodat de sleutel uit de URL nergens terechtkomt.
+            let msg = crate::rpc::rpc_error_text(&e);
             if msg.contains("429") || msg.to_lowercase().contains("rate") {
                 Err(FeePayerError::Io(
                     "Devnet-airdrop is rate-gelimiteerd - probeer een webfaucet (bv. faucet.solana.com)."

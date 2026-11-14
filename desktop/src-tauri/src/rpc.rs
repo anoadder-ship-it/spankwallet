@@ -53,6 +53,183 @@ pub fn rpc_client() -> Result<RpcClient, String> {
     devnet_rpc_url().map(RpcClient::new)
 }
 
+// STATUS.md sectie 195: een RPC-fout mag de sleutel nooit naar de UI of een
+// log brengen. De HTTP-bibliotheek onder de Solana-RPC-client zet bij een
+// netwerkfout, time-out of HTTP-foutstatus de volledige URL, mét
+// `?api-key=...`, in de fouttekst, en de RPC-client geeft die ongewijzigd
+// door. Elke plek die een RPC-fout tot tekst maakt, gaat daarom via
+// rpc_error_text(). De bibliotheek kan de URL ook zelf uit de fout halen
+// (`without_url`), maar daarvoor moet deze crate het fouttype kunnen noemen,
+// en dat vraagt een extra afhankelijkheid in Cargo.toml; zolang die er niet is,
+// gebeurt alles hier op de tekst.
+//
+// Volgorde: (1) van elke http(s)-URL valt de query weg, (2) de waarde van elke
+// api-key-parameter (ook URL-gecodeerd) wordt vervangen, (3) de sleutel van
+// deze build zelf, hoofdletterongevoelig, en (4) elke waarde in sleutelvorm
+// (UUID, ook met `%2D` als streepje). De functie geeft nooit paniek: er wordt
+// alleen op ASCII-posities gesneden, en zonder sleutel in de build vallen
+// alleen stap (3) weg.
+const VERBORGEN: &str = "[verborgen]";
+
+pub fn rpc_error_text<E: std::fmt::Display>(error: &E) -> String {
+    redact_rpc_error_text(&error.to_string())
+}
+
+pub fn redact_rpc_error_text(text: &str) -> String {
+    redact_with_key(text, HELIUS_API_KEY)
+}
+
+fn redact_with_key(text: &str, key: Option<&str>) -> String {
+    let text = strip_url_queries(text);
+    let text = redact_api_key_params(&text);
+    let text = match key.map(str::trim) {
+        Some(k) if !k.is_empty() => replace_ignore_ascii_case(&text, k),
+        _ => text,
+    };
+    redact_key_shaped(&text)
+}
+
+fn find_ignore_ascii_case(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    (from..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+fn starts_with_ignore_ascii_case(hay: &[u8], at: usize, needle: &[u8]) -> bool {
+    hay.get(at..at + needle.len()).is_some_and(|s| s.eq_ignore_ascii_case(needle))
+}
+
+// Eén http(s)-URL eindigt bij witruimte, een afsluitend leesteken dat in
+// foutteksten om een URL staat, of een niet-ASCII-byte.
+fn is_url_end(b: u8) -> bool {
+    b.is_ascii_whitespace() || !b.is_ascii() || matches!(b, b')' | b'(' | b'"' | b'\'' | b'<' | b'>' | b'[' | b']' | b'`')
+}
+
+fn strip_url_queries(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let next = [b"http://".as_slice(), b"https://".as_slice()]
+            .iter()
+            .filter_map(|scheme| find_ignore_ascii_case(bytes, scheme, pos))
+            .min();
+        let Some(start) = next else { break };
+        let end = (start..bytes.len()).find(|&i| is_url_end(bytes[i])).unwrap_or(bytes.len());
+        match (start..end).find(|&i| bytes[i] == b'?') {
+            Some(q) => {
+                out.push_str(&text[pos..q]);
+                out.push('?');
+                out.push_str(VERBORGEN);
+            }
+            None => out.push_str(&text[pos..end]),
+        }
+        pos = end;
+    }
+    out.push_str(&text[pos..]);
+    out
+}
+
+fn is_param_value_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'%')
+}
+
+fn redact_api_key_params(text: &str) -> String {
+    const NAMES: [&[u8]; 5] = [b"api-key", b"api_key", b"apikey", b"api%2dkey", b"api%5fkey"];
+    const EQUALS: [&[u8]; 2] = [b"=", b"%3d"];
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let value_start = NAMES.iter().find_map(|name| {
+            if !starts_with_ignore_ascii_case(bytes, i, name) {
+                return None;
+            }
+            let after = i + name.len();
+            EQUALS
+                .iter()
+                .find(|eq| starts_with_ignore_ascii_case(bytes, after, eq))
+                .map(|eq| after + eq.len())
+        });
+        match value_start {
+            Some(vs) => {
+                let ve = (vs..bytes.len()).find(|&j| !is_param_value_byte(bytes[j])).unwrap_or(bytes.len());
+                out.push_str(&text[copied..vs]);
+                if ve > vs {
+                    out.push_str(VERBORGEN);
+                }
+                copied = ve;
+                i = ve.max(i + 1);
+            }
+            None => i += 1,
+        }
+    }
+    // `copied` staat altijd op een ASCII-positie of op het einde.
+    out.push_str(&text[copied..]);
+    out
+}
+
+fn replace_ignore_ascii_case(text: &str, key: &str) -> String {
+    if !key.is_ascii() {
+        return text.replace(key, VERBORGEN);
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0;
+    while let Some(start) = find_ignore_ascii_case(bytes, key.as_bytes(), pos) {
+        out.push_str(&text[pos..start]);
+        out.push_str(VERBORGEN);
+        pos = start + key.len();
+    }
+    out.push_str(&text[pos..]);
+    out
+}
+
+// Lengte van een waarde in sleutelvorm (8-4-4-4-12 hex, streepje als `-` of
+// `%2D`) die op `at` begint, of None.
+fn key_shaped_len(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut i = at;
+    for (n, group) in [8usize, 4, 4, 4, 12].iter().enumerate() {
+        if n > 0 {
+            if bytes.get(i) == Some(&b'-') {
+                i += 1;
+            } else if starts_with_ignore_ascii_case(bytes, i, b"%2d") {
+                i += 3;
+            } else {
+                return None;
+            }
+        }
+        let digits = bytes.get(i..i + group)?;
+        if !digits.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        i += group;
+    }
+    Some(i - at)
+}
+
+fn redact_key_shaped(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match key_shaped_len(bytes, i) {
+            Some(len) => {
+                out.push_str(&text[copied..i]);
+                out.push_str(VERBORGEN);
+                i += len;
+                copied = i;
+            }
+            None => i += 1,
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +319,118 @@ mod tests {
         }
     }
 
+    // §195: rpc_error_text / redact_with_key. De foutteksten hieronder bootsen
+    // de vorm na die de HTTP-bibliotheek gebruikt ("... for url (<url>)").
+    fn assert_hidden(out: &str, key: &str) {
+        assert!(!out.contains(key), "sleutel staat nog in de tekst");
+        assert!(!out.to_lowercase().contains(&key[..8].to_lowercase()), "beginstuk staat nog in de tekst");
+    }
+
+    #[test]
+    fn redact_hides_key_in_url_and_keeps_text_readable() {
+        let key = valid_key();
+        let text = format!(
+            "error sending request for url (https://devnet.helius-rpc.com/?api-key={key}): operation timed out"
+        );
+        for configured in [None, Some(key.as_str())] {
+            let out = redact_with_key(&text, configured);
+            assert_hidden(&out, &key);
+            assert_eq!(
+                out,
+                "error sending request for url (https://devnet.helius-rpc.com/?[verborgen]): operation timed out"
+            );
+        }
+        let status = format!(
+            "HTTP status client error (401 Unauthorized) for url (https://devnet.helius-rpc.com/?api-key={key}&x=1)"
+        );
+        let out = redact_with_key(&status, None);
+        assert_hidden(&out, &key);
+        assert!(out.contains("401 Unauthorized"), "{out}");
+        assert!(out.contains("https://devnet.helius-rpc.com/"), "{out}");
+    }
+
+    #[test]
+    fn redact_handles_uppercase_and_url_encoded_keys() {
+        let key = valid_key();
+        let upper = key.to_uppercase();
+        let out = redact_with_key(&format!("HTTPS://DEVNET.HELIUS-RPC.COM/?API-KEY={upper} faalde"), Some(&key));
+        assert_hidden(&out, &key);
+        assert!(out.ends_with(" faalde"), "{out}");
+        // URL-gecodeerd, zonder herkenbaar schema: de parameter en de
+        // sleutelvorm met %2D als streepje worden beide gevangen.
+        let encoded_key = key.replace('-', "%2D");
+        let encoded = format!("proxy: https%3A%2F%2Fdevnet.helius-rpc.com%2F%3Fapi-key%3D{encoded_key} weigerde");
+        let out = redact_with_key(&encoded, None);
+        assert_hidden(&out, &key);
+        assert!(!out.contains(&encoded_key[..8]), "{out}");
+        assert!(out.ends_with(" weigerde"), "{out}");
+        let loose = format!("sleutel {} los", key.to_uppercase().replace('-', "%2d"));
+        let out = redact_with_key(&loose, None);
+        assert_hidden(&out, &key);
+        assert_eq!(out, "sleutel [verborgen] los");
+    }
+
+    #[test]
+    fn redact_hides_configured_key_in_any_form_and_position() {
+        // Ook een geconfigureerde sleutel die geen UUID-vorm heeft, en een
+        // sleutel zonder URL of parameter ervoor.
+        let odd = ["abc", "DEF", "1234", "xyz"].concat();
+        let out = redact_with_key(&format!("waarde {odd} en {} hier", odd.to_lowercase()), Some(&odd));
+        assert_eq!(out, "waarde [verborgen] en [verborgen] hier");
+        let key = valid_key();
+        let out = redact_with_key(&format!("los: {key}"), None);
+        assert_hidden(&out, &key);
+    }
+
+    #[test]
+    fn redact_leaves_text_without_key_unchanged() {
+        for text in [
+            "",
+            "RPC response error -32002: Transaction simulation failed: Blockhash not found",
+            "error sending request for url (https://devnet.helius-rpc.com/): connection refused",
+            "Devnet-airdrop: 429 Too Many Requests",
+            "één fout met niet-ASCII: café",
+        ] {
+            assert_eq!(redact_with_key(text, None), text);
+            assert_eq!(redact_rpc_error_text(text), text);
+        }
+    }
+
+    #[test]
+    fn redact_never_panics_on_odd_input() {
+        let key = valid_key();
+        let inputs = [
+            "https://".to_string(),
+            "http://?".to_string(),
+            "?api-key=".to_string(),
+            "api-key".to_string(),
+            "api-key%3".to_string(),
+            "api%2Dkey%3D".to_string(),
+            format!("é https://x/?a=é ü api-key=ö {}", &key[..20]),
+            format!("{}%2", &key[..23]),
+            "ééé".repeat(50),
+            format!("https://x/é?{key}"),
+        ];
+        for input in &inputs {
+            let _ = redact_with_key(input, Some(&key));
+            let _ = redact_with_key(input, Some("   "));
+            let _ = redact_with_key(input, Some("é"));
+            let _ = redact_with_key(input, None);
+        }
+        // Na een niet-ASCII-teken in de URL hoort de rest niet meer bij de URL,
+        // maar de sleutelvorm wordt alsnog gevangen.
+        assert_hidden(&redact_with_key(&format!("https://x/é?{key}"), None), &key);
+    }
+
+    #[test]
+    fn rpc_error_text_uses_display_and_redacts() {
+        let key = valid_key();
+        let err = std::io::Error::other(format!("for url (https://devnet.helius-rpc.com/?api-key={key})"));
+        let out = rpc_error_text(&err);
+        assert_hidden(&out, &key);
+        assert_eq!(out, "for url (https://devnet.helius-rpc.com/?[verborgen])");
+    }
+
     // Echte devnet-RPC-aanroep (STATUS.md sectie 107/109/194), alleen als de
     // build een sleutel meekreeg (HELIUS_API_KEY bij het bouwen). Zonder sleutel
     // controleert hij alleen dat rpc_client() een fout geeft, zonder netwerk, en
@@ -156,7 +445,11 @@ mod tests {
             return;
         }
         let client = rpc_client().expect("HELIUS_API_KEY in deze build hoort een geldige sleutel te zijn");
-        let slot = client.get_slot().expect("getSlot tegen echte devnet-RPC moet slagen");
+        // Niet `expect`: die toont de fout met Debug, en daarin staat de URL met
+        // de sleutel (§195). De paniektekst gaat via rpc_error_text().
+        let slot = client
+            .get_slot()
+            .unwrap_or_else(|e| panic!("getSlot tegen echte devnet-RPC moet slagen: {}", rpc_error_text(&e)));
         assert!(slot > 0, "een geldige devnet-slot moet positief zijn");
     }
 }

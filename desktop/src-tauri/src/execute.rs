@@ -12,7 +12,7 @@
 
 use crate::challenge::{action_nonce_le_bytes, build_expected_challenge, read_action_nonce, SPANKWALLET_PROGRAM_ID};
 use crate::fee_payer::{fee_payer_pubkey, sign_with_fee_payer, FeePayerState};
-use crate::rpc::rpc_client;
+use crate::rpc::{rpc_client, rpc_error_text};
 use crate::secp256r1::{build_secp256r1_instruction, der_signature_to_raw_low_s};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,7 @@ pub fn prepare_execute_challenge(
     let rpc = rpc_client().map_err(ExecuteError::RpcError)?;
     let account = rpc
         .get_account(&wallet_pubkey)
-        .map_err(|e| ExecuteError::RpcError(e.to_string()))?;
+        .map_err(|e| ExecuteError::RpcError(rpc_error_text(&e)))?;
     let action_nonce = read_action_nonce(&account.data).map_err(ExecuteError::Internal)?;
 
     let payload = build_execute_payload(action_nonce, &recipient_pubkey, amount_lamports);
@@ -204,7 +204,7 @@ pub fn execute_action(
     let rpc = rpc_client().map_err(ExecuteError::RpcError)?;
     let fee_payer_balance = rpc
         .get_balance(&fee_payer_pubkey_parsed)
-        .map_err(|e| ExecuteError::RpcError(e.to_string()))?;
+        .map_err(|e| ExecuteError::RpcError(rpc_error_text(&e)))?;
     // 5000 lamports is de standaard basis-fee per handtekening - een grove,
     // vroege check vóór we een dure RPC-round-trip riskeren; de daadwerkelijke
     // fee wordt hierna nog een keer door de RPC zelf gevalideerd.
@@ -214,7 +214,7 @@ pub fn execute_action(
 
     let recent_blockhash: Hash = rpc
         .get_latest_blockhash()
-        .map_err(|e| ExecuteError::RpcError(e.to_string()))?;
+        .map_err(|e| ExecuteError::RpcError(rpc_error_text(&e)))?;
 
     let message = Message::new_with_blockhash(
         &[secp256r1_ix, execute_ix],
@@ -229,7 +229,7 @@ pub fn execute_action(
 
     let signature = rpc
         .send_and_confirm_transaction(&transaction)
-        .map_err(|e| ExecuteError::RpcError(e.to_string()))?;
+        .map_err(|e| ExecuteError::RpcError(rpc_error_text(&e)))?;
 
     Ok(ExecuteActionResult {
         signature: signature.to_string(),

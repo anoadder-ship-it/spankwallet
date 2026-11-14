@@ -35,11 +35,24 @@ onderzoek). Dit README geeft alleen het overzicht.
 Het on-chain programma (`programs/spankwallet/`) is volledig ongewijzigd - dit is
 uitsluitend een client-architectuurwijziging.
 
+## Helius-sleutel
+
+De app praat met devnet via Helius en heeft een eigen Helius-API-sleutel nodig. **De sleutel is
+een geheim en hoort nooit in git**; er staat geen terugvalwaarde in de broncode (STATUS.md
+sectie 194). Hij gaat bij het compileren mee als `HELIUS_API_KEY`: in de omgeving van
+`npm run tauri dev` / `npm run tauri build`, of blijvend lokaal in de `[env]`-sectie van
+`src-tauri/.cargo/config.toml` (genegeerd door `.gitignore`).
+
+Zonder sleutel, of met een waarde die niet de vorm van een Helius-sleutel heeft, bouwt de app
+wel, maar geeft elke RPC-actie (challenge ophalen, uitvoeren, airdrop) een foutmelding en
+vertrekt er geen RPC-verzoek. Een binary die met sleutel is gebouwd, bevat die sleutel
+letterlijk; deel zo'n build niet.
+
 ## Draaien (development)
 
 ```bash
 npm install
-npm run tauri dev
+npm run tauri dev      # HELIUS_API_KEY nodig, zie hierboven
 ```
 
 `WEBKIT_DISABLE_DMABUF_RENDERER=1` staat al in het `tauri`-npm-script (permanente fix voor

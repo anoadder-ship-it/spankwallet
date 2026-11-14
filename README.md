@@ -274,17 +274,34 @@ overschrijft) en het altijd-eerst-`anchor build`-dan-`cargo-build-sbf --arch v3`
 Rate-limiting: api.devnet.solana.com heeft een officieel, strikt rate-limit (100
 verzoeken/10s per IP). Bij intensief testen op een dag raak je dat onvermijdelijk. Een
 werkend, gratis alternatief zonder aanmelding: `https://solana-devnet.api.onfinality.io/public`
-(gebruik hetzelfde endpoint voor zowel de `--url`-vlaggen hierboven als client/src/main.ts's
-Connection). Bij structureel intensiever testen: overweeg een gratis account bij een
-dedicated RPC-provider (Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke
-endpoints.
+(voor de `--url`-vlaggen hierboven). De browser-client en de desktop-app gebruiken niet dat
+endpoint maar het Helius-devnet-endpoint, met een eigen sleutel (zie hieronder). Bij
+structureel intensiever testen: overweeg een gratis account bij een dedicated RPC-provider
+(Helius, Alchemy, QuickNode) in plaats van de gedeelde publieke endpoints.
+
+### Helius-sleutel voor client en desktop
+
+Client en desktop praten met devnet via Helius en hebben daarvoor een eigen Helius-API-sleutel
+nodig. **De sleutel is een geheim en hoort nooit in git**; er staat geen terugvalwaarde in de
+broncode (STATUS.md sectie 194).
+
+- **Browser-client (`client/`):** zet `VITE_HELIUS_API_KEY=<sleutel>` in `client/.env.local`
+  (genegeerd door `.gitignore`). Vite leest dat bestand bij `npm run dev` en `npm run build`.
+- **Desktop-app (`desktop/`):** de sleutel gaat bij het compileren mee als `HELIUS_API_KEY`, in
+  de omgeving van `npm run tauri dev` / `npm run tauri build`, of blijvend lokaal in de
+  `[env]`-sectie van `desktop/src-tauri/.cargo/config.toml` (genegeerd door `.gitignore`).
+
+Zonder sleutel, of met een waarde die niet de vorm van een Helius-sleutel heeft, maken client en
+desktop geen verbinding: de client toont een foutmelding en schakelt de knoppen uit, de desktop
+bouwt wel maar geeft bij elke RPC-actie een foutmelding. Let op: een gebouwde client-bundel of
+desktop-binary bevat de sleutel letterlijk; deel zo'n build niet.
 
 ### Desktop-app (Tauri, fase 0)
 
 ```bash
 cd desktop
 npm install
-npm run tauri dev      # development
+npm run tauri dev      # development (HELIUS_API_KEY nodig, zie hierboven)
 npm run tauri build    # production-bundle (.deb/.rpm/.AppImage op Linux)
 ```
 

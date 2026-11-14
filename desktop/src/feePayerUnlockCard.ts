@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { showConfirmationCard } from "./confirmationCard";
+import { showConfirmationCard, escapeHtml } from "./confirmationCard";
 
 // Zelfde verplichte UX-tekst als feePayerSetupCard.ts - herhaald hier,
 // niet alleen bij de allereerste keer getoond (Tauri-migratie-ontwerp,
@@ -57,7 +57,10 @@ export async function showFeePayerUnlockCard(): Promise<string> {
             : JSON.stringify(err);
       await showConfirmationCard({
         eyebrow: "Ontgrendelen mislukt",
-        headline: () => message,
+        // STATUS.md sectie 195: de kop gaat via innerHTML (confirmationCard.ts);
+        // de foutmelding komt uit Rust en wordt daarom ge-escapet, zoals in
+        // feePayerSetupCard.ts.
+        headline: () => escapeHtml(message),
         fields: [],
         validate: () => ({ values: {} }),
         confirmLabel: "Opnieuw proberen",

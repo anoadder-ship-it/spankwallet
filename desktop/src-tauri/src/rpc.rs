@@ -57,6 +57,91 @@ pub fn rpc_client() -> Result<RpcClient, String> {
 mod tests {
     use super::*;
 
+    // Testwaarden in sleutelvorm worden uit delen opgebouwd: de bron bevat
+    // bewust geen UUID-literal (tests/unit/noHeliusKeyLiteral.ts, §194).
+    fn key_shaped(parts: [&str; 5]) -> String {
+        parts.join("-")
+    }
+
+    fn valid_key() -> String {
+        key_shaped([
+            &"a1".repeat(4),
+            &"b2".repeat(2),
+            &"c3".repeat(2),
+            &"d4".repeat(2),
+            &"e5f6".repeat(3),
+        ])
+    }
+
+    #[test]
+    fn key_format_accepts_uuid_shape_in_any_case() {
+        let key = valid_key();
+        assert_eq!(key.len(), 36);
+        assert!(is_helius_key_format(&key));
+        assert!(is_helius_key_format(&key.to_uppercase()));
+        let mixed = key_shaped([&"9".repeat(8), &"A".repeat(4), &"f".repeat(4), &"0".repeat(4), &"Ab".repeat(6)]);
+        assert!(is_helius_key_format(&mixed));
+    }
+
+    #[test]
+    fn key_format_rejects_wrong_shapes() {
+        let key = valid_key();
+        assert!(!is_helius_key_format(""));
+        assert!(!is_helius_key_format(&" ".repeat(36)));
+        // Te kort en te lang.
+        assert!(!is_helius_key_format(&key[..35]));
+        assert!(!is_helius_key_format(&format!("{key}0")));
+        // Verkeerde tekens: niet-hex, een spatie, een streepje op de verkeerde plek.
+        assert!(!is_helius_key_format(&key.replacen('a', "g", 1)));
+        assert!(!is_helius_key_format(&key.replacen('b', " ", 1)));
+        let mut moved = key.clone().into_bytes();
+        moved.swap(8, 9);
+        assert!(!is_helius_key_format(&String::from_utf8(moved).unwrap()));
+        // Spaties eromheen: is_helius_key_format trimt zelf niet.
+        assert!(!is_helius_key_format(&format!(" {key}")));
+        // Niet-ASCII van dezelfde bytelengte.
+        assert!(!is_helius_key_format(&key.replacen("a1", "é", 1)));
+    }
+
+    #[test]
+    fn rpc_url_contains_trimmed_key_only_in_query() {
+        let key = valid_key();
+        let expected = format!("https://devnet.helius-rpc.com/?api-key={key}");
+        assert_eq!(devnet_rpc_url_for(Some(&key)).unwrap(), expected);
+        assert_eq!(devnet_rpc_url_for(Some(&format!("  {key}\n"))).unwrap(), expected);
+        let upper = key.to_uppercase();
+        assert_eq!(
+            devnet_rpc_url_for(Some(&upper)).unwrap(),
+            format!("https://devnet.helius-rpc.com/?api-key={upper}")
+        );
+    }
+
+    #[test]
+    fn rpc_url_missing_or_empty_key_is_error() {
+        for input in [None, Some(""), Some("   "), Some("\n\t")] {
+            let err = devnet_rpc_url_for(input).unwrap_err();
+            assert!(err.contains("HELIUS_API_KEY"), "{err}");
+            assert!(err.contains("ontbreekt of is leeg"), "{err}");
+        }
+    }
+
+    #[test]
+    fn rpc_url_malformed_key_is_error_without_the_value() {
+        let key = valid_key();
+        let bad_values = [
+            key[..35].to_string(),
+            key.replacen('a', "g", 1),
+            format!("{key}0"),
+            key.replace('-', ""),
+        ];
+        for bad in &bad_values {
+            let err = devnet_rpc_url_for(Some(bad)).unwrap_err();
+            assert!(err.contains("niet de vorm van een Helius-sleutel"), "{err}");
+            assert!(!err.contains(bad.as_str()), "de foutmelding mag de waarde niet bevatten");
+            assert!(!err.contains(&bad[..8]), "de foutmelding mag geen deel van de waarde bevatten");
+        }
+    }
+
     // Echte devnet-RPC-aanroep (STATUS.md sectie 107/109/194), alleen als de
     // build een sleutel meekreeg (HELIUS_API_KEY bij het bouwen). Zonder sleutel
     // controleert hij alleen dat rpc_client() een fout geeft, zonder netwerk, en

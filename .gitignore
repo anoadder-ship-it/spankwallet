@@ -20,6 +20,9 @@ admin/*.pem
 # die Cargo bij een desktop-build leest (hoofdmap, desktop/, desktop/src-tauri/).
 client/.env*
 desktop/.env*
+# Sectie 196: een voorbeeldbestand (zonder sleutel) mag wel gevolgd worden.
+!client/.env.example
+!desktop/.env.example
 client/dist/
 /.cargo/
 desktop/.cargo/

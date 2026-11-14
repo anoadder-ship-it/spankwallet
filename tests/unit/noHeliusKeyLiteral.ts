@@ -99,7 +99,7 @@ describe("geen UUID-literal (Helius-sleutelvorm) in client, desktop of scripts (
   // wacht scant ze bewust niet (daar hoort de echte sleutel juist te staan, en
   // de test leest die nooit); hij bewaakt alleen dat .gitignore ze blijft
   // dekken en dat er geen gevolgd bestand onder de negeerregels valt.
-  it("env-bestanden van client en desktop en alle .cargo-mappen zijn genegeerd", () => {
+  it("env-bestanden van client en desktop en alle .cargo-mappen zijn genegeerd, een voorbeeldbestand niet", () => {
     const mustBeIgnored = [
       "client/.env",
       "client/.env.local",
@@ -116,6 +116,11 @@ describe("geen UUID-literal (Helius-sleutelvorm) in client, desktop of scripts (
     for (const p of mustBeIgnored) {
       const res = spawnSync("git", ["check-ignore", "-q", "--no-index", "--", p], { cwd: ROOT, encoding: "utf8" });
       assert.strictEqual(res.status, 0, `${p} wordt niet genegeerd door .gitignore`);
+    }
+    // §196: een voorbeeldbestand mag wel gevolgd worden (exit 1 = niet genegeerd).
+    for (const p of ["client/.env.example", "desktop/.env.example"]) {
+      const res = spawnSync("git", ["check-ignore", "-q", "--no-index", "--", p], { cwd: ROOT, encoding: "utf8" });
+      assert.strictEqual(res.status, 1, `${p} hoort niet genegeerd te worden (exit ${res.status})`);
     }
     const tracked = spawnSync("git", ["ls-files", "-ci", "--exclude-standard"], { cwd: ROOT, encoding: "utf8" });
     assert.strictEqual(tracked.status, 0, `git ls-files faalde: ${tracked.stderr}`);

@@ -19392,3 +19392,22 @@ Niet nagegaan: of `ctap-hid-fido2` (3.5.13) of Stronghold ooit een apparaatpad o
 proef gebruikt zelfgemaakte teksten. In de broncode van `ctap-hid-fido2` staat het apparaatpad in de beschrijving
 van de apparatenlijst (`hid/mod.rs`, `path=`); een foutmelding met het pad is niet gevonden, maar ook niet
 uitputtend gezocht.
+
+**B3: correctie op §196, attributen van het invoerveld.** §196 zegt bij de voor/na-vergelijking van de
+bevestigingskaart dat "alle attributen" gelijk zijn. De verzameling is gelijk, de volgorde niet. Het label houdt
+`class for`. Bij het invoerveld was de volgorde vóór `452abe0` `id class type value autocomplete spellcheck`, en
+is die nu `class autocomplete spellcheck id type value`: eerst de vaste opmaak, daarna wat met DOM-functies wordt
+gezet. De bestaande unittest vergelijkt de gesorteerde lijst en ziet de volgorde dus niet.
+
+Nagegaan in jsdom (de jsdom uit de repo, buiten de repo gedraaid) met de kaart van vóór `452abe0` en die van nu,
+voor een tekstveld en een wachtwoordveld:
+- per element is de verzameling naam=waarde gelijk;
+- de eigenschappen `value`, `type`, `defaultValue` en `autocomplete` zijn gelijk;
+- de selectors `.preview-input`, `.preview-label`, `input[type=password]` en `[autocomplete=off]` treffen dezelfde
+  elementen;
+- `label.control` wijst naar hetzelfde veld, en de `textContent` van de kaart is gelijk.
+Alleen `outerHTML` verschilt, omdat de serialisatie de attributen in hun volgorde schrijft. Geen code in
+`client/src` of `desktop/src` leest `outerHTML`, `.attributes` of `getAttributeNames`.
+
+De volgorde heeft dus geen effect op wat de kaart doet of welke CSS-regels gelden. Niet bekeken in de webview van
+Tauri.

@@ -19411,3 +19411,10 @@ Alleen `outerHTML` verschilt, omdat de serialisatie de attributen in hun volgord
 
 De volgorde heeft dus geen effect op wat de kaart doet of welke CSS-regels gelden. Niet bekeken in de webview van
 Tauri.
+
+**B5: correctie op §196, aantal tests in `1e061a7`.** §196 noemt bij `1e061a7` "vijf nieuwe tests". Het zijn er
+vier; `git show 1e061a7` voegt vier keer `#[test]` toe, alle vier in `desktop/src-tauri/src/rpc.rs`:
+`redact_is_idempotent`, `fee_payer_error_routes_are_redacted`, `execute_error_routes_are_redacted` en
+`passkey_error_routes_are_redacted`. De vijf onderwerpen die §196 opsomt, zitten in die vier tests: de
+`From`-impl en de conversie in `execute.rs` maken deel uit van de tests voor `FeePayerError` en `ExecuteError`.
+Het totaal in §196 (van 21 naar 25 Rust-tests) klopt.

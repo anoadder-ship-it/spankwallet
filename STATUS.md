@@ -19355,3 +19355,40 @@ de omgeving. Uit `client/dist` zijn alleen exitcodes gebruikt.
 - Eyebrow en knopteksten van de desktopkaart gaan nog via innerHTML; alle huidige aanroepers geven daar constanten.
 
 **Stand.** Commits lokaal op `fix/ronde-3c`, niet gepusht. Review door een verse sessie volgt.
+
+## 197. Restpunten uit de review van 196 (B1 tot en met B5) (2026-11-16)
+
+**Aanleiding.** De review van ronde 3c (§196) liet vijf restpunten over (B1 tot en met B5). Uitgevoerd in een lokale
+sessie (Claude) op branch `restpunten-2026-11`, vanaf `main` = `0f5fe8e`. `programs/`, `admin/`, alle `Cargo.toml`,
+alle `package.json` en de lockbestanden zijn niet aangeraakt; de zip-afhankelijkheden vallen buiten deze ronde.
+Env-bestanden en `.cargo`-mappen zijn niet gelezen; cargo draaide zonder `HELIUS_API_KEY` in de omgeving. Oudere
+secties zijn niet bewerkt: correcties op §196 staan hieronder.
+
+**B2: de filter loopt ook over passkey-, apparaat- en Stronghold-fouten, en verbergt daar elke UUID.** Sinds
+`1e061a7` gaat elke tekst in `PasskeyError` (`DeviceError`, `Internal`) en in `FeePayerError` (`Io`, `Internal`)
+bij het serialiseren naar de frontend en in de Debug-vorm door `redact_rpc_error_text`. In `FeePayerError` komen
+ook de fouten van Stronghold terecht (`fee_payer.rs`, `FeePayerError::Internal(e.to_string())`). Stap 4 van de
+filter vervangt elke waarde in UUID-vorm (8-4-4-4-12 hex, hoofdletterongevoelig, ook met `%2D` als streepje),
+ook als die niets met de sleutel te maken heeft.
+
+Proef met een tijdelijke test (niet gecommit; cargo zonder sleutel). Drie teksten gingen door de serialisatie van
+`PasskeyError::DeviceError`, `PasskeyError::Internal`, `FeePayerError::Io` en `FeePayerError::Internal`, en door de
+Debug-vorm van `PasskeyError::DeviceError`; alle vijf routes gaven dezelfde tekst:
+- een Windows-HID-pad dat eindigt op de interface-GUID tussen accolades: de GUID wordt `{[verborgen]}`. De rest
+  van het pad (`\\?\hid#vid_…&pid_…&mi_…#…#`) blijft staan;
+- een explorer-link `shell:::{<GUID>}` wordt `shell:::{[verborgen]}`;
+- dezelfde link met `%2D` in plaats van streepjes: ook `{[verborgen]}`.
+
+Gevolg: wie zo'n fout ziet, kan niet meer zien welke GUID erin stond, en verliest dus een deel van de
+diagnose-informatie. Bij een HID-pad blijven vendor- en product-ID zichtbaar.
+
+Waarom dit bewust en veilig is: een Helius-sleutel heeft dezelfde UUID-vorm. De filter kan aan de tekst niet zien of
+een UUID een sleutel is of een GUID. Daarom vangt hij ook een sleutel die niet de geconfigureerde sleutel van de
+build is, of die in de fouttekst van een andere bibliotheek opduikt. Een GUID te veel verbergen kost
+diagnose-informatie; een sleutel doorlaten kost de sleutel. Een uitzondering voor GUID's tussen accolades zou een
+sleutel tussen accolades doorlaten en is daarom niet gemaakt.
+
+Niet nagegaan: of `ctap-hid-fido2` (3.5.13) of Stronghold ooit een apparaatpad of GUID in een fouttekst zet. De
+proef gebruikt zelfgemaakte teksten. In de broncode van `ctap-hid-fido2` staat het apparaatpad in de beschrijving
+van de apparatenlijst (`hid/mod.rs`, `path=`); een foutmelding met het pad is niet gevonden, maar ook niet
+uitputtend gezocht.

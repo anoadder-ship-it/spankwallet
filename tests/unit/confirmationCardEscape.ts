@@ -141,3 +141,133 @@ describe("bevestigingskaart desktop: velden via DOM-functies (STATUS.md sectie 1
     assert.isNull(await result);
   });
 });
+
+/**
+ * STATUS.md sectie 197 (restpunt B4). De foutkaarten in
+ * desktop/src/feePayerSetupCard.ts en feePayerUnlockCard.ts geven
+ * `JSON.stringify(err)` door aan escapeHtml. Met `err` undefined is dat
+ * undefined, geen tekst. escapeHtml moet elke waarde aankunnen, net als de
+ * versie van vóór 452abe0 (`div.textContent = value; return div.innerHTML`):
+ * undefined en null worden "", al het andere `String(value)`, daarna
+ * ge-escapet.
+ */
+function oldEscapeHtml(value: unknown): string {
+  const div = doc.createElement("div");
+  (div as any).textContent = value;
+  return div.innerHTML;
+}
+
+const NON_TEXT: [string, unknown, string][] = [
+  ["undefined", undefined, ""],
+  ["JSON.stringify(undefined)", JSON.stringify(undefined), ""],
+  ["null", null, ""],
+  ["0", 0, "0"],
+  ["42", 42, "42"],
+  ["-1.5", -1.5, "-1.5"],
+  ["NaN", NaN, "NaN"],
+  ["true", true, "true"],
+  ["false", false, "false"],
+  ["{}", {}, "[object Object]"],
+  ["{kind, message}", { kind: "Io", message: "<x>" }, "[object Object]"],
+  ["[1, '<']", [1, "<"], "1,&lt;"],
+  ["object met toString", { toString: () => "a<b>&c" }, "a&lt;b&gt;&amp;c"],
+];
+
+for (const [name, escapeHtml] of [
+  ["client", escapeClient],
+  ["desktop", escapeDesktop],
+] as const) {
+  describe(`escapeHtml met een waarde die geen tekst is (${name}, STATUS.md sectie 197)`, () => {
+    for (const [label, value, expected] of NON_TEXT) {
+      it(`${label} geeft ${JSON.stringify(expected)}, zoals de oude versie`, () => {
+        assert.strictEqual(oldEscapeHtml(value), expected, "verwachting klopt met de oude versie");
+        assert.strictEqual(escapeHtml(value as any), expected);
+      });
+    }
+  });
+}
+
+describe("foutkaarten van de desktop met err undefined (STATUS.md sectie 197)", () => {
+  const g = global as any;
+  let saved: { document: unknown; window: unknown };
+  let invokeCalls: string[];
+  let answers: ((cmd: string) => Promise<unknown>)[];
+  before(() => {
+    saved = { document: g.document, window: g.window };
+    g.document = doc;
+    g.window = {
+      __TAURI_INTERNALS__: {
+        invoke: (cmd: string) => {
+          invokeCalls.push(cmd);
+          const next = answers.shift();
+          if (!next) throw new Error(`onverwachte invoke ${cmd}`);
+          return next(cmd);
+        },
+      },
+    };
+  });
+  after(() => {
+    g.document = saved.document;
+    g.window = saved.window;
+  });
+  beforeEach(() => {
+    invokeCalls = [];
+    answers = [];
+  });
+
+  const card = () => doc.querySelector<HTMLElement>("#preview-root > .preview-card");
+  const eyebrow = () => card()?.querySelector(".preview-eyebrow")?.textContent ?? null;
+
+  // Wacht tot de kaart met deze eyebrow er staat, of tot de flow zelf faalt.
+  async function waitForCard(flow: Promise<unknown>, wanted: string): Promise<void> {
+    let failure: unknown = null;
+    flow.catch((e) => {
+      failure = e;
+    });
+    for (let i = 0; i < 200; i++) {
+      if (failure) throw failure;
+      if (eyebrow() === wanted) return;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    throw new Error(`kaart "${wanted}" verscheen niet (nu: ${eyebrow()})`);
+  }
+
+  function fill(id: string, value: string) {
+    doc.querySelector<HTMLInputElement>(`#preview-input-${id}`)!.value = value;
+  }
+  const confirm = () => doc.querySelector<HTMLButtonElement>("#preview-confirm-btn")!.click();
+
+  it("ontgrendelkaart: invoke weigert met undefined, de foutkaart verschijnt en de lus gaat door", async () => {
+    const { showFeePayerUnlockCard } = await import("../../desktop/src/feePayerUnlockCard");
+    answers = [() => Promise.reject(undefined), async () => ({ pubkeyBase58: "Adres111" })];
+    const flow = showFeePayerUnlockCard();
+    await waitForCard(flow, "Ontgrendelen");
+    fill("password", "geheim");
+    confirm();
+    await waitForCard(flow, "Ontgrendelen mislukt");
+    assert.strictEqual(card()!.querySelector("#preview-headline")!.innerHTML, "");
+    confirm();
+    await waitForCard(flow, "Ontgrendelen");
+    fill("password", "geheim");
+    confirm();
+    assert.strictEqual(await flow, "Adres111");
+    assert.deepEqual(invokeCalls, ["unlock_fee_payer", "unlock_fee_payer"]);
+  });
+
+  it("installatiekaart: airdrop weigert met undefined, de foutkaart verschijnt en de installatie eindigt", async () => {
+    const { showFeePayerSetupCard } = await import("../../desktop/src/feePayerSetupCard");
+    answers = [async () => ({ pubkeyBase58: "Adres222" }), () => Promise.reject(undefined)];
+    const flow = showFeePayerSetupCard();
+    await waitForCard(flow, "Eenmalige installatie");
+    fill("password", "geheim123");
+    fill("passwordConfirm", "geheim123");
+    confirm();
+    await waitForCard(flow, "Fee-payer aangemaakt");
+    confirm();
+    await waitForCard(flow, "Airdrop mislukt");
+    assert.strictEqual(card()!.querySelector("#preview-headline")!.innerHTML, "");
+    confirm();
+    assert.strictEqual(await flow, "Adres222");
+    assert.deepEqual(invokeCalls, ["setup_fee_payer", "request_fee_payer_airdrop"]);
+  });
+});

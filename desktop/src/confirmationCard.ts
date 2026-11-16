@@ -14,9 +14,16 @@
  * en `'`), zodat hij ook in een attribuutwaarde veilig is. De velden van de
  * kaart worden, net als in de client, met DOM-functies opgebouwd
  * (`textContent` en `.value`), nooit via innerHTML.
+ *
+ * STATUS.md sectie 197: de waarde gaat eerst naar tekst, zoals in de versie
+ * van vóór sectie 196 (textContent): undefined en null worden "", al het
+ * andere String(value). De foutkaarten geven `JSON.stringify(err)` mee, en
+ * dat is undefined als err undefined is; zonder deze omzetting gaf dat een
+ * TypeError.
  */
 export function escapeHtml(value: string): string {
-  return value
+  const text = value === undefined || value === null ? "" : String(value);
+  return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

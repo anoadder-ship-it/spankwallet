@@ -21,8 +21,13 @@
 // uitvoer ook in een attribuutwaarde veilig is. De zichtbare tekst in een
 // element is gelijk aan die van de vorige versie (die las de innerHTML van een
 // tekstknoop terug en liet aanhalingstekens staan).
+// STATUS.md sectie 197: eerst naar tekst, zoals die vorige versie deed
+// (textContent): undefined en null worden "", al het andere String(value).
+// Een aanroeper met `any` (bijvoorbeeld JSON.stringify(undefined)) geeft dan
+// geen TypeError.
 export function escapeHtml(value: string): string {
-  return value
+  const text = value === undefined || value === null ? "" : String(value);
+  return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

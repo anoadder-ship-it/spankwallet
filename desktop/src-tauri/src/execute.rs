@@ -60,7 +60,13 @@ impl From<crate::fee_payer::FeePayerError> for ExecuteError {
     fn from(e: crate::fee_payer::FeePayerError) -> Self {
         match e {
             crate::fee_payer::FeePayerError::NotSetUp => ExecuteError::FeePayerNotUnlocked,
-            // §196: dezelfde tekst als voorheen (de Debug-vorm), via de filter.
+            // §196/§197: de Debug-vorm (`Io("...")`, `Internal("...")`), die
+            // zelf al gefilterd is, gaat hier nog een keer als geheel door de
+            // filter. Dat is niet altijd dezelfde tekst als de Debug-vorm:
+            // daarin staan een regeleinde en een tab als `\n` en `\t`, en dan
+            // eindigt een URL daar niet meer. Een query die na zo'n teken in
+            // dezelfde URL-reeks volgt, wordt hier dus ook verborgen
+            // (`?[verborgen]`); soms verbergt deze tekst iets meer.
             other => ExecuteError::Internal(crate::rpc::redact_rpc_error_text(&format!("{other:?}"))),
         }
     }

@@ -19418,3 +19418,56 @@ vier; `git show 1e061a7` voegt vier keer `#[test]` toe, alle vier in `desktop/sr
 `passkey_error_routes_are_redacted`. De vijf onderwerpen die §196 opsomt, zitten in die vier tests: de
 `From`-impl en de conversie in `execute.rs` maken deel uit van de tests voor `FeePayerError` en `ExecuteError`.
 Het totaal in §196 (van 21 naar 25 Rust-tests) klopt.
+
+**B1: commentaar in `execute.rs` (commit `f4d9df2`).** Het commentaar bij de conversie van `FeePayerError` naar
+`ExecuteError` zei "dezelfde tekst als voorheen (de Debug-vorm)". Dat klopt niet helemaal. De Debug-vorm is al
+gefilterd, en de conversie haalt die vorm als geheel nog een keer door de filter. In de Debug-vorm staan een
+regeleinde en een tab als `\n` en `\t`; daar eindigt een URL dan niet meer, dus een query die daarna volgt, wordt
+ook verborgen. Proef met een tijdelijke test (niet gecommit): voor de tekst `zie https://host/pad<regeleinde>meer?x=1`
+blijft de Debug-vorm `Io("zie https://host/pad\nmeer?x=1")`, en na de conversie wordt het
+`Io("zie https://host/pad\nmeer?[verborgen]")`. Met een tab gebeurt hetzelfde; met `"` niet, want een
+aanhalingsteken sluit de URL ook in de Debug-vorm af. Alleen het commentaar is aangepast; geen coderegel gewijzigd.
+
+**B4: `escapeHtml` met een waarde die geen tekst is (commit `f3abe01`).** Sinds `452abe0` riep `escapeHtml` in
+`client/src/confirmationCard.ts` en `desktop/src/confirmationCard.ts` direct `value.replace` aan. Bij een waarde die
+geen tekst is, gaf dat een TypeError. Dat gebeurt in de twee foutkaarten van de desktop:
+- `feePayerSetupCard.ts`, "Airdrop mislukt";
+- `feePayerUnlockCard.ts`, "Ontgrendelen mislukt".
+Beide geven `JSON.stringify(err)` mee, en met `err` undefined is dat undefined. De kop wordt opgebouwd binnen de
+Promise van `showConfirmationCard`, nadat de kaart al in de pagina staat en voordat de knoppen een handler krijgen.
+De TypeError liet die Promise afwijzen, buiten de `catch` van de kaart om.
+- De oude versie (`div.textContent = value`) gaf, gemeten in jsdom, `""` voor undefined en null, en `String(value)`
+  ge-escapet voor de rest (getallen, booleans, objecten, arrays).
+- Herstel: eerst `value === undefined || value === null ? "" : String(value)`, daarna dezelfde vijf vervangingen.
+  Gewone tekst geeft dezelfde uitvoer als voorheen.
+- Keuze: lege tekst voor undefined en null, net als vóór `452abe0`. Zo staat er geen "undefined" of "null" in een
+  foutkop.
+- Tests in `tests/unit/confirmationCardEscape.ts`:
+  - per implementatie 13 waarden die geen tekst zijn, vergeleken met de oude versie;
+  - de echte ontgrendel- en installatiekaart met een nagebootste Tauri-`invoke` die met undefined weigert. De
+    foutkaart verschijnt met een lege kop, en de flow loopt door tot het einde.
+- Rood vóór het herstel: 28 falend, 307 groen. Groen erna: 335.
+- Mutatie, de omzetting teruggedraaid: in de desktop 15 rood (13 waarden en beide foutkaarten), in de client 13 rood.
+  Teruggezet: 335 groen.
+
+**Controles.**
+
+| controle | vóór (`main` = `0f5fe8e`) | na |
+|---|---|---|
+| `npm run test:unit` | 307 passing | 335 passing, 0 failing |
+| `tests/unit/noHeliusKeyLiteral.ts` (ook los gedraaid) | - | 4 passing |
+| `cargo check --offline` (desktop, zonder sleutel) | - | schoon, geen waarschuwingen |
+| `cargo test --offline` (desktop, zonder sleutel) | 25 passed | 25 passed, 0 failed |
+| `npm run build` in `client/` (met `tsc --noEmit`) | - | exit 0 |
+| `npm run build` in `desktop/` (met `tsc`) | - | exit 0 |
+| typecheck desktop-frontend (`tsc --noEmit`) | - | exit 0 |
+
+**Open (bewust niet in deze ronde).**
+- De zip-afhankelijkheden.
+- `JSON.stringify(err)` kan zelf een fout gooien, bij een `err` met een BigInt of een kringverwijzing. Die fout
+  ontstaat vóór `escapeHtml` en is niet aangepakt. In `desktop/src/main.ts` gaat zo'n tekst naar `log()`, niet naar
+  `escapeHtml`.
+- De foutkaarten tonen bij `err` undefined een lege kop; een vaste tekst daarvoor is een UI-keuze voor de eigenaar.
+- Niet in de draaiende desktop-app bekeken.
+
+**Stand.** Commits lokaal op `restpunten-2026-11`, niet gepusht. Review door een verse sessie volgt.

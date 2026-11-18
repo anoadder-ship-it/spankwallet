@@ -19373,7 +19373,9 @@ ook als die niets met de sleutel te maken heeft.
 
 Proef met een tijdelijke test (niet gecommit; cargo zonder sleutel). Drie teksten gingen door de serialisatie van
 `PasskeyError::DeviceError`, `PasskeyError::Internal`, `FeePayerError::Io` en `FeePayerError::Internal`, en door de
-Debug-vorm van `PasskeyError::DeviceError`; alle vijf routes gaven dezelfde tekst:
+Debug-vorm van `PasskeyError::DeviceError`. De vier serialisatieroutes gaven exact dezelfde tekst; de Debug-route
+gaf dezelfde inhoud in een andere verpakking: `DeviceError("…")`, met de tekst in Debug-escape, zodat bij het
+HID-pad elke backslash verdubbeld is (`\\?\` wordt `\\\\?\\`). Per tekst:
 - een Windows-HID-pad dat eindigt op de interface-GUID tussen accolades: de GUID wordt `{[verborgen]}`. De rest
   van het pad (`\\?\hid#vid_…&pid_…&mi_…#…#`) blijft staan;
 - een explorer-link `shell:::{<GUID>}` wordt `shell:::{[verborgen]}`;

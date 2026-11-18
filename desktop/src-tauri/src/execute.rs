@@ -62,11 +62,16 @@ impl From<crate::fee_payer::FeePayerError> for ExecuteError {
             crate::fee_payer::FeePayerError::NotSetUp => ExecuteError::FeePayerNotUnlocked,
             // §196/§197: de Debug-vorm (`Io("...")`, `Internal("...")`), die
             // zelf al gefilterd is, gaat hier nog een keer als geheel door de
-            // filter. Dat is niet altijd dezelfde tekst als de Debug-vorm:
-            // daarin staan een regeleinde en een tab als `\n` en `\t`, en dan
-            // eindigt een URL daar niet meer. Een query die na zo'n teken in
-            // dezelfde URL-reeks volgt, wordt hier dus ook verborgen
-            // (`?[verborgen]`); soms verbergt deze tekst iets meer.
+            // filter. Dat is niet altijd dezelfde tekst als de Debug-vorm.
+            // Debug schrijft sommige tekens als een reeks ASCII-tekens zonder
+            // URL-einde, en dan eindigt een URL daar niet meer: regeleinde
+            // (`\n`), carriage return (`\r`), tab (`\t`), form feed
+            // (`\u{c}`), en elk niet-ASCII-teken dat Debug als `\u{…}`
+            // schrijft (bijvoorbeeld U+0085, U+200B, U+0301). Een spatie,
+            // `"`, `'` en een leesbaar niet-ASCII-teken zoals `é` blijven een
+            // URL-einde. Een query die na zo'n teken in dezelfde URL-reeks
+            // volgt, wordt hier dus ook verborgen (`?[verborgen]`); soms
+            // verbergt deze tekst iets meer.
             other => ExecuteError::Internal(crate::rpc::redact_rpc_error_text(&format!("{other:?}"))),
         }
     }

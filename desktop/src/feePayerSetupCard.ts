@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showConfirmationCard, escapeHtml } from "./confirmationCard";
+import { errorText } from "./errorText";
 
 // Verplichte UX-tekst (Tauri-migratie-ontwerp, Stronghold-deelplan punt 3) -
 // vertaling van de instructions.rs-verificatie (STATUS.md) naar mensentaal.
@@ -90,8 +91,8 @@ async function showFeePayerFundingCard(pubkeyBase58: string): Promise<void> {
       });
     } catch (err: any) {
       // Rust-commands geven bij een fout de geserialiseerde foutenum terug
-      // ({kind, message}), geen JS Error-object.
-      const message = typeof err?.message === "string" ? err.message : JSON.stringify(err);
+      // ({kind, message}), geen JS Error-object. errorText gooit nooit.
+      const message = errorText(err);
       await showConfirmationCard({
         eyebrow: "Airdrop mislukt",
         headline: () => escapeHtml(message),

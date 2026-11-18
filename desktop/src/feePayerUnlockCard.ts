@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showConfirmationCard, escapeHtml } from "./confirmationCard";
+import { errorText } from "./errorText";
 
 // Zelfde verplichte UX-tekst als feePayerSetupCard.ts - herhaald hier,
 // niet alleen bij de allereerste keer getoond (Tauri-migratie-ontwerp,
@@ -52,9 +53,7 @@ export async function showFeePayerUnlockCard(): Promise<string> {
       const message =
         kind === "WrongPasswordOrCorrupt"
           ? "Verkeerd wachtwoord (of een beschadigd snapshot-bestand) - probeer opnieuw."
-          : typeof err?.message === "string"
-            ? err.message
-            : JSON.stringify(err);
+          : errorText(err);
       await showConfirmationCard({
         eyebrow: "Ontgrendelen mislukt",
         // STATUS.md sectie 195: de kop gaat via innerHTML (confirmationCard.ts);

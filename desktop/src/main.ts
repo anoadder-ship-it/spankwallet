@@ -4,6 +4,7 @@ import { showExecutePreview } from "./executePreview";
 import { runExecuteAction } from "./executeAction";
 import { showFeePayerSetupCard } from "./feePayerSetupCard";
 import { showFeePayerUnlockCard } from "./feePayerUnlockCard";
+import { errorText } from "./errorText";
 import { PublicKey } from "@solana/web3.js";
 
 const RP_ID = window.location.hostname || "localhost";
@@ -117,7 +118,7 @@ async function runExecute(): Promise<void> {
     log("SUCCES - execute-transactie bevestigd op devnet. Signature:");
     log(signature);
   } catch (err: any) {
-    const message = typeof err?.message === "string" ? err.message : JSON.stringify(err);
+    const message = errorText(err);
     log("FOUT bij execute_action: " + message);
     console.error(err);
   }

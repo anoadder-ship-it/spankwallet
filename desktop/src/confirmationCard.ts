@@ -20,9 +20,10 @@
  * BigInt, arrays en gewone objecten is dat gelijk aan de versie van vóór
  * sectie 196 (textContent), niet voor alles: een Symbol gaf daar een
  * TypeError en geeft hier "Symbol(...)"; Object.create(null) en een object
- * waarvan toString gooit, geven in beide versies een fout. De foutkaarten geven `JSON.stringify(err)` mee, en
- * dat is undefined als err undefined is; zonder deze omzetting gaf dat een
- * TypeError.
+ * waarvan toString gooit, geven in beide versies een fout. De foutkaarten
+ * gaven `JSON.stringify(err)` mee, en dat is undefined als err undefined is;
+ * zonder deze omzetting gaf dat een TypeError. Sinds de veilige fouttekst
+ * (errorText.ts) geven ze altijd tekst mee.
  */
 export function escapeHtml(value: string): string {
   const text = value === undefined || value === null ? "" : String(value);

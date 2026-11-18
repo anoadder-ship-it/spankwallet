@@ -15,9 +15,12 @@
  * kaart worden, net als in de client, met DOM-functies opgebouwd
  * (`textContent` en `.value`), nooit via innerHTML.
  *
- * STATUS.md sectie 197: de waarde gaat eerst naar tekst, zoals in de versie
- * van vóór sectie 196 (textContent): undefined en null worden "", al het
- * andere String(value). De foutkaarten geven `JSON.stringify(err)` mee, en
+ * STATUS.md sectie 197: de waarde gaat eerst naar tekst: undefined en null
+ * worden "", al het andere String(value). Voor tekst, getallen, booleans,
+ * BigInt, arrays en gewone objecten is dat gelijk aan de versie van vóór
+ * sectie 196 (textContent), niet voor alles: een Symbol gaf daar een
+ * TypeError en geeft hier "Symbol(...)"; Object.create(null) en een object
+ * waarvan toString gooit, geven in beide versies een fout. De foutkaarten geven `JSON.stringify(err)` mee, en
  * dat is undefined als err undefined is; zonder deze omzetting gaf dat een
  * TypeError.
  */

@@ -21,10 +21,13 @@
 // uitvoer ook in een attribuutwaarde veilig is. De zichtbare tekst in een
 // element is gelijk aan die van de vorige versie (die las de innerHTML van een
 // tekstknoop terug en liet aanhalingstekens staan).
-// STATUS.md sectie 197: eerst naar tekst, zoals die vorige versie deed
-// (textContent): undefined en null worden "", al het andere String(value).
-// Een aanroeper met `any` (bijvoorbeeld JSON.stringify(undefined)) geeft dan
-// geen TypeError.
+// STATUS.md sectie 197: eerst naar tekst: undefined en null worden "", al het
+// andere String(value). Een aanroeper met `any` (bijvoorbeeld
+// JSON.stringify(undefined)) geeft dan geen TypeError. Voor tekst, getallen,
+// booleans, BigInt, arrays en gewone objecten is dat gelijk aan de vorige
+// versie (textContent), niet voor alles: een Symbol gaf daar een TypeError en
+// geeft hier "Symbol(...)"; Object.create(null) en een object waarvan
+// toString gooit, geven in beide versies een fout.
 export function escapeHtml(value: string): string {
   const text = value === undefined || value === null ? "" : String(value);
   return text

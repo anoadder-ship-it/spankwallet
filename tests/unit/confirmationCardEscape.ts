@@ -149,7 +149,8 @@ describe("bevestigingskaart desktop: velden via DOM-functies (STATUS.md sectie 1
  * undefined, geen tekst. escapeHtml moet elke waarde aankunnen, net als de
  * versie van vóór 452abe0 (`div.textContent = value; return div.innerHTML`):
  * undefined en null worden "", al het andere `String(value)`, daarna
- * ge-escapet.
+ * ge-escapet. Dat is gelijk aan de oude versie voor de waarden in NON_TEXT,
+ * niet voor alles: zie de laatste drie tests per implementatie.
  */
 function oldEscapeHtml(value: unknown): string {
   const div = doc.createElement("div");
@@ -184,6 +185,21 @@ for (const [name, escapeHtml] of [
         assert.strictEqual(escapeHtml(value as any), expected);
       });
     }
+    // Waar String(value) afwijkt van de oude versie, of net als die gooit.
+    // Legt het huidige gedrag vast; het type `string` houdt deze waarden
+    // buiten de deur, behalve via `any`.
+    it("Symbol: de oude versie gooide, String(value) geeft Symbol(...)", () => {
+      assert.throws(() => oldEscapeHtml(Symbol("x")), TypeError);
+      assert.strictEqual(escapeHtml(Symbol("<x>") as any), "Symbol(&lt;x&gt;)");
+    });
+    it("Object.create(null): gooit, net als de oude versie", () => {
+      assert.throws(() => oldEscapeHtml(Object.create(null)), TypeError);
+      assert.throws(() => escapeHtml(Object.create(null) as any), TypeError);
+    });
+    it("BigInt: gelijk aan de oude versie", () => {
+      assert.strictEqual(oldEscapeHtml(BigInt(10)), "10");
+      assert.strictEqual(escapeHtml(BigInt(10) as any), "10");
+    });
   });
 }
 

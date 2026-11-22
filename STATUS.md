@@ -19473,3 +19473,148 @@ De TypeError liet die Promise afwijzen, buiten de `catch` van de kaart om.
 - Niet in de draaiende desktop-app bekeken.
 
 **Stand.** Commits lokaal op `restpunten-2026-11`, niet gepusht. Review door een verse sessie volgt.
+
+## 198. Zipronde (0027ad6), correctie in §197 en drie lage punten uit de beoordelingen (2026-11-22)
+
+**Aanleiding.** Vastlegging van de zipronde (`0027ad6`, gepusht op 2026-11-22) en van de beoordeling daarvan, plus
+drie lage punten uit eerdere beoordelingen. Uitgevoerd in een lokale sessie (Claude) op branch `status-198-2026-11`,
+vanaf `main` = `0027ad6`. `programs/`, `admin/`, alle `Cargo.toml`, `Cargo.lock` en `package.json` en de overige
+lockbestanden zijn niet aangeraakt. Env-bestanden en `.cargo`-mappen zijn niet gelezen. Oudere secties zijn niet
+bewerkt. Waar hieronder "volgens de beoordelaar" staat, is het getal of de controle niet in deze ronde herhaald.
+
+**Zipronde: wat `0027ad6` in `desktop/src-tauri/Cargo.lock` verandert.** Nagegaan met
+`git diff a0be4ae..0027ad6 -- desktop/src-tauri/Cargo.lock` (alleen dat bestand gewijzigd, 41 regels erbij,
+25 eraf). Versies:
+
+| crate | voor | na |
+|---|---|---|
+| `zip` | 8.6.0 | 9.4.0 |
+| `cc` | 1.4.3 | 1.11.1 |
+| `find-msvc-tools` | 0.1.11 | 0.1.15 |
+| `libflate` | 2.3.1 | 2.3.2 |
+| `libsodium-sys-stable` | 1.24.0 | 1.24.4 |
+| `minisign-verify` | 0.2.5 | 0.3.0 |
+| `typed-path` | 0.12.3 | 0.13.0 |
+| `ureq` | 3.4.0 | 3.5.1 |
+| `ureq-proto` | 0.6.1 | 0.7.1 |
+| `nix` | - | 0.31.3 (nieuw) |
+
+Geen verschil met de lijst van de beoordelaar. Wat de lijst niet noemt, maar wel in de diff staat: `zip` 9.4.0 krijgt
+de afhankelijkheden `getrandom 0.4.3`, `libc`, `nix 0.31.3` en `windows-sys 0.61.2`, en `stronghold-runtime` verwijst
+nu naar `nix 0.24.3` met versienummer, omdat er twee versies van `nix` in de lock staan.
+
+**Belangrijkste neveneffect, niet in het commitbericht: nieuwe libsodium-broncode.** `zip` is een bouwafhankelijkheid
+van `libsodium-sys-stable` (in 1.24.0 `zip = "8.5"`, in 1.24.4 `zip = "9.4"`, beide als `[build-dependencies]`, in
+de `Cargo.toml` van de crate). De update van `zip` trok daarom `libsodium-sys-stable` mee van 1.24.0 naar 1.24.4, en
+daarmee ook de nieuwere `cc`, `libflate`, `minisign-verify` en `ureq` (de bouwafhankelijkheden van die crate). De
+crate levert eigen libsodium-broncode mee (`LATEST.tar.gz`). Gemeten in de cargo-cache:
+- beide archieven pakken uit naar `libsodium-stable` met `AC_INIT([libsodium],[1.0.22],...)`; de sha256 van
+  `LATEST.tar.gz` is in 1.24.0 `b20a92e7…b3ab` en in 1.24.4 `6df69cd3…b3a13`;
+- in `.c`- en `.h`-bestanden verschillen 57 bestanden: 2027 regels erbij en 478 eraf (32 `.c`-bestanden +1091/−447,
+  25 `.h`-bestanden +936/−31); daarnaast 4 `.S`-bestanden (+9/−215) en 54 overige bestanden (bouwbestanden,
+  documentatie). Volgens de beoordelaar ongeveer 2.400 regels C; het verschil zit in wat er geteld wordt;
+- de gewijzigde bestanden zitten onder meer in de ed25519- en curve25519-code (nieuw: `safegcd.h`), in `sodium/utils.c`,
+  `sodium/runtime.c`, `randombytes/`, en er zijn nieuwe AVX-512-bestanden voor ChaCha20 en Salsa20;
+- de `ChangeLog` in 1.24.4 heeft een nieuw blok "Version 1.0.22-stable": sneller inverteren voor Curve25519 en
+  Ed25519, sneller SHA-3, SHAKE, TurboSHAKE, SipHash, `sodium_memcmp()` en `sodium_is_zero()`, AVX-512 voor ChaCha20
+  en Salsa20, `randombytes` onder Emscripten via de Emscripten- en WASI-interfaces, en `sodium_misuse()` roept de
+  handler niet meer aan terwijl de bibliotheekbrede vergrendeling vastgehouden wordt. Het blok noemt geen
+  kwetsbaarheid en zegt niets over gewijzigde timinggaranties.
+
+Op Linux (en volgens de beoordelaar ook op macOS) bouwt `build.rs` deze broncode en linkt hem statisch: de
+bouwuitvoer in `desktop/src-tauri/target` bevat `cargo:rustc-link-lib=static=sodium`. `stronghold-runtime` 2.0.1
+roept onder meer `sodium_memcmp`, `randombytes_buf`, `sodium_memzero`, `sodium_mprotect_noaccess`,
+`sodium_mprotect_readonly`, `sodium_mprotect_readwrite`, `sodium_mlock`, `sodium_allocarray`, `sodium_free` en
+`sodium_init` aan (gezocht in de bron van die crate). `build.rs` controleert vóór gebruik de minisign-handtekening
+van het archief met de vaste sleutel `RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3` (ook voor het
+meegeleverde archief), en de bouw met 1.24.4 slaagt. Volgens de beoordelaar zijn beide archieven ook los met minisign
+tegen die sleutel gecontroleerd; dat is hier niet herhaald (geen minisign-programma geïnstalleerd). Niet alle
+gewijzigde regels zijn regel voor regel beoordeeld, niet door de beoordelaar en niet in deze ronde.
+
+De bewering "zip is alleen bouwafhankelijkheid op Windows-MSVC" klopt voor `zip` zelf, met één kanttekening: de
+`Cargo.toml` van `libsodium-sys-stable` noemt `zip` zonder doelvoorwaarde, dus cargo bouwt hem op elk platform mee
+voor `build.rs`, maar alleen de MSVC-tak gebruikt hem (om het voorgebouwde MSVC-archief uit te pakken). Niet in het
+geleverde programma. De bewering klopt niet voor het totale effect van de update: via `libsodium-sys-stable` verandert
+ook de libsodium-code die op Linux en macOS in de app komt.
+
+**De zes `windows-sys`-koppelingen.** In de diff gaan `errno`, `quinn-udp`, `rustix`, `tempfile` en `winapi-util` van
+`windows-sys 0.61.2` naar `0.52.0`, en `dirs-sys` van `0.61.2` naar `0.59.0`. Dit geldt alleen voor Windows-doelen en
+blijft binnen de toegestane bereiken van die crates. Volgens de beoordelaar ontstaat dit bij elke cargo-route
+waarmee `libsodium-sys-stable` wordt bijgewerkt; het is bewust als cargo-uitvoer meegecommit.
+
+**`cargo audit` voor en na.** Zelf gedraaid met cargo-audit 0.22.2 en een advisory-database van 2026-11-22
+(`d1fe6ac`), "voor" in een tijdelijke worktree van `origin/main~1` (`a0be4ae`) buiten de hoofdmap, "na" op
+`0027ad6`:
+
+| | voor (`a0be4ae`) | na (`0027ad6`) |
+|---|---|---|
+| kwetsbaarheden | 25 | 17 |
+| waarvan `zip` | 8 (`zip` 8.6.0: RUSTSEC-2026-0367, -0368, -0369, -0429, -0545, -0546, -0547, -0548) | 0 |
+| waarschuwingen | 31 (14 unmaintained, 16 unsound, 1 yanked) | 31, dezelfde |
+
+Gelijk aan de getallen van de beoordelaar. De 17 resterende kwetsbaarheden:
+- `rustls-webpki` 0.103.14: RUSTSEC-2026-0382; `webpki-roots` 1.0.9: RUSTSEC-2026-0381;
+- `quinn-proto` 0.11.17: RUSTSEC-2026-0338, -0340, -0343, -0523, -0524; `quinn-udp` 0.5.15: RUSTSEC-2026-0538;
+- `zstd` 0.13.3: RUSTSEC-2026-0391; `zstd-safe` 7.2.4: RUSTSEC-2026-0398, -0403; `zstd-sys` 2.0.16+zstd.1.5.7:
+  RUSTSEC-2026-0410;
+- `ed25519-dalek` 1.0.1: RUSTSEC-2022-0093; `curve25519-dalek` 3.2.0: RUSTSEC-2024-0344;
+- `crypto-bigint` 0.5.5: RUSTSEC-2026-0387; `ctutils` 0.4.2: RUSTSEC-2026-0385;
+- `url` 2.5.8: RUSTSEC-2026-0592.
+
+Of deze crates in het geleverde programma zitten of alleen in de bouwketen, is niet vastgesteld; dat doet een aparte
+ronde.
+
+**Correctie in §197 (B2), achteraf vastgelegd.** Commit `a0be4ae` (gepusht op 2026-11-19) heeft in §197 de zin "alle
+vijf routes gaven dezelfde tekst" vervangen: de vier serialisatieroutes geven dezelfde tekst, de Debug-route geeft
+dezelfde inhoud in een andere verpakking. §197 was toen al gepusht (`5ba40f8`, 2026-11-16). Dat is een bewuste
+uitzondering op de regel dat gepushte secties niet worden aangepast; volgens het commitbericht gebeurde het op
+uitdrukkelijke vraag van de eigenaar.
+
+**Commit 1 van deze ronde: drie lage punten uit de beoordelingen.**
+- (a) De vervanging van `JSON.stringify(err)` door `errorText` in `desktop/src/main.ts` had geen eigen test: met de
+  oude regel terug bleven alle tests groen. Nieuw: `tests/unit/noUnsafeErrorText.ts`, een bron-controle op
+  `desktop/src` in de stijl van `noHeliusKeyLiteral.ts`. Hij faalt als er buiten `errorText.ts` nog
+  `JSON.stringify(err)` (ook met `e` of `error`) of `typeof err?.message === "string" ? err.message :
+  JSON.stringify(...)` staat. Commentaar telt niet mee (blokcommentaar, regels die met `*` of `//` beginnen, en tekst
+  achter `//`). Grens: een regel met `//` in een tekst, bijvoorbeeld een URL, wordt vanaf daar ook genegeerd. 3 tests
+  (detector, bestandenlijst, scan). Mutatieproef: de oude regel terug in `main.ts` geeft 1 falende test (de scan,
+  met bestand en regelnummer); hersteld: groen.
+- (b) `feePayerUnlockCard.ts` las `err?.kind` buiten `errorText` om; een gooiende getter of Proxy gaf daar nog een
+  tweede fout. Nieuw in `desktop/src/errorText.ts`: `errorKind(err)`, geeft `kind` alleen als dat tekst is, anders
+  `undefined`, en gooit nooit. De ontgrendelkaart gebruikt die; `WrongPasswordOrCorrupt` geeft nog steeds de vaste
+  Nederlandse tekst. Tests in `tests/unit/errorText.ts`: 14 gevallen voor `errorKind` (gewone Rust-fouten, gewone
+  `Error`, `kind` geen tekst, geen object, null, undefined, gooiende getter, Proxy die altijd of alleen bij `kind`
+  gooit) en 1 test die vastlegt dat de oude regel bij de getter en de Proxy gooide; daarnaast 4 kaarttests met de
+  echte ontgrendelkaart en een nagebootste `invoke` (vaste tekst, andere `kind`, getter op `kind` gooit, Proxy).
+  Mutatieproef: `err?.kind` terug geeft 2 falende kaarttests (getter en Proxy: de flow wees af); hersteld: groen.
+- (c) Het commentaar bij `escapeHtml` zegt dat een object waarvan `toString` gooit, een fout geeft. Eerst gemeten in
+  jsdom: de client-, de desktop- en de oude `textContent`-versie gooien alle drie precies de fout uit `toString`.
+  Nieuwe test per implementatie in `tests/unit/confirmationCardEscape.ts` (2 tests).
+
+**Controles.**
+
+| controle | vóór (`main` = `0027ad6`) | na |
+|---|---|---|
+| `npm run test:unit` | 368 passing | 393 passing, 0 failing (25 nieuw, waarvan 1 uit `unitPathIsPure.ts` voor het nieuwe bestand) |
+| typecheck desktop-frontend (`tsc --noEmit` in `desktop/`) | - | exit 0 |
+| typecheck client (`tsc --noEmit` in `client/`) | - | exit 0 |
+| `cargo check --locked` (desktop) | - | schoon |
+| `cargo test --locked` (desktop) | - | 25 passed, 0 failed |
+| `Cargo.toml`, `Cargo.lock`, `package.json`, lockbestanden | - | ongewijzigd |
+
+**Open (bewust niet in deze ronde).**
+- De root-`tsc` (`npx tsc --noEmit -p tsconfig.json` in de hoofdmap) geeft 426 fouten, op `origin/main` in een schone
+  worktree en op deze branch gelijk per bestand (zonder de gegenereerde types in `target/types` en `target/idl`: 288).
+  De meeste zijn TS2737 (226) en TS2353 (147). In `desktop/src` staan er 4, alle TS2737 (BigInt-literal): 1 in
+  `main.ts`, 2 in `cbor.ts`, 1 in `executePreview.ts`; de desktop-eigen `tsc` geeft ze niet. Deze ronde voegt er
+  geen toe.
+- De bron van `ctap-hid-fido2` (`hid/mod.rs`; versie 3.5.13 in `desktop/src-tauri`) is niet gecontroleerd. In de
+  RustSec-database van 2026-11-22 staat geen melding voor deze crate; volgens de beoordelaar ook geen GHSA- of
+  OSV-melding. Nieuwere versies bestaan (crates.io noemt 3.6.1 als nieuwste; volgens de beoordelaar ook 3.6.0).
+- De draaiende Tauri-webview is niet gecontroleerd.
+- Voorstel, niet uitgevoerd: `libsodium-sys-stable` laten bouwen met `SODIUM_DIST_DIR` en een vooraf gecontroleerd
+  archief. `build.rs` leest dan archief en handtekening uit die map en controleert de handtekening. Zonder die
+  variabele downloadt de Windows-MSVC-build het voorgebouwde archief via `http://download.libsodium.org`; dat is nu
+  alleen beschermd door de minisign-handtekening.
+
+**Stand.** Commits lokaal op `status-198-2026-11`, niet gepusht. Review door een verse sessie volgt.

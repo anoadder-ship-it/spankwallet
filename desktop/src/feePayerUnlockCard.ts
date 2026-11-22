@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showConfirmationCard, escapeHtml } from "./confirmationCard";
-import { errorText } from "./errorText";
+import { errorKind, errorText } from "./errorText";
 
 // Zelfde verplichte UX-tekst als feePayerSetupCard.ts - herhaald hier,
 // niet alleen bij de allereerste keer getoond (Tauri-migratie-ontwerp,
@@ -48,10 +48,10 @@ export async function showFeePayerUnlockCard(): Promise<string> {
     try {
       const info = await invoke<FeePayerInfo>("unlock_fee_payer", { password: result.password });
       return info.pubkeyBase58;
-    } catch (err: any) {
-      const kind = err?.kind;
+    } catch (err: unknown) {
+      // errorKind en errorText gooien nooit (errorText.ts).
       const message =
-        kind === "WrongPasswordOrCorrupt"
+        errorKind(err) === "WrongPasswordOrCorrupt"
           ? "Verkeerd wachtwoord (of een beschadigd snapshot-bestand) - probeer opnieuw."
           : errorText(err);
       await showConfirmationCard({

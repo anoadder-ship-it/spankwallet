@@ -1,6 +1,6 @@
 import { assert } from "chai";
 import { JSDOM } from "jsdom";
-import { errorText, UNREADABLE_ERROR_TEXT } from "../../desktop/src/errorText";
+import { errorKind, errorText, UNREADABLE_ERROR_TEXT } from "../../desktop/src/errorText";
 
 /**
  * Veilige fouttekst voor de desktop (desktop/src/errorText.ts). Vervangt
@@ -64,6 +64,43 @@ describe("errorText (desktop): gooit nooit", () => {
     const e = new Error("echte fout") as Error & { self?: unknown };
     e.self = e;
     assert.strictEqual(errorText(e), "echte fout");
+  });
+});
+
+/**
+ * errorKind (desktop/src/errorText.ts): leest `kind` van een Rust-fout zonder
+ * ooit te gooien. Vervangt `err?.kind` in feePayerUnlockCard.ts, dat bij een
+ * gooiende getter of Proxy een tweede fout gaf.
+ */
+describe("errorKind (desktop): alleen tekst, gooit nooit", () => {
+  const CASES: [string, () => unknown, string | undefined][] = [
+    ["Rust-fout WrongPasswordOrCorrupt", () => ({ kind: "WrongPasswordOrCorrupt", message: "x" }), "WrongPasswordOrCorrupt"],
+    ["Rust-fout {kind} zonder message", () => ({ kind: "NotSetUp" }), "NotSetUp"],
+    ["lege kind-tekst", () => ({ kind: "" }), ""],
+    ["gewone Error (geen kind)", () => new Error("mislukt"), undefined],
+    ["kind is een getal", () => ({ kind: 42 }), undefined],
+    ["kind is een object", () => ({ kind: { naam: "Io" } }), undefined],
+    ["kind is een String-object", () => ({ kind: new String("Io") }), undefined],
+    ["tekst (geen object)", () => "los", undefined],
+    ["getal (geen object)", () => 7, undefined],
+    ["null", () => null, undefined],
+    ["undefined", () => undefined, undefined],
+    ["getter kind gooit", () => ({ get kind(): string { throw new Error("getter"); } }), undefined],
+    ["Proxy die bij elke lees gooit", () => new Proxy({}, { get: () => { throw new Error("proxy"); } }), undefined],
+    ["Proxy die alleen bij kind gooit", () => new Proxy({ message: "m" }, {
+      get: (t, k) => { if (k === "kind") throw new Error("proxy kind"); return (t as any)[k]; },
+    }), undefined],
+  ];
+  for (const [label, make, expected] of CASES) {
+    it(`${label} geeft ${JSON.stringify(expected)}`, () => {
+      assert.strictEqual(errorKind(make()), expected);
+    });
+  }
+
+  it("de gooiende gevallen gooiden met de oude regel `err?.kind`", () => {
+    const oldKind = (err: any) => err?.kind;
+    assert.throws(() => oldKind({ get kind(): string { throw new Error("getter"); } }), "getter");
+    assert.throws(() => oldKind(new Proxy({}, { get: () => { throw new Error("proxy"); } })), "proxy");
   });
 });
 
@@ -134,6 +171,50 @@ describe("foutkaarten van de desktop met een fout die JSON.stringify laat gooien
     confirm();
     assert.strictEqual(await flow, "Adres333");
     assert.deepEqual(invokeCalls, ["unlock_fee_payer", "unlock_fee_payer"]);
+  });
+
+  // errorKind: de vaste Nederlandse tekst bij WrongPasswordOrCorrupt blijft,
+  // en een fout waarvan het lezen van `kind` gooit, geeft geen tweede fout meer.
+  async function unlockOnce(reject: () => unknown): Promise<string> {
+    const { showFeePayerUnlockCard } = await import("../../desktop/src/feePayerUnlockCard");
+    answers = [() => Promise.reject(reject()), async () => ({ pubkeyBase58: "Adres555" })];
+    const flow = showFeePayerUnlockCard();
+    await waitForCard(flow, "Ontgrendelen");
+    fill("password", "geheim");
+    confirm();
+    await waitForCard(flow, "Ontgrendelen mislukt");
+    const shown = headline();
+    confirm();
+    await waitForCard(flow, "Ontgrendelen");
+    fill("password", "geheim");
+    confirm();
+    assert.strictEqual(await flow, "Adres555");
+    assert.deepEqual(invokeCalls, ["unlock_fee_payer", "unlock_fee_payer"]);
+    return shown;
+  }
+
+  it("ontgrendelkaart: kind WrongPasswordOrCorrupt geeft nog steeds de vaste Nederlandse tekst", async () => {
+    const shown = await unlockOnce(() => ({ kind: "WrongPasswordOrCorrupt", message: "aead decrypt failed" }));
+    assert.strictEqual(shown, "Verkeerd wachtwoord (of een beschadigd snapshot-bestand) - probeer opnieuw.");
+  });
+
+  it("ontgrendelkaart: andere kind toont de message van de Rust-fout", async () => {
+    assert.strictEqual(await unlockOnce(() => ({ kind: "Io", message: "schijf <vol>" })), "schijf <vol>");
+  });
+
+  it("ontgrendelkaart: getter kind gooit, de foutkaart toont de message (geen tweede fout)", async () => {
+    const shown = await unlockOnce(() => ({
+      get kind(): string {
+        throw new Error("getter kind");
+      },
+      message: "echte melding",
+    }));
+    assert.strictEqual(shown, "echte melding");
+  });
+
+  it("ontgrendelkaart: Proxy die bij elke lees gooit, de foutkaart toont de vaste tekst", async () => {
+    const shown = await unlockOnce(() => new Proxy({}, { get: () => { throw new Error("proxy"); } }));
+    assert.strictEqual(shown, UNREADABLE_ERROR_TEXT);
   });
 
   it("installatiekaart: airdrop weigert met een BigInt, de foutkaart toont de vaste tekst", async () => {

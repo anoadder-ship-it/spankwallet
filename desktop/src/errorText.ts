@@ -25,3 +25,18 @@ export function errorText(err: unknown): string {
     return UNREADABLE_ERROR_TEXT;
   }
 }
+
+/**
+ * Het veld `kind` van een Rust-fout (`{kind, message}`), alleen als dat
+ * tekst is; anders undefined. Eerder las feePayerUnlockCard.ts `err?.kind`
+ * rechtstreeks, buiten errorText om; een getter of Proxy die bij het lezen
+ * gooit, gaf daar een tweede fout. Deze functie gooit nooit.
+ */
+export function errorKind(err: unknown): string | undefined {
+  try {
+    const kind = (err as { kind?: unknown } | null | undefined)?.kind;
+    return typeof kind === "string" ? kind : undefined;
+  } catch {
+    return undefined;
+  }
+}

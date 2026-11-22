@@ -196,6 +196,26 @@ for (const [name, escapeHtml] of [
       assert.throws(() => oldEscapeHtml(Object.create(null)), TypeError);
       assert.throws(() => escapeHtml(Object.create(null) as any), TypeError);
     });
+    // Het commentaar bij escapeHtml zegt dat een object waarvan toString
+    // gooit, in beide versies een fout geeft. Gemeten in jsdom: String(value)
+    // en de textContent-setter gooien allebei precies de fout uit toString.
+    it("object waarvan toString gooit: gooit die fout zelf, net als de oude versie", () => {
+      const boom = new Error("toString gooit");
+      const make = () => ({
+        toString(): string {
+          throw boom;
+        },
+      });
+      assert.throws(() => oldEscapeHtml(make()), Error, "toString gooit");
+      assert.throws(() => escapeHtml(make() as any), Error, "toString gooit");
+      let caught: unknown = null;
+      try {
+        escapeHtml(make() as any);
+      } catch (e) {
+        caught = e;
+      }
+      assert.strictEqual(caught, boom, "de fout uit toString komt ongewijzigd naar buiten");
+    });
     it("BigInt: gelijk aan de oude versie", () => {
       assert.strictEqual(oldEscapeHtml(BigInt(10)), "10");
       assert.strictEqual(escapeHtml(BigInt(10) as any), "10");

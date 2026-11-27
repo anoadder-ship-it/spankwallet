@@ -19618,3 +19618,271 @@ uitdrukkelijke vraag van de eigenaar.
   alleen beschermd door de minisign-handtekening.
 
 **Stand.** Commits lokaal op `status-198-2026-11`, niet gepusht. Review door een verse sessie volgt.
+
+## 199. Afhankelijkhedenronde desktop: lockupdate van acht crates, classificatie van de RustSec-meldingen (2026-11-27)
+
+**Aanleiding.** `cargo audit` meldde 18 kwetsbaarheden in `desktop/src-tauri/Cargo.lock` (§198 noemde er 17 met de
+database van 2026-11-22; `cookie` kwam er sindsdien bij). Uitgevoerd in een lokale sessie (Claude) op branch
+`afhankelijkheden-2026-11`, vanaf `origin/main` = `581ae56`. Peildatum voor de 14-dagenregel: 2026-11-27 12:08 UTC.
+Alleen `desktop/src-tauri/Cargo.lock` is gewijzigd; alle `Cargo.toml`, de root-`Cargo.lock`, `package.json` en de
+npm-lockbestanden niet. Env-bestanden en `.cargo`-mappen zijn niet gelezen. Oudere secties zijn niet bewerkt. Alle
+getallen hieronder komen uit eigen metingen in deze ronde; gebouwd en getest is alleen op deze machine
+(aarch64-unknown-linux-gnu).
+
+**Database.** cargo-audit 0.22.2, advisory-database commit `c5279d0` (2026-11-27T11:35:42+01:00, 1571 adviezen).
+De lijst van 18 kwetsbaarheden is gelijk aan die in de opdracht: geen afwijking.
+
+**A1: `cargo audit` op `origin/main`.**
+
+| crate | versie | RUSTSEC | titel (kort) | gepatcht |
+|---|---|---|---|---|
+| `cookie` | 0.18.2 | 2026-0594 | private cookie-nonces kunnen herhalen na fork | >=0.18.3 |
+| `crypto-bigint` | 0.5.5 | 2026-0387 | timingvariatie in "constant-time" bewerkingen | >=0.7.6 |
+| `ctutils` | 0.4.2 | 2026-0385 | niet-constant-time maskers en `u128`-vergelijkingen | >=0.4.4 |
+| `curve25519-dalek` | 3.2.0 | 2024-0344 | timingvariatie in `Scalar29::sub`/`Scalar52::sub` | >=4.1.3 |
+| `ed25519-dalek` | 1.0.1 | 2022-0093 | double public key signing oracle | >=2 |
+| `quinn-proto` | 0.11.17 | 2026-0338, -0340, -0343 | paniek door peer (drie routes) | >=0.11.18 |
+| `quinn-proto` | 0.11.17 | 2026-0523, -0524 | streams boven de limiet; lange Retry-token | >=0.11.19 |
+| `quinn-udp` | 0.5.15 | 2026-0538 | ontvangstlus kan spinnen na afgekapt datagram | >=0.5.16, <0.6.0; >=0.6.3 |
+| `rustls-webpki` | 0.103.14 | 2026-0382 | kan wantrouwde tussencertificaten accepteren | >=0.103.16, <0.104.0-alpha.1 |
+| `url` | 2.5.8 | 2026-0592 | stack overflow in `Url::origin()` bij geneste `blob:`-URL's | >=2.5.9 |
+| `webpki-roots` | 1.0.9 | 2026-0381 | wantrouwde emSign-tussencertificaten | >=1.0.10 |
+| `zstd` | 0.13.3 | 2026-0391 | data van een afgebroken stream lekt in de volgende | ^0.13.4; >=0.14.3 |
+| `zstd-safe` | 7.2.4 | 2026-0398, -0403 | `Seekable::decompress`; ongeïnitialiseerd geheugen bij legacy-frame | ^7.4.0; >=8.2.0 |
+| `zstd-sys` | 2.0.16+zstd.1.5.7 | 2026-0410 | WebAssembly-allocatorshim | >=2.1.2 |
+
+Waarschuwingen: 14 unmaintained (`atty`, `bincode` 1.3.3, `chrono` 0.4.45, `derivative`, `humantime`,
+`libsecp256k1` 0.6.0, `number_prefix`, `paste`, `proc-macro-error`, vijf `unic-*`), 16 unsound (`atty`, `glib`
+0.18.5, `memmap2` 0.5.10, `rand` 0.7.3, `rustix` 1.1.4, `tokio` 1.53.1, en tien voor `zstd-safe` 7.2.4:
+RUSTSEC-2026-0395, -0396, -0397, -0399, -0400, -0401, -0402, -0404, -0405, -0406), 1 yanked (`chacha20` 0.10.1).
+
+Overige audits (alleen gerapporteerd, niets bijgewerkt):
+- root-`Cargo.lock` (voor `programs/`): 0 kwetsbaarheden, 1 waarschuwing (`bincode` 1.3.3, unmaintained);
+- `npm audit` in de hoofdmap, `client/` en `desktop/`: elk 2 moderate, beide indirect via `@solana/web3.js` 1.98.4:
+  `jayson` 4.3.0 en `stream-json` 1.9.1 (GHSA-528h-pc64-c93x, GHSA-hqr4-qq8f-hg3x, GHSA-mjw6-4jj6-33hc).
+
+**A2: classificatie.** Gemeten met `cargo tree --locked -e normal -i <crate>@<versie> --target <doel>` voor
+x86_64- en aarch64-linux-gnu, x86_64- en aarch64-apple-darwin en x86_64-pc-windows-msvc, en met `-e build` en
+`-e dev` (`--target all`). Klasse A = in het geleverde programma, B = alleen bouwketen, C = alleen dev/test, D =
+alleen in de lock.
+
+| crate | klasse | op welke doelen | via |
+|---|---|---|---|
+| `cookie` 0.18.2 | A | alle vijf | `tauri`, `tauri-runtime`, `wry` |
+| `crypto-bigint` 0.5.5 | A | alle vijf | `elliptic-curve` 0.13.8 ← `p256` 0.13.2 (direct) en `k256` 0.13.4 ← `iota-crypto` 0.23.2 |
+| `ctutils` 0.4.2 | A | alle vijf | `digest` 0.11.3 ← `blake3` 1.8.6 ← Solana-crates |
+| `curve25519-dalek` 3.2.0 | A | alle vijf | `ed25519-dalek` 1.0.1 |
+| `ed25519-dalek` 1.0.1 | A | alle vijf | `solana-keypair`, `solana-signature`, `solana-ed25519-program`, `ed25519-dalek-bip32` ← `solana-sdk` 2.3.1 / `solana-rpc-client` 2.3.13 |
+| `quinn-proto` 0.11.17 | D | geen | - |
+| `quinn-udp` 0.5.15 | D | geen | - |
+| `rustls-webpki` 0.103.14 | A | alle vijf | `rustls` 0.23.46 ← `reqwest` 0.12.28 ← `solana-rpc-client` |
+| `url` 2.5.8 | A (en B) | alle vijf | o.a. `tauri`; zit ook in de bouwketen (`-e normal,build` geeft meer paden dan `-e normal`) |
+| `webpki-roots` 1.0.9 | A | alle vijf | `hyper-rustls` 0.27.9, `reqwest` 0.12.28 |
+| `zstd`, `zstd-safe`, `zstd-sys` | A | alle vijf | `solana-account-decoder-client-types` 2.3.13 ← `solana-rpc-client` |
+
+Geen enkele kwetsbare crate is alleen B of alleen C: `-e normal,build` en `-e normal,dev` geven voor alle crates
+behalve `url` hetzelfde aantal regels als `-e normal`.
+
+Klasse D voor quinn, bewijs:
+- `cargo tree --locked -e all -i quinn-proto@0.11.17 --target all` (en idem `quinn-udp`): "nothing to print".
+- In de lock is `reqwest` 0.12.28 de enige afhankelijke van `quinn`. Actieve features van `reqwest` (via
+  `cargo metadata`): `__rustls`, `__rustls-ring`, `__tls`, `blocking`, `brotli`, `deflate`, `gzip`, `json`,
+  `rustls-tls`, `rustls-tls-webpki-roots`, `rustls-tls-webpki-roots-no-provider`. `http3` (de feature die
+  `dep:quinn` aanzet) is niet actief; geen enkele `Cargo.toml` van de 804 registry-pakketten in de lock noemt
+  `http3`, behalve `reqwest` zelf.
+- Oorzaak van de lockvermelding: `__rustls-ring` bevat de zwakke verwijzing `"quinn?/ring"`. Proef met twee kleine
+  crates buiten de repo (`cargo generate-lockfile --offline`): `reqwest = "=0.12.28"` met alleen `rustls-tls` zet
+  `quinn` in de lock, met alleen `json` niet.
+- Na `cargo build --locked` stonden er wel 30 quinn-bestanden in `target/debug/deps`, maar alle met datum 18 of
+  27 augustus 2026 (resten van eerdere builds). Een schone build in een lege doelmap (`CARGO_TARGET_DIR` in de
+  scratchmap, `cargo build --locked`): 0 quinn-bestanden.
+
+**A3: gebruik in onze code.**
+- (a) `p256`: in de productiecode alleen `Signature::from_der`, `normalize_s` en `to_bytes`
+  (`desktop/src-tauri/src/secp256r1.rs:17-25`), op een handtekening die de authenticator levert. Er wordt in de app
+  niet met `p256` ondertekend en niet geverifieerd; de verificatie doet de secp256r1-precompile op de keten.
+  `SigningKey` en `sign` komen alleen in de test voor (`secp256r1.rs:43-52`, vaste testsleutel). Geen geheime
+  waarde gaat door `crypto-bigint` via `p256`. Wat `k256` binnen `iota-crypto` doet, is niet nagegaan; onze code
+  roept het niet aan.
+- (b) Ed25519: de app tekent alleen met de fee-payer, via Stronghold: `sign_with_fee_payer` → `Ed25519Sign`
+  (`desktop/src-tauri/src/fee_payer.rs:271-289`), aangeroepen in `execute_action` (`execute.rs:251-252`). Stronghold
+  tekent met `ed25519-zebra` 4.2.0 op `curve25519-dalek` 4.1.3 (`iota-crypto` 0.23.2,
+  `src/signatures/ed25519.rs:20`), niet met `ed25519-dalek` 1.0.1 of `curve25519-dalek` 3.2.0. De publieke sleutel
+  wordt in Stronghold uit dezelfde geheime sleutel afgeleid (`PublicKey`-procedure, `fee_payer.rs:128-139`); er
+  wordt nergens een los opgegeven publieke sleutel aan een tekenfunctie meegegeven. Onze code maakt geen Solana-
+  `Keypair` en roept geen `sign` van de Solana-crates aan (gezocht in `desktop/src-tauri/src`); ook
+  `solana-rpc-client` (`nonblocking/rpc_client.rs`) tekent of verifieert niet. `ed25519-dalek` 1.0.1 wordt in
+  `solana-signature` 2.3.0 alleen voor verificatie gebruikt (publieke waarden). Het misbruik dat RUSTSEC-2022-0093
+  vraagt (tekenen met een niet-passende publieke sleutel) komt in onze code dus niet voor, en de timingmelding van
+  `curve25519-dalek` 3.2.0 raakt het tekenen niet. De app tekent lokaal op de machine van de gebruiker; een
+  aanvaller die timing kan meten moet daar dus lokaal zijn.
+- (c) zstd: `solana-rpc-client` vraagt bij `get_account` de codering `base64+zstd` (`get_account_with_commitment`,
+  `nonblocking/rpc_client.rs:3528`), en `solana-account-decoder-client-types` pakt dat uit met
+  `zstd::stream::read::Decoder` (`src/lib.rs:45-48`). Onze code roept `get_account` aan in
+  `prepare_execute_challenge` (`execute.rs:117-119`). De gecomprimeerde data komt dus van de RPC-server
+  (Helius, via TLS); een kwaadwillende of overgenomen RPC-server bepaalt de invoer van de decompressie. De feature
+  `legacy` van `zstd`/`zstd-safe` staat aan (relevant voor RUSTSEC-2026-0403). De overige RPC-aanroepen
+  (`get_balance`, `get_latest_blockhash`, `send_and_confirm_transaction`, `request_airdrop`) gebruiken geen zstd.
+- (d) TLS: de enige RPC-host in de Rust-code is `https://devnet.helius-rpc.com/` (`rpc.rs:39`). In `desktop/src`
+  staat geen `fetch` en geen http(s)-URL (gezocht). Of Tauri of de webview zelf nog andere verbindingen maakt, is
+  niet nagegaan.
+- (e) `cookie`: actieve features van `cookie` 0.18.2 zijn leeg; `PrivateJar` zit achter `#[cfg(feature =
+  "private")]` (`cookie-0.18.2/src/jar.rs:4,412`) en wordt dus niet gecompileerd. Onze code gebruikt geen cookies.
+  `url`: onze code gebruikt geen `Url::origin()` of `blob:`. In de registry-bron van alle crates die `url` 2.5.8
+  gebruiken, is geen aanroep `.origin()` gevonden buiten `url` zelf (`quirks.rs:94`); dat zoeken was op tekst en
+  niet uitputtend (bijvoorbeeld niet op `Url::origin(&u)`).
+
+**A4 en deel B: bijgewerkt.** Per crate de nieuwste versie die de melding oplost, op de peildatum minstens 14
+dagen oud is en niet yanked is. Datums en checksums uit de crates.io-API (`/api/v1/crates/<naam>/<versie>`):
+
+| crate | oud | nieuw | gepubliceerd (UTC) | leeftijd | yanked | wie houdt vast / eis |
+|---|---|---|---|---|---|---|
+| `ctutils` | 0.4.2 | 0.4.8 | 2026-11-02 20:07 | 24,67 d | nee | `digest` 0.11.3: `0.4` |
+| `zstd-sys` | 2.0.16+zstd.1.5.7 | 2.1.3+zstd.1.5.7 | 2026-11-12 13:51 | 14,93 d | nee | `zstd-safe` 7.2.4: `2.0.15`; 7.4.1: `^2.0.17` |
+| `zstd-safe` | 7.2.4 | 7.4.1 | 2026-11-12 13:13 | 14,95 d | nee | `zstd` 0.13.3: `7.1.0`; 0.13.5: `^7.4.1` |
+| `zstd` | 0.13.3 | 0.13.5 | 2026-11-12 13:13 | 14,95 d | nee | `solana-account-decoder-client-types` 2.3.13: `0.13.3` |
+| `rustls-webpki` | 0.103.14 | 0.103.17 | 2026-11-12 17:39 | 14,77 d | nee | `rustls` 0.23.46: `0.103.14` |
+| `webpki-roots` | 1.0.9 | 1.0.12 | 2026-11-10 21:08 | 16,62 d | nee | `hyper-rustls` 0.27.9 en `reqwest` 0.12.28: `1` |
+| `quinn-proto` | 0.11.17 | 0.11.19 | 2026-09-30 09:13 | 58,12 d | nee | `quinn` 0.11.11: `0.11.15` |
+| `quinn-udp` | 0.5.15 | 0.5.16 | 2026-09-30 09:14 | 58,12 d | nee | `quinn` 0.11.11: `0.5` |
+
+Voor alle acht was `cargo update -p <crate> --precise <versie>` genoeg; geen `Cargo.toml` hoefde te veranderen.
+Nieuwere versies die de leeftijdsgrens niet halen: `zstd` 0.13.6, `zstd-safe` 7.4.2 en `zstd-sys` 2.2.0+zstd.1.6.0
+(gepubliceerd 2026-11-24, toegestaan vanaf 2026-12-08).
+
+Werkwijze: per stap eerst `--dry-run` in een tijdelijke worktree (`../afh-dryrun`, losgekoppeld op `origin/main`),
+daar ook echt uitgevoerd, daarna in de hoofdmap. Volgorde: `ctutils`, `zstd-sys`, `zstd-safe`, `zstd`,
+`rustls-webpki`, `webpki-roots`, `quinn-proto`, `quinn-udp`. Geen enkele dry-run noemde een ander pakket dan het
+bijgewerkte. De lock in de worktree en in de hoofdmap zijn na afloop byte voor byte gelijk.
+
+Lockdiff (commit `4ca3bb0`, 17 regels erbij, 17 eraf): de acht versiewissels hierboven, elk met nieuwe checksum, en
+één neveneffect: `dirs-sys` 0.5.0 (versie gelijk) verwijst nu naar `windows-sys 0.61.2` in plaats van `0.59.0`. Geen
+nieuwe of verdwenen pakketten (805 voor en na, zelfde namen). Alle acht checksums volledig gelijk aan crates.io.
+
+Over het neveneffect, nagegaan door de stappen in de worktree opnieuw één voor één uit te voeren:
+- na `ctutils` en de drie zstd-crates: geen koppelingswijziging;
+- na `rustls-webpki` en `webpki-roots`: vijf koppelingen van `windows-sys 0.52.0` naar `0.59.0` (`errno`,
+  `quinn-udp`, `rustix`, `tempfile`, `winapi-util`);
+- na `quinn-proto`: nog dezelfde vijf;
+- na `quinn-udp`: die vijf staan weer op `0.52.0`, en alleen `dirs-sys` gaat van `0.59.0` naar `0.61.2`.
+Twee andere volgordes geprobeerd: met de quinn-crates eerst bleven de vijf koppelingswijzigingen staan; met
+`rustls-webpki`, `webpki-roots`, `ctutils`, zstd en dan quinn gaf het dezelfde ene wijziging. Geen geprobeerde
+volgorde gaf minder dan één.
+Het mechanisme in cargo is niet in de broncode nagegaan. `dirs-sys` 0.5.0 eist `windows-sys >= 0.59.0`; 0.61.2 stond
+al in de lock en blijft binnen die eis. Alleen Windows-doelen. Vergelijk §198: in `0027ad6` ging `dirs-sys` juist van
+`0.61.2` naar `0.59.0`; dat is hiermee teruggedraaid.
+
+**`cargo audit` voor en na** (database `c5279d0`; "voor" in de worktree op `581ae56`, "na" op `4ca3bb0`):
+
+| | voor (`581ae56`) | na (`4ca3bb0`) |
+|---|---|---|
+| kwetsbaarheden | 18 | 5 |
+| unmaintained | 14 | 14, dezelfde |
+| unsound | 16 | 6 (de tien van `zstd-safe` 7.2.4 zijn weg) |
+| yanked | 1 | 1 (`chacha20` 0.10.1) |
+
+Opgelost: RUSTSEC-2026-0338, -0340, -0343, -0523, -0524 (`quinn-proto`), -0538 (`quinn-udp`), -0381
+(`webpki-roots`), -0382 (`rustls-webpki`), -0385 (`ctutils`), -0391 (`zstd`), -0398, -0403 (`zstd-safe`), -0410
+(`zstd-sys`). Geen nieuwe meldingen. `cargo tree -i` toont de nieuwe versies onder dezelfde ouders als voorheen; de
+oude versies staan niet meer in de lock. De yanked `chacha20` 0.10.1 komt via `rand` 0.10.2, dat alleen door
+`quinn-proto` wordt gebruikt: klasse D, voor geen enkel doel gecompileerd.
+
+**Niet bijgewerkt.**
+
+| crate | melding | reden | eerste toegestane datum / blokkade |
+|---|---|---|---|
+| `url` 2.5.8 | RUSTSEC-2026-0592 | 2.5.9 gepubliceerd 2026-11-20 23:03 UTC (6,55 d) | 2026-12-04 23:03 UTC |
+| `cookie` 0.18.2 | RUSTSEC-2026-0594 | 0.18.3 gepubliceerd 2026-11-23 07:45 UTC (4,18 d) | 2026-12-07 07:45 UTC |
+| `ed25519-dalek` 1.0.1 | RUSTSEC-2022-0093 | `solana-keypair` 2.2.3, `solana-signature` 2.3.0 en `solana-ed25519-program` 2.2.3 eisen `=1.0.1` | vraagt Solana-crates die `ed25519-dalek` >=2 gebruiken; welke versie dat is, niet nagegaan |
+| `curve25519-dalek` 3.2.0 | RUSTSEC-2024-0344 | `ed25519-dalek` 1.0.1 eist `3` | volgt `ed25519-dalek` |
+| `crypto-bigint` 0.5.5 | RUSTSEC-2026-0387 | `elliptic-curve` 0.13.8 eist `0.5`; gepatcht is >=0.7.6 | vraagt een nieuwere `elliptic-curve`-lijn voor `p256` (direct) en `k256` (via `iota-crypto`); niet nagegaan of die bestaat en past |
+
+Inschatting op grond van A3, geen meting: `cookie` (private feature niet gecompileerd) en `ed25519-dalek`/
+`curve25519-dalek` (niet op ons tekenpad) raken het gedrag van de app vermoedelijk niet; voor `url` is geen aanroep
+van `origin()` gevonden, maar het zoeken was niet uitputtend.
+
+**A5: libsodium.** `libsodium-sys-stable` 1.24.4 (alleen via `stronghold-runtime` 2.0.1) bouwt de meegeleverde
+broncode (`LATEST.tar.gz`, libsodium 1.0.22). Actieve features: alleen `default`, en die is leeg. `build.rs` geeft
+`--enable-minimal` alleen mee met de feature `minimal` (`build.rs:317-318`) en `--enable-opt` alleen met `optimized`;
+geen van beide staat aan. De configure-regel in `config.log` van de schone build: `--disable-ssp --prefix=...
+--host=aarch64-unknown-linux-gnu --enable-shared=no --disable-dependency-tracking`. De aanname in de opdracht dat met
+`--enable-minimal` gebouwd wordt, klopt dus niet.
+
+Van de `.c`-bestanden die tussen 1.24.0 en 1.24.4 veranderen, zitten deze als object in `libsodium.a` (139 objecten,
+schone build, aarch64): `ed25519_ref10.c` (inversie nu via `safegcd_invert`, nieuw `safegcd.h`),
+`keccak1600_armsha3.c`, `keccak1600_ref.c`, `softaes.c`, `hash_sha3.c`, `kem_mlkem768_ref.c`, `kem_xwing.c`,
+`argon2.c`, `argon2-core.c`, `argon2-encoding.c`, `stream_chacha20.c`, `stream_salsa20.c`, `shake128_ref.c`,
+`shake256_ref.c`, `turboshake128_ref.c`, `turboshake256_ref.c`, `randombytes.c`, `randombytes_sysrandom.c`,
+`randombytes_internal_random.c`, `codecs.c`, `core.c`, `runtime.c`, `utils.c`. Niet in het archief: de sandy2x-
+bestanden (`curve25519_sandy2x.c`, `fe51_invert.c`). De AVX-512-objecten voor ChaCha20 en Salsa20 staan in het
+archief, maar zijn op aarch64 leeg (`size`: text 0, geen symbolen).
+
+Wat `stronghold-runtime` aanroept (gezocht in de bron): `sodium_init`, `sodium_allocarray`, `sodium_free`,
+`sodium_mlock`, `sodium_mprotect_noaccess`/`readonly`/`readwrite`, `sodium_memzero`, `sodium_memcmp`,
+`randombytes_buf`. Daarvan geraakt door de wijzigingen:
+- `sodium_memcmp` (en `sodium_is_zero`, niet door Stronghold gebruikt), `utils.c`: het resultaat gaat nu via een
+  `volatile` variabele en een lege `asm`-barrière, in plaats van de accumulator zelf `volatile` te maken. Gebruikt
+  in `stronghold-runtime` `types/const_eq.rs` voor vergelijkingen in constante tijd;
+- `sodium_init` en de misuse-handler, `core.c`: de handler wordt alleen nog aangeroepen als het vrijgeven van de
+  vergrendeling lukt; `runtime.c`: XGETBV ook bij `HAVE_XGETBV_ASM` (x86);
+- `randombytes_buf`, `randombytes.c`: alleen de Emscripten-tak verandert; `randombytes_sysrandom.c`: op macOS
+  >=10.12 en iOS >=10 nu `arc4random`, en wasm zonder Emscripten. Voor Linux geen wijziging in dit bestand gezien.
+In het eindprogramma (schone debugbuild) zitten 39 libsodium-symbolen, waaronder `fe25519_invert` en
+`ge25519_scalarmult_base`: die komen mee via de `_pick_best_implementation`-aanroepen in `sodium_init`. Een aanroep
+ervan vanuit `stronghold-runtime` is niet gevonden. Argon2 in onze app is de Rust-crate `argon2`, niet die van
+libsodium.
+
+AVX-512: `stream_chacha20.c` en `stream_salsa20.c` kiezen de AVX-512-implementatie alleen als bij het compileren
+`HAVE_AVX512FINTRIN_H` (en de andere intrinsics-headers) gedefinieerd is én `sodium_runtime_has_avx512f()` bij het
+draaien waar geeft. Dus alleen via runtimedetectie. Op x86_64 niet gebouwd of nagegaan.
+
+**A6: cryptografische primitieven in het geleverde programma** (x86_64-linux, `cargo tree -e normal`, plus onze
+code; invoer voor een latere sectie "Aannames"):
+
+| primitief | crate en versie | waarvoor in de app |
+|---|---|---|
+| Ed25519 tekenen | `ed25519-zebra` 4.2.0 op `curve25519-dalek` 4.1.3 (via `iota-crypto` 0.23.2) | fee-payer-handtekening in Stronghold |
+| Ed25519 (Solana-typen) | `ed25519-dalek` 1.0.1 op `curve25519-dalek` 3.2.0 | in Solana-crates; niet op ons tekenpad (A3 b) |
+| Ed25519-puntcontrole | `curve25519-dalek` 4.1.3 (via `solana-pubkey` 2.4.0) | `find_program_address` (PDA's), publieke waarden |
+| ECDSA P-256 | `p256` 0.13.2 / `ecdsa` 0.16.9 / `elliptic-curve` 0.13.8 / `crypto-bigint` 0.5.5 | DER-parsing en low-S van passkey-handtekeningen; verificatie op de keten (`solana-secp256r1-program` 2.2.4) |
+| ECDSA secp256k1 | `k256` 0.13.4 (via `iota-crypto`), `libsecp256k1` 0.6.0 (via Solana) | niet door onze code aangeroepen |
+| SHA-256 | `sha2` 0.10.9 (via `solana-sha256-hasher` 2.3.0; ook 0.9.9 in de boom) | `solana_sdk::hash::hashv` over clientDataJSON (`execute.rs:201`) |
+| Keccak-256 | `sha3` 0.10.9 (via `solana-keccak-hasher` 2.2.1) | het challenge: `solana_sdk::keccak::hashv` (`challenge.rs:15`) |
+| BLAKE3 | `blake3` 1.8.6 (met `digest` 0.11.3, `ctutils` 0.4.8) | Solana-crates; niet door onze code aangeroepen |
+| overige Keccak | `keccak` 0.1.6, `tiny-keccak` 2.0.2 | Solana-crates en `iota-crypto`; niet door onze code aangeroepen |
+| BLAKE2b | `blake2` 0.10.6 | Stronghold (`Blake2b256` in `stronghold_engine`) |
+| Wachtwoord-KDF | `argon2` 0.5.3 (standaardparameters) | sleutel voor het Stronghold-snapshot uit het wachtwoord (`fee_payer.rs:102-108`) |
+| Snapshotversleuteling | age v1 met scrypt-ontvanger: `scrypt` 0.11.0, `chacha20poly1305` 0.10.1, `hkdf` 0.12.4 (in `iota-crypto` `keys/age.rs`) | Stronghold-snapshot op schijf |
+| Vaultversleuteling | XChaCha20-Poly1305 (`chacha20poly1305` 0.10.1); `stronghold_engine` gebruikt ook X25519 (`x25519-dalek` 2.0.1), waarvoor precies is niet nagegaan | Stronghold-records in het geheugen |
+| Geheugenbescherming, constante-tijd-vergelijking, randomness | libsodium 1.0.22 (`libsodium-sys-stable` 1.24.4) | `stronghold-runtime` (zie A5) |
+| AES | `aes` 0.9.2, `cbc` 0.2.1 (via `ctap-hid-fido2` 3.5.13); `aes-gcm` 0.10.3 (via `iota-crypto`) | CTAP-PIN-protocol (vermoedelijk; niet nagegaan); Stronghold niet door onze code |
+| TLS | `rustls` 0.23.46 met provider `ring` 0.17.14, features `ring`, `std`, `tls12`; `rustls-webpki` 0.103.17, `webpki-roots` 1.0.12 | HTTPS naar Helius. TLS 1.3 en 1.2; sleuteluitwisseling X25519, secp256r1, secp384r1 (`crypto/ring/mod.rs:180-181`); suites AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 |
+| `ring` | 0.17.14 | TLS en `ctap-hid-fido2` |
+
+**Controles.**
+
+| controle | vóór (`581ae56`) | na |
+|---|---|---|
+| `cargo audit` (desktop) | 18 kwetsbaarheden | 5 |
+| `cargo check --locked` (desktop) | - | exit 0 |
+| `cargo test --locked` (desktop) | - | 25 passed, 0 failed |
+| `npm run test:unit` | - | 393 passing |
+| `tsc --noEmit` in `desktop/` | - | exit 0 |
+| `tsc --noEmit` in `client/` | - | exit 0 |
+| `cargo build --locked` in lege doelmap, aantal quinn-bestanden in `debug/deps` | 0 | 0 (zelfde doelmap, na de lockupdate bijgebouwd) |
+
+**Niet nagegaan.**
+- macOS en Windows zijn niet gebouwd; de classificatie voor die doelen komt alleen uit `cargo tree`. x86_64 is ook
+  niet gebouwd (de AVX-512-paden dus niet gemeten).
+- De desktop-app is niet gestart; geen RPC-aanroep tegen Helius gedaan.
+- De inhoud van de nieuwe crateversies is niet regel voor regel gelezen; alleen checksum, datum en yanked-vlag
+  tegen crates.io.
+- Het mechanisme achter de verschuivende `windows-sys`-koppelingen in cargo.
+- Of Tauri of de webview zelf TLS-verbindingen naar andere hosts maakt.
+- Welke Solana-versie `ed25519-dalek` 1.0.1 kwijtraakt, en of er een `elliptic-curve`-lijn met `crypto-bigint`
+  >=0.7.6 is die bij `p256` en `iota-crypto` past.
+- De libsodium-wijzigingen niet regel voor regel beoordeeld, en de minisign-controle van het archief niet los
+  herhaald.
+- De npm-meldingen (`jayson`, `stream-json`) zijn alleen gerapporteerd.
+
+**Stand.** Commits lokaal op `afhankelijkheden-2026-11`, niet gepusht. Review door een verse sessie volgt.

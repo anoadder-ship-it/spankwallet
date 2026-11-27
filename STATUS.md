@@ -19630,7 +19630,7 @@ getallen hieronder komen uit eigen metingen in deze ronde; gebouwd en getest is 
 (aarch64-unknown-linux-gnu).
 
 **Database.** cargo-audit 0.22.2, advisory-database commit `c5279d0` (2026-11-27T11:35:42+01:00, 1571 adviezen).
-De lijst van 18 kwetsbaarheden is gelijk aan die in de opdracht: geen afwijking.
+Geen verschil met de lijst van 18 meldingen waarmee deze ronde is gestart.
 
 **A1: `cargo audit` op `origin/main`.**
 
@@ -19644,12 +19644,15 @@ De lijst van 18 kwetsbaarheden is gelijk aan die in de opdracht: geen afwijking.
 | `quinn-proto` | 0.11.17 | 2026-0338, -0340, -0343 | paniek door peer (drie routes) | >=0.11.18 |
 | `quinn-proto` | 0.11.17 | 2026-0523, -0524 | streams boven de limiet; lange Retry-token | >=0.11.19 |
 | `quinn-udp` | 0.5.15 | 2026-0538 | ontvangstlus kan spinnen na afgekapt datagram | >=0.5.16, <0.6.0; >=0.6.3 |
-| `rustls-webpki` | 0.103.14 | 2026-0382 | kan wantrouwde tussencertificaten accepteren | >=0.103.16, <0.104.0-alpha.1 |
+| `rustls-webpki` | 0.103.14 | 2026-0382 | kan wantrouwde tussencertificaten accepteren | >=0.103.16, <0.104.0-alpha.1; >=0.104.0-alpha.8 |
 | `url` | 2.5.8 | 2026-0592 | stack overflow in `Url::origin()` bij geneste `blob:`-URL's | >=2.5.9 |
 | `webpki-roots` | 1.0.9 | 2026-0381 | wantrouwde emSign-tussencertificaten | >=1.0.10 |
 | `zstd` | 0.13.3 | 2026-0391 | data van een afgebroken stream lekt in de volgende | ^0.13.4; >=0.14.3 |
 | `zstd-safe` | 7.2.4 | 2026-0398, -0403 | `Seekable::decompress`; ongeïnitialiseerd geheugen bij legacy-frame | ^7.4.0; >=8.2.0 |
 | `zstd-sys` | 2.0.16+zstd.1.5.7 | 2026-0410 | WebAssembly-allocatorshim | >=2.1.2 |
+
+De gepatchte bereiken in de laatste kolom zijn in de correctieronde opnieuw uit `cargo audit -n --json` (database
+`c5279d0`, lock van `581ae56`) gehaald en per rij vergeleken; alleen de rij `rustls-webpki` was onvolledig.
 
 Waarschuwingen: 14 unmaintained (`atty`, `bincode` 1.3.3, `chrono` 0.4.45, `derivative`, `humantime`,
 `libsecp256k1` 0.6.0, `number_prefix`, `paste`, `proc-macro-error`, vijf `unic-*`), 16 unsound (`atty`, `glib`
@@ -19688,8 +19691,9 @@ Klasse D voor quinn, bewijs:
 - In de lock is `reqwest` 0.12.28 de enige afhankelijke van `quinn`. Actieve features van `reqwest` (via
   `cargo metadata`): `__rustls`, `__rustls-ring`, `__tls`, `blocking`, `brotli`, `deflate`, `gzip`, `json`,
   `rustls-tls`, `rustls-tls-webpki-roots`, `rustls-tls-webpki-roots-no-provider`. `http3` (de feature die
-  `dep:quinn` aanzet) is niet actief; geen enkele `Cargo.toml` van de 804 registry-pakketten in de lock noemt
-  `http3`, behalve `reqwest` zelf.
+  `dep:quinn` aanzet) is niet actief. Van de 804 registry-pakketten in de lock noemen alleen de twee
+  `reqwest`-versies `http3` in hun `Cargo.toml`: 0.12.28 en 0.13.4. Alleen 0.12.28 heeft in de lock een
+  afhankelijkheid op `quinn`; 0.13.4 (via `tauri` 2.11.5) niet.
 - Oorzaak van de lockvermelding: `__rustls-ring` bevat de zwakke verwijzing `"quinn?/ring"`. Proef met twee kleine
   crates buiten de repo (`cargo generate-lockfile --offline`): `reqwest = "=0.12.28"` met alleen `rustls-tls` zet
   `quinn` in de lock, met alleen `json` niet.
@@ -19714,8 +19718,8 @@ Klasse D voor quinn, bewijs:
   `solana-rpc-client` (`nonblocking/rpc_client.rs`) tekent of verifieert niet. `ed25519-dalek` 1.0.1 wordt in
   `solana-signature` 2.3.0 alleen voor verificatie gebruikt (publieke waarden). Het misbruik dat RUSTSEC-2022-0093
   vraagt (tekenen met een niet-passende publieke sleutel) komt in onze code dus niet voor, en de timingmelding van
-  `curve25519-dalek` 3.2.0 raakt het tekenen niet. De app tekent lokaal op de machine van de gebruiker; een
-  aanvaller die timing kan meten moet daar dus lokaal zijn.
+  `curve25519-dalek` 3.2.0 raakt het tekenen niet. Of en hoe een aanvaller de timing van het tekenen kan meten, is
+  niet nagegaan.
 - (c) zstd: `solana-rpc-client` vraagt bij `get_account` de codering `base64+zstd` (`get_account_with_commitment`,
   `nonblocking/rpc_client.rs:3528`), en `solana-account-decoder-client-types` pakt dat uit met
   `zstd::stream::read::Decoder` (`src/lib.rs:45-48`). Onze code roept `get_account` aan in
@@ -19723,8 +19727,17 @@ Klasse D voor quinn, bewijs:
   (Helius, via TLS); een kwaadwillende of overgenomen RPC-server bepaalt de invoer van de decompressie. De feature
   `legacy` van `zstd`/`zstd-safe` staat aan (relevant voor RUSTSEC-2026-0403). De overige RPC-aanroepen
   (`get_balance`, `get_latest_blockhash`, `send_and_confirm_transaction`, `request_airdrop`) gebruiken geen zstd.
-- (d) TLS: de enige RPC-host in de Rust-code is `https://devnet.helius-rpc.com/` (`rpc.rs:39`). In `desktop/src`
-  staat geen `fetch` en geen http(s)-URL (gezocht). Of Tauri of de webview zelf nog andere verbindingen maakt, is
+- (d) TLS: de enige RPC-host in de Rust-code is `https://devnet.helius-rpc.com/` (`rpc.rs:39`). De URL ligt vast in
+  de code; alleen de sleutel komt uit de build (`option_env!("HELIUS_API_KEY")`, `rpc.rs:19`). Geen van de acht
+  Tauri-commando's (`lib.rs:12-21`) krijgt een URL of host als argument; het argument `origin` van
+  `register_passkey` en `sign_with_passkey` gaat alleen als tekst in clientDataJSON (`passkey_ctap.rs:67-73`).
+  `desktop/src-tauri/src` gebruikt geen andere netwerk-crate (gezocht op `reqwest`, `ureq`, `hyper`, `std::net`,
+  `TcpStream`). De CSP in `tauri.conf.json` (regel 22) staat voor de webview alleen `connect-src ipc:
+  http://ipc.localhost` toe; `capabilities/default.json` geeft `core:default` en de acht eigen commando's. In de
+  `.ts`- en `.css`-bestanden onder `desktop/src` (er staan geen `.html`-bestanden) staat geen `fetch` en geen
+  http(s)-URL. De drie SVG-bestanden in `desktop/src/assets` (`tauri.svg`, `typescript.svg`, `vite.svg`) bevatten
+  `http://` alleen als XML-namespace (`http://www.w3.org/2000/svg`, in `vite.svg` ook `.../1999/xlink`) en in
+  `typescript.svg` als DTD-verwijzing in de DOCTYPE. Of Tauri of de webview zelf nog andere verbindingen maakt, is
   niet nagegaan.
 - (e) `cookie`: actieve features van `cookie` 0.18.2 zijn leeg; `PrivateJar` zit achter `#[cfg(feature =
   "private")]` (`cookie-0.18.2/src/jar.rs:4,412`) en wordt dus niet gecompileerd. Onze code gebruikt geen cookies.
@@ -19732,8 +19745,9 @@ Klasse D voor quinn, bewijs:
   gebruiken, is geen aanroep `.origin()` gevonden buiten `url` zelf (`quirks.rs:94`); dat zoeken was op tekst en
   niet uitputtend (bijvoorbeeld niet op `Url::origin(&u)`).
 
-**A4 en deel B: bijgewerkt.** Per crate de nieuwste versie die de melding oplost, op de peildatum minstens 14
-dagen oud is en niet yanked is. Datums en checksums uit de crates.io-API (`/api/v1/crates/<naam>/<versie>`):
+**A4 en deel B: bijgewerkt.** Per crate de nieuwste versie binnen het semver-bereik van de ouders (alleen een
+lockupdate) die de melding oplost, op de peildatum minstens 14 dagen oud is en niet yanked is. Datums en checksums
+uit de crates.io-API (`/api/v1/crates/<naam>/<versie>`):
 
 | crate | oud | nieuw | gepubliceerd (UTC) | leeftijd | yanked | wie houdt vast / eis |
 |---|---|---|---|---|---|---|
@@ -19749,6 +19763,20 @@ dagen oud is en niet yanked is. Datums en checksums uit de crates.io-API (`/api/
 Voor alle acht was `cargo update -p <crate> --precise <versie>` genoeg; geen `Cargo.toml` hoefde te veranderen.
 Nieuwere versies die de leeftijdsgrens niet halen: `zstd` 0.13.6, `zstd-safe` 7.4.2 en `zstd-sys` 2.2.0+zstd.1.6.0
 (gepubliceerd 2026-11-24, toegestaan vanaf 2026-12-08).
+
+Buiten het semver-bereik van de ouders bestaan nieuwere lijnen met versies die de melding ook oplossen en op de
+peildatum minstens 14 dagen oud en niet yanked zijn (crates.io-API per versie, leeftijd op 2026-11-27 12:08 UTC; de
+nieuwste per lijn):
+
+| crate | lijn | nieuwste >= 14 d | gepubliceerd (UTC) | leeftijd | ouder en eis |
+|---|---|---|---|---|---|
+| `zstd` | 0.14.x | 0.14.4 | 2026-11-12 13:52 | 14,93 d | `solana-account-decoder-client-types` 2.3.13: `0.13.3` |
+| `zstd-safe` | 8.x | 8.3.0 | 2026-11-12 13:52 | 14,93 d | `zstd` 0.13.5: `7.4.1` |
+| `quinn-udp` | 0.6.x | 0.6.3 | 2026-09-30 09:14 | 58,12 d | `quinn` 0.11.11: `0.5` |
+| `rustls-webpki` | 0.104.0-alpha | 0.104.0-alpha.8 | 2026-10-20 09:03 | 38,13 d | `rustls` 0.23.46: `0.103.14` |
+
+Nog nieuwer in die lijnen zijn `zstd` 0.14.5 en `zstd-safe` 8.4.0 (2,83 dagen oud). Deze lijnen vragen een
+wijziging in een `Cargo.toml` van een ouder en zitten niet in deze ronde.
 
 Werkwijze: per stap eerst `--dry-run` in een tijdelijke worktree (`../afh-dryrun`, losgekoppeld op `origin/main`),
 daar ook echt uitgevoerd, daarna in de hoofdmap. Volgorde: `ctutils`, `zstd-sys`, `zstd-safe`, `zstd`,
@@ -19772,6 +19800,40 @@ Het mechanisme in cargo is niet in de broncode nagegaan. `dirs-sys` 0.5.0 eist `
 al in de lock en blijft binnen die eis. Alleen Windows-doelen. Vergelijk §198: in `0027ad6` ging `dirs-sys` juist van
 `0.61.2` naar `0.59.0`; dat is hiermee teruggedraaid.
 
+**Wat er in de bijgewerkte crates verandert** (correctieronde; gemeten in de uitgepakte `.crate`-bestanden uit de
+cargo-cache, waarvan de sha256 gelijk is aan de lockchecksum).
+- `webpki-roots` 1.0.9 → 1.0.12: alleen gegevens; het aantal `TrustAnchor`-items gaat van 121 naar 112. Negen roots
+  verdwijnen, er komt er geen bij: Buypass Class 2 Root CA, Buypass Class 3 Root CA, Certigna Root CA, DigiCert
+  Trusted Root G4, emSign ECC Root CA - C3, emSign ECC Root CA - G3, emSign Root CA - C1, QuoVadis Root CA 1 G3 en
+  QuoVadis Root CA 3 G3. Een host waarvan de keten alleen op een van deze roots eindigt, zou met deze build niet
+  meer verbinden. De keten van `devnet.helius-rpc.com`, gemeten op 2026-11-27 om 14:50 UTC met `openssl s_client
+  -showcerts` (alleen de handshake, geen API-aanroep, geen sleutel): `*.helius-rpc.com` ← Let's Encrypt YE1 ← ISRG
+  Root YE ← ISRG Root X2 (door ISRG Root X1 kruisgetekend), `Verify return code: 0`. ISRG Root X2 en ISRG Root X1
+  staan in 1.0.12; ISRG Root YE zelf staat er niet in. Welk van de twee rustls als anker kiest, is niet nagegaan.
+  De app kan volgens A3 (d) geen andere RPC-host kiezen; andere hosts zijn niet gemeten.
+- `rustls-webpki` 0.103.14 → 0.103.17: nieuw is een blokkadelijst `DISTRUSTED_SPKIS` met de SPKI's van acht
+  emSign-tussencertificaten (`src/data/distrusted/`: `EMDVTLSCAG3B`, `EMDVTLSCAG3C`, `EMEVTLSCAG3B`, `EMEVTLSCAG3C`,
+  `EMOVCSCAG3B`, `EMOVCSCAG3C`, `EMOVTLSCAG3B`, `EMOVTLSCAG3C`; `verify_cert.rs:930`). Die wordt toegepast in
+  `verify_for_usage` (`end_entity.rs:119`), en rustls 0.23.46 roept die functie aan in `src/webpki/verify.rs:253`.
+  Verder een nieuwe module `sct.rs` (361 regels, geen `unsafe`), opgenomen als `pub mod sct;` in `lib.rs:68`
+  zonder feature-voorwaarde, dus wel gecompileerd. In de bron van de crates die `rustls-webpki` 0.103.17
+  gebruiken (`rustls`, `hyper-rustls`, `tokio-rustls`, `reqwest` 0.12.28, `reqwest-middleware`,
+  `solana-rpc-client`, `solana-rpc-client-api`) en in onze code staat geen verwijzing naar `webpki::sct` of
+  `sct::`. Geen wijziging in de afhankelijkheden.
+- `zstd-sys` 2.0.16 → 2.1.3: nieuwe optionele afhankelijkheden `libzstd-rs-sys` `=0.0.1-prerelease.2` (feature
+  `rust-backend`) en, als bouwafhankelijkheid, `cmake` `0.1` (feature `cmake`); nieuwe feature `vendored`;
+  `bindgen` staat niet meer in de standaardfeatures (`default` was `legacy`, `zdict_builder`, `bindgen`, is nu
+  `legacy`, `zdict_builder`). In `build.rs` valt `-fmerge-all-constants` weg (alleen nog in commentaar) en komt de
+  omgevingsvariabele `ZSTD_SYS_NO_HIDE_SYMBOLS` erbij; de enige URL's in `build.rs` staan in commentaar. Actief bij
+  ons (`cargo tree --locked -e features -i zstd-sys@2.1.3+zstd.1.5.7 --target all`): alleen `legacy`, `std` en
+  `zdict_builder`; `default`, `cmake`, `rust-backend` en `bindgen` niet. `cmake`, `libzstd-rs-sys` en `bindgen`
+  staan niet in de lock (`bindgen` ook niet op `581ae56`).
+- `zstd-safe` 7.2.4 → 7.4.1: `compress_block`, `decompress_block` en `insert_block` zijn nu `pub unsafe fn`
+  (`src/lib.rs:1367`, `:1884`, `:1912`). In de lock hangt alleen `zstd` 0.13.5 van `zstd-safe` af. Geen aanroep van
+  deze drie functies in de bron van `zstd` 0.13.5, van de Solana-crates boven `zstd` in onze keten
+  (`solana-account-decoder-client-types`, `solana-rpc-client`, `solana-rpc-client-api`,
+  `solana-rpc-client-types`, `solana-transaction-status-client-types`) of in onze code.
+
 **`cargo audit` voor en na** (database `c5279d0`; "voor" in de worktree op `581ae56`, "na" op `4ca3bb0`):
 
 | | voor (`581ae56`) | na (`4ca3bb0`) |
@@ -19786,6 +19848,12 @@ Opgelost: RUSTSEC-2026-0338, -0340, -0343, -0523, -0524 (`quinn-proto`), -0538 (
 (`zstd-sys`). Geen nieuwe meldingen. `cargo tree -i` toont de nieuwe versies onder dezelfde ouders als voorheen; de
 oude versies staan niet meer in de lock. De yanked `chacha20` 0.10.1 komt via `rand` 0.10.2, dat alleen door
 `quinn-proto` wordt gebruikt: klasse D, voor geen enkel doel gecompileerd.
+
+Correctie op het bericht van `4ca3bb0`: daar staat bij `zstd-safe` "ook tien unsound-waarschuwingen -0395 tot en met
+-0406". Binnen dat bereik zijn RUSTSEC-2026-0398 en -0403 kwetsbaarheden, geen unsound-meldingen. Unsound zijn
+RUSTSEC-2026-0395, -0396, -0397, -0399, -0400, -0401, -0402, -0404, -0405 en -0406 (`cargo audit -n --json` op de
+lock van `581ae56`). Het aantal klopt: deze tien unsound-meldingen voor `zstd-safe` 7.2.4 staan op `4ca3bb0` niet
+meer in de uitvoer.
 
 **Niet bijgewerkt.**
 
@@ -19805,8 +19873,8 @@ van `origin()` gevonden, maar het zoeken was niet uitputtend.
 broncode (`LATEST.tar.gz`, libsodium 1.0.22). Actieve features: alleen `default`, en die is leeg. `build.rs` geeft
 `--enable-minimal` alleen mee met de feature `minimal` (`build.rs:317-318`) en `--enable-opt` alleen met `optimized`;
 geen van beide staat aan. De configure-regel in `config.log` van de schone build: `--disable-ssp --prefix=...
---host=aarch64-unknown-linux-gnu --enable-shared=no --disable-dependency-tracking`. De aanname in de opdracht dat met
-`--enable-minimal` gebouwd wordt, klopt dus niet.
+--host=aarch64-unknown-linux-gnu --enable-shared=no --disable-dependency-tracking`. Er wordt dus niet met
+`--enable-minimal` gebouwd.
 
 Van de `.c`-bestanden die tussen 1.24.0 en 1.24.4 veranderen, zitten deze als object in `libsodium.a` (139 objecten,
 schone build, aarch64): `ed25519_ref10.c` (inversie nu via `safegcd_invert`, nieuw `safegcd.h`),
@@ -19852,10 +19920,11 @@ code; invoer voor een latere sectie "Aannames"):
 | overige Keccak | `keccak` 0.1.6, `tiny-keccak` 2.0.2 | Solana-crates en `iota-crypto`; niet door onze code aangeroepen |
 | BLAKE2b | `blake2` 0.10.6 | Stronghold (`Blake2b256` in `stronghold_engine`) |
 | Wachtwoord-KDF | `argon2` 0.5.3 (standaardparameters) | sleutel voor het Stronghold-snapshot uit het wachtwoord (`fee_payer.rs:102-108`) |
-| Snapshotversleuteling | age v1 met scrypt-ontvanger: `scrypt` 0.11.0, `chacha20poly1305` 0.10.1, `hkdf` 0.12.4 (in `iota-crypto` `keys/age.rs`) | Stronghold-snapshot op schijf |
-| Vaultversleuteling | XChaCha20-Poly1305 (`chacha20poly1305` 0.10.1); `stronghold_engine` gebruikt ook X25519 (`x25519-dalek` 2.0.1), waarvoor precies is niet nagegaan | Stronghold-records in het geheugen |
+| Snapshotversleuteling | age v1 met scrypt-ontvanger: `scrypt` 0.11.0, `chacha20poly1305` 0.10.1, `hkdf` 0.12.4 en `hmac` 0.12.1 (HMAC-SHA256), alle in `iota-crypto` `keys/age.rs` (`hmac`: regel 12, 178 en 189) | Stronghold-snapshot op schijf |
+| Vaultversleuteling | XChaCha20-Poly1305 (`chacha20poly1305` 0.10.1), als `BoxProvider` in `iota_stronghold` (`src/internal/provider.rs`) | Stronghold-records in het geheugen |
+| X25519 | `x25519-dalek` 2.0.1 (via `iota-crypto`) | in `stronghold_engine` als code alleen in `snapshot/migration/v2.rs` (lezen en schrijven van het oude snapshotformaat v2, voor `migrate_from_v2_to_v3`); verder alleen een import in `snapshot/migration/mod.rs` en een doc-commentaar in `snapshot/mod.rs:18`. `migrate` wordt buiten `snapshot/migration/` niet aangeroepen, niet in `iota_stronghold` 2.1.0, niet in `stronghold_engine` 2.0.1 en niet in onze code |
 | Geheugenbescherming, constante-tijd-vergelijking, randomness | libsodium 1.0.22 (`libsodium-sys-stable` 1.24.4) | `stronghold-runtime` (zie A5) |
-| AES | `aes` 0.9.2, `cbc` 0.2.1 (via `ctap-hid-fido2` 3.5.13); `aes-gcm` 0.10.3 (via `iota-crypto`) | CTAP-PIN-protocol (vermoedelijk; niet nagegaan); Stronghold niet door onze code |
+| AES | `aes` 0.9.2, `cbc` 0.2.1 (via `ctap-hid-fido2` 3.5.13); `aes` 0.8.4 en `aes-gcm` 0.10.3 (via `iota-crypto`; `aes` 0.8.4 ook onder `aes-gcm`) | CTAP-PIN-protocol (vermoedelijk; niet nagegaan); Stronghold niet door onze code |
 | TLS | `rustls` 0.23.46 met provider `ring` 0.17.14, features `ring`, `std`, `tls12`; `rustls-webpki` 0.103.17, `webpki-roots` 1.0.12 | HTTPS naar Helius. TLS 1.3 en 1.2; sleuteluitwisseling X25519, secp256r1, secp384r1 (`crypto/ring/mod.rs:180-181`); suites AES-256-GCM, AES-128-GCM, ChaCha20-Poly1305 |
 | `ring` | 0.17.14 | TLS en `ctap-hid-fido2` |
 
@@ -19875,8 +19944,10 @@ code; invoer voor een latere sectie "Aannames"):
 - macOS en Windows zijn niet gebouwd; de classificatie voor die doelen komt alleen uit `cargo tree`. x86_64 is ook
   niet gebouwd (de AVX-512-paden dus niet gemeten).
 - De desktop-app is niet gestart; geen RPC-aanroep tegen Helius gedaan.
-- De inhoud van de nieuwe crateversies is niet regel voor regel gelezen; alleen checksum, datum en yanked-vlag
-  tegen crates.io.
+- De inhoud van de nieuwe crateversies is niet regel voor regel gelezen; gemeten zijn checksum, datum en
+  yanked-vlag tegen crates.io en de punten onder "Wat er in de bijgewerkte crates verandert".
+- Of andere hosts dan `devnet.helius-rpc.com` op een verwijderde root eindigen: niet gemeten (de app kan er geen
+  kiezen, zie A3 (d)).
 - Het mechanisme achter de verschuivende `windows-sys`-koppelingen in cargo.
 - Of Tauri of de webview zelf TLS-verbindingen naar andere hosts maakt.
 - Welke Solana-versie `ed25519-dalek` 1.0.1 kwijtraakt, en of er een `elliptic-curve`-lijn met `crypto-bigint`
@@ -19884,5 +19955,14 @@ code; invoer voor een latere sectie "Aannames"):
 - De libsodium-wijzigingen niet regel voor regel beoordeeld, en de minisign-controle van het archief niet los
   herhaald.
 - De npm-meldingen (`jayson`, `stream-json`) zijn alleen gerapporteerd.
+
+**Correctieronde (zelfde branch, derde commit).** Na een beoordeling van de eerste versie is deze sectie ter plekke
+verbeterd, vóór push en goedkeuring. Toegevoegd of gewijzigd: het volledige gepatchte bereik bij `rustls-webpki`
+(A1); de `reqwest`-versies die `http3` noemen (A2); de zin over het meten van timing (A3 b); de hosts, de CSP en de
+SVG-bestanden (A3 d); "binnen het semver-bereik van de ouders" en de nieuwere lijnen (A4); het blok "Wat er in de
+bijgewerkte crates verandert"; de correctie op het bericht van `4ca3bb0`; `aes` 0.8.4, `hmac` en X25519 (A6); en
+twee herschreven zinnen bij Database en A5. Alle nieuwe getallen zijn op 2026-11-27 tussen 14:38
+en 15:04 UTC opnieuw gemeten; de leeftijden zijn berekend op de oorspronkelijke peildatum 12:08 UTC. Cargo- en
+npm-suites zijn niet opnieuw gedraaid, omdat alleen `STATUS.md` verandert.
 
 **Stand.** Commits lokaal op `afhankelijkheden-2026-11`, niet gepusht. Review door een verse sessie volgt.

@@ -19966,3 +19966,283 @@ en 15:04 UTC opnieuw gemeten; de leeftijden zijn berekend op de oorspronkelijke 
 npm-suites zijn niet opnieuw gedraaid, omdat alleen `STATUS.md` verandert.
 
 **Stand.** Commits lokaal op `afhankelijkheden-2026-11`, niet gepusht. Review door een verse sessie volgt.
+
+## 200. Vervolg op §199: acht lage punten uit de beoordeling (2026-11-28)
+
+**Samenvatting.** De beoordeling van §199 (commits `4ca3bb0`, `e56d5a5`, `dcf474d`; `origin/main` =
+`dcf474d2e928d8f1ca1053cc994c88c30022ac79`, op 2026-11-28 gecontroleerd met `git ls-remote origin refs/heads/main`)
+leverde acht lage punten op. Deze sectie verwerkt ze; §199 en de drie commits blijven ongewijzigd. Uitgevoerd in een
+lokale sessie (Claude) op branch `afhankelijkheden-2026-11-vervolg` vanaf `origin/main`. Alleen `STATUS.md` verandert,
+en alleen door toevoeging. Alle metingen op 2026-11-28 tussen 12:27 en 14:57 UTC op deze machine
+(aarch64-unknown-linux-gnu, rustc 1.97.1, cc 13.3.0). Proefprogramma's, uitgepakte crates en builds staan in een
+scratchmap buiten de repo (`CARGO_TARGET_DIR` daar, `--locked --offline`); de werkmap bleef schoon. De `.crate`-
+bestanden komen uit de cargo-cache; hun sha256 is per bestand vergeleken met de lockchecksum en gelijk.
+
+Kort:
+- rustls-webpki 0.103.17 parseert de SCT-extensie nu in elk certificaat. Een misvormde of dubbele extensie geeft
+  een fout; dat is aangetoond met zelfgemaakte certificaten. De echte keten van `devnet.helius-rpc.com` wordt door
+  0.103.14 en 0.103.17 allebei geaccepteerd.
+- De drie zstd-crates wisselen van licentie (MIT, MIT OR Apache-2.0, MIT/Apache-2.0 → BSD-3-Clause, bij `zstd-sys`
+  AND BSD-2-Clause). De meegeleverde C-bron is niet veranderd. Besluit over naamsvermelding ligt bij Michel.
+- libsodium: er zijn drie AVX-512-objecten, niet twee. Het Argon2-object bevat in de debugbuild 500 bytes code.
+  Geen van de drie wordt in het eindprogramma gelinkt.
+- "39 symbolen" is gereproduceerd; de telmethode staat hieronder.
+
+### Punt 1: rustls-webpki 0.103.14 → 0.103.17, de SCT-extensie
+
+**Wat verandert.** Commando's: `diff -rq` en `diff -u` op de uitgepakte `.crate`-bestanden.
+- `src/cert.rs:301-307` (0.103.17): staat de OID 1.3.6.1.4.1.11129.2.4.2 (`SCT_LIST_OID`, `src/x509.rs:134`) in
+  een certificaat, dan gaat de extensie naar `set_extension_once(&mut cert.scts, …)`. De waarde moet precies één
+  OCTET STRING zijn (`read_all(Error::BadDer, …expect_tag(…OctetString))`). Komt de extensie twee keer voor, dan
+  geeft `set_extension_once` `Error::ExtensionValueInvalid` (`src/x509.rs:49-62`).
+- In 0.103.14 bestaat die tak niet. De OID valt buiten `2.5.29`, dus `remember_extension` roept
+  `extension.unsupported(policy)` aan (`src/x509.rs:73-76` in 0.103.14). Niet-kritiek: genegeerd. Kritiek en
+  `Strict`: `UnsupportedCriticalExtension` (`src/x509.rs:26-31`).
+- Dit gebeurt in `Cert::from_input` (`src/cert.rs:146`), dus bij het eindcertificaat (`end_entity.rs:70`) én bij
+  elk tussencertificaat dat als kandidaat wordt geprobeerd (`verify_cert.rs:125`).
+- De SCT's zelf worden niet gecontroleerd. Alleen de nieuwe openbare functie `sct_log_timestamps` leest ze, en die
+  zegt "does not verify the SCTs themselves" (`end_entity.rs:174`). rustls 0.23.46 roept haar niet aan
+  (`grep -rn 'webpki::sct\|sct_log_timestamps'` in de rustls-bron: geen treffer).
+- Overige wijzigingen in deze versiesprong: blokkadelijst `DISTRUSTED_SPKIS` (zie §199), nieuwe fout
+  `CertDistrusted` (`error.rs`), nieuwe functie `spki_for_anchor` (`trust_anchor.rs`) en een FIPS-wijziging in
+  `aws_lc_rs_algs.rs`. Die laatste wordt bij ons niet gecompileerd (`cargo tree --locked -e features -i
+  rustls-webpki@0.103.17 --target all`: alleen `alloc`, `ring`, `std`).
+
+**Gemeten gedrag.** Met een klein proefprogramma buiten de repo. Dat programma roept per certificaat
+`EndEntityCert::try_from` aan, de functie die rustls gebruikt (`rustls-0.23.46/src/webpki/verify.rs:141`, via
+`ParsedCertificate::try_from` in `server_verifier.rs:240`). Gebouwd tegen `rustls-webpki` `=0.103.14` en
+`=0.103.17`, met dezelfde `ring` 0.17.14, `rustls-pki-types` 1.15.1 en `webpki-roots` 1.0.12 als onze lock. De
+testcertificaten zijn met `openssl req -x509` gemaakt. Voor "dubbel" is in een tweede extensie met OID `…2.4.3` het
+laatste OID-byte omgezet naar `02`; alleen het parseren wordt getest, de handtekening niet.
+
+| certificaat | 0.103.14 | 0.103.17 |
+|---|---|---|
+| geen SCT | Ok | Ok |
+| SCT, goed gevormd | Ok | Ok |
+| SCT, inhoud geen OCTET STRING | Ok | `BadDer` |
+| SCT, kritiek | `UnsupportedCriticalExtension` | Ok |
+| SCT, twee keer | Ok | `ExtensionValueInvalid` |
+| Helius-eindcertificaat | Ok | Ok |
+
+**Ons TLS-pad.** `cargo tree --locked -e normal -i rustls-webpki@0.103.17` geeft één route: `rustls` 0.23.46 ←
+`hyper-rustls` 0.27.9 / `tokio-rustls` 0.26.4 ← `reqwest` 0.12.28 ← `reqwest-middleware` 0.4.2 ←
+`solana-rpc-client(-api)` 2.3.13 ← `spankwallet-desktop`. Volgens §199 A3 (d) is de enige host
+`devnet.helius-rpc.com`.
+
+De keten is op 2026-11-28 om 12:27:10 UTC opgehaald met `openssl s_client -showcerts`. Dat was alleen de handshake:
+geen API-aanroep, geen sleutel. De server stuurt 4 certificaten. Alleen het eindcertificaat heeft de SCT-extensie
+(`openssl x509 -text | grep -c 'CT Precertificate SCTs'`: 1, 0, 0, 0). Het proefprogramma met
+`verify_for_usage(ALL_VERIFICATION_ALGS, TLS_SERVER_ROOTS, …, KeyUsage::server_auth())` en
+`verify_is_valid_for_subject_name("devnet.helius-rpc.com")` geeft bij beide versies Ok. Het gekozen anker is ISRG Root
+X2; daarmee is de open vraag uit §199 voor webpki zelf beantwoord, niet via rustls of de app gemeten. 0.103.17 telt 2
+SCT's.
+
+**Betekenis.**
+- Beschikbaarheid: een server waarvan een certificaat een misvormde of dubbele SCT-extensie heeft, wordt nu geweigerd.
+  Bij het eindcertificaat faalt de handshake. Bij een tussencertificaat is de fout niet fataal (`error.rs:363-381`);
+  dat kandidaatpad vervalt en een ander pad kan nog slagen. Voor Helius is dat op dit moment niet het geval (gemeten).
+- Beveiliging: dit maakt het parseren strenger. De verbinding gaat dicht in plaats van open (fail-closed). Eén punt
+  wordt ruimer: een kritieke SCT-extensie werd eerst geweigerd en wordt nu geaccepteerd. Omdat de SCT's nergens
+  worden gecontroleerd, verandert er niets aan certificaattransparantie.
+- Terug naar 0.103.14 zou RUSTSEC-2026-0382 (§199 A1) terugbrengen. Dat is daarom geen optie die hier wordt
+  voorgesteld.
+- Niet nagegaan: hoe vaak misvormde SCT-extensies bij echte servers voorkomen; andere hosts dan Helius; het gedrag
+  in de draaiende app.
+
+### Punt 2: licentie van `zstd`, `zstd-safe`, `zstd-sys`
+
+Commando's: `grep '^license' <crate>/Cargo.toml` in de uitgepakte `.crate`-bestanden, de crates.io-API
+`/api/v1/crates/<naam>/<versie>` (veld `license`, gelijk aan de Cargo.toml) en `diff -rq` op de map `zstd/`.
+
+| crate | oud | nieuw |
+|---|---|---|
+| `zstd` | MIT | BSD-3-Clause |
+| `zstd-safe` | MIT OR Apache-2.0 | BSD-3-Clause |
+| `zstd-sys` | MIT/Apache-2.0 | BSD-3-Clause AND BSD-2-Clause |
+
+Details:
+- Nieuwe `LICENSE` van alle drie: "BSD 3-Clause License, Copyright (c) 2026, Alexandre Bury". De oude MIT-tekst had
+  "Copyright (c) 2016 Alexandre Bury".
+- `zstd-sys` 2.1.3, `LICENSE.BSD-2-Clause`: "The decoders for legacy formats, in zstd/lib/legacy/, include code
+  under the 2-clause BSD license", Copyright (C) 2013-2016, Yann Collet. De legacy-bestanden `zstd_v01.c` tot en met
+  `zstd_v07.c` noemen die licentie (bijvoorbeeld `zstd_v02.c:32`).
+- De meegeleverde C-bron `zstd/lib` is tussen 2.0.16 en 2.1.3 identiek (`diff -rq`: alleen `zstd/build/` en
+  `zstd/lib/libzstd.pc.in` komen erbij). `zstd/LICENSE` (BSD, "Copyright (c) Meta Platforms, Inc. and affiliates") en
+  `zstd/COPYING` (GPLv2) zijn byte-gelijk. De bestanden zelf zeggen "licensed under both the BSD-style license … and
+  the GPLv2 … You may select, at your option, one of the above-listed licenses" (kop van `zstd_v01.c:5-8`; in de legacy-bestanden staat daarnaast BSD-2, bijvoorbeeld `zstd_v02.c:32`). De BSD-2-code in
+  `lib/legacy` zat er dus al in 2.0.16. Alleen de gedeclareerde licentie van de Rust-crates verandert.
+- De legacy-decoders worden bij ons gecompileerd: de feature `legacy` staat aan (`cargo tree --locked -e features -i
+  zstd-safe@7.4.1 --target all`; ook §199 A3 c).
+- De andere vijf bijgewerkte crates houden hun licentie: `ctutils` Apache-2.0 OR MIT, `rustls-webpki` ISC,
+  `webpki-roots` CDLA-Permissive-2.0, `quinn-proto` en `quinn-udp` MIT OR Apache-2.0.
+- De MIT-tekst eiste al dat de copyright- en licentietekst wordt meegeleverd (`zstd-0.13.3/LICENSE:6`). BSD-3 eist
+  dat bij verspreiding in binaire vorm (`zstd-0.13.5/LICENSE:11`) en voegt een clausule toe dat namen niet voor
+  aanbeveling gebruikt mogen worden (`:16`).
+- Repo: `git ls-files | grep -iE '(licen[cs]e|notice|third.?party|copying|deny\.toml|about\.toml)'` vindt alleen
+  `LICENSE` (Apache-2.0). Er is geen NOTICE-, THIRD-PARTY- of `deny.toml`-bestand. `desktop/src-tauri/Cargo.toml:10`,
+  `Cargo.toml:6`, `package.json` en `desktop/package.json` zeggen `Apache-2.0`. `tauri.conf.json` noemt geen
+  licentie. De repo vermeldt op dit moment nergens licenties van derden voor het desktopprogramma.
+
+Mogelijke vormen van naamsvermelding, alleen als feit, zonder keuze: (a) een bestand met de licentieteksten van
+derden in de repo en/of in de app-bundel; (b) zo'n bestand laten genereren uit de lock (bijvoorbeeld met
+`cargo-about`; hier niet geprobeerd); (c) een licentiecontrole in CI (bijvoorbeeld `cargo-deny` met een lijst van
+toegestane licenties) die een licentiewissel zoals deze voortaan meldt; (d) niets veranderen. Of en wanneer het
+desktopprogramma als binary wordt verspreid, is hier niet vastgesteld. Geen juridisch oordeel; zie Open besluiten.
+
+### Punt 3: libsodium op aarch64, correctie op §199 A5
+
+§199 zegt: "De AVX-512-objecten voor ChaCha20 en Salsa20 staan in het archief, maar zijn op aarch64 leeg (`size`:
+text 0, geen symbolen)." Gemeten in een schone build in een lege doelmap (`cargo build --locked --offline -p
+libsodium-sys-stable`, debug en release). De configure-regel is gelijk aan die in §199.
+
+Commando's: `ar t libsodium.a | grep -i avx512`, `size`, `nm`, `readelf -S -W` en `readelf -s -W` per object.
+
+| object (debug, `-O0`) | text | bestand | symbolen |
+|---|---|---|---|
+| `argon2-fill-block-avx512f.o` | 556 | 7360 B | lokale functie `index_alpha` |
+| `chacha20_dolbeau-avx512.o` | 0 | 3104 B | alleen SECTION/FILE |
+| `salsa20_xmm6int-avx512.o` | 0 | 3096 B | alleen SECTION/FILE |
+| `keccak1600_armsha3.o` | 0 | - | alleen SECTION/FILE |
+
+Toelichting:
+- Er zijn drie AVX-512-objecten, niet twee. Het Argon2-object heeft 500 bytes code in `.text.index_alpha` en 56
+  bytes `.eh_frame`, samen de 556 van `size`. `index_alpha` is een `static`-functie uit `argon2-core.h:139`.
+  `argon2-fill-block-avx512f.c` sluit die header in vóór de `#if defined(HAVE_AVX512FINTRIN_H) …` op regel 22. Met
+  `-O0` (CFLAGS uit `config.log`) blijft de ongebruikte functie staan. Het object heeft geen globale symbolen.
+- "Leeg" klopt voor ChaCha20 en Salsa20 alleen voor code en gegevens: text, data en bss zijn 0, en er zijn geen
+  FUNC- of OBJECT-symbolen. Het bestand zelf is niet leeg. Het bevat een ELF-header, `.debug_*`, `.comment` en een
+  symbooltabel met alleen SECTION- en FILE-items, die `nm` niet toont.
+- Ook `keccak1600_armsha3.o` heeft op deze machine geen code. Het bestand staat onder `#if
+  defined(__ARM_FEATURE_SHA3)` (regel 7) en die is met deze compiler en vlaggen niet gezet. §199 noemt het bestand in
+  de lijst "zitten als object in `libsodium.a`": dat klopt, maar het object is leeg.
+- Release (`-O3`): alle drie AVX-512-objecten en `keccak1600_armsha3.o` hebben text 0. Objecten met code: 119 van
+  139 in release, 123 van 139 in debug (`size libsodium.a | awk 'NR>1 && $1>0' | wc -l`).
+- Gelinkt (linker-map van het eindprogramma: `cargo rustc --locked --offline --bin spankwallet-desktop -- -C
+  link-arg=-Wl,-Map=<scratch>/link.map`, daarna de leden van `liblibsodium_sys-*.rlib` eruit gehaald): 29 van de 139
+  leden. Geen enkel AVX-512- of armsha3-object.
+- Van de 23 gewijzigde bestanden uit §199 A5 worden er 10 gelinkt: `argon2-core`, `core`, `ed25519_ref10`,
+  `randombytes`, `randombytes_sysrandom`, `runtime`, `softaes`, `stream_chacha20`, `stream_salsa20` en `utils`. Niet
+  gelinkt: `argon2`, `argon2-encoding`, `codecs`, `hash_sha3`, `keccak1600_armsha3`, `keccak1600_ref`,
+  `kem_mlkem768_ref`, `kem_xwing`, `randombytes_internal_random`, `shake128_ref`, `shake256_ref`,
+  `turboshake128_ref` en `turboshake256_ref`.
+- De sha256 van `libsodium.a` verschilt tussen deze build en die van 2026-11-27 in `target/debug`. Er is niet
+  nagegaan of dat alleen aan tijdstempels in het archief ligt. De gemeten aantallen zijn hiervoor niet vergeleken.
+- x86_64 is nog steeds niet gebouwd.
+
+### Punt 4: "39 symbolen", de telmethode
+
+Gereproduceerd in een vers gebouwd eindprogramma (`cargo build --locked --offline` in een lege doelmap, debug,
+2026-11-28 14:52 UTC):
+
+```
+nm --defined-only libsodium.a | awk '$2=="T"{print $3}' | sort -u > sodium_T.txt        # 866 namen
+nm spankwallet-desktop | awk '$2 ~ /^[Tt]$/ {print $3}' | sort -u > bin_T.txt          # 76435 namen
+comm -12 sodium_T.txt bin_T.txt | wc -l                                                  # 39
+```
+
+Het getal klopt, en de lijst is byte-gelijk aan die van de sessie van §199. De methode telt namen die in het archief
+als globale tekstsymbolen (`T`) gedefinieerd zijn en in het programma als tekstsymbool voorkomen, globaal of lokaal.
+Libsodium bouwt met `-fvisibility=hidden`, en de meeste van deze symbolen zijn in het programma lokaal (`t`). Telt
+men alleen `T`, dan zijn het er 19. Niet meegeteld: `static`-functies in libsodium (zoals `index_alpha`) en
+gegevenssymbolen (`D`/`R`/`B`). De vergelijking gaat op naam. Dat een gelijke naam in het programma uit een andere
+bibliotheek komt, is niet per symbool uitgesloten.
+
+### Punt 5: wat de correctieronde in §199 wel en niet dekte
+
+De alinea "Correctieronde" in §199 somt op wat er veranderde. Vergeleken met `git diff e56d5a5 dcf474d --
+STATUS.md` (+97/−17) klopt die opsomming, maar ze is niet volledig.
+
+Wel gedekt en wel genoemd: A1 (bereik `rustls-webpki` plus de controlezin), A2 (`http3`), A3 b, A3 d, A4 (semver-
+bereik en nieuwere lijnen), het blok "Wat er in de bijgewerkte crates verandert", de correctie op `4ca3bb0`, A6, en
+de zinnen bij Database en A5.
+
+Wel veranderd, maar niet genoemd: twee regels in "Niet nagegaan" (de inhoud van de crateversies, en andere hosts dan
+Helius).
+
+Niet gedekt door de correctieronde, en nu wel in deze sectie:
+- de SCT-parsing in `cert.rs` van `rustls-webpki`. Het blok noemde alleen de module `sct.rs` en dat niemand die
+  aanroept; de parsing die bij elk certificaat loopt, ontbrak (punt 1);
+- de licentiewissel van de zstd-crates (punt 2);
+- de libsodium-objecten en de telling van 39 symbolen. Die zijn in de correctieronde niet opnieuw gemeten (punt 3
+  en 4);
+- het woord "nieuwste" in het bericht van `4ca3bb0`. In §199 A4 is het verduidelijkt, maar er staat geen expliciete
+  correctie op het commitbericht (punt 6);
+- `desktop/index.html` (punt 8).
+
+Verder zegt de regel **Stand** van §199 "niet gepusht". Dat was juist bij het schrijven; inmiddels staan de drie
+commits op `origin/main` (`git ls-remote`, zie Samenvatting). Cargo- en npm-suites zijn toen niet opnieuw gedraaid;
+dat staat er correct.
+
+### Punt 6: het woord "nieuwste" in commit `4ca3bb0`
+
+Het bericht van `4ca3bb0` zegt: "Gekozen is steeds de nieuwste versie die de melding oplost, op 2026-11-27 minstens
+14 dagen oud is en niet yanked is." Het commit blijft zoals het is. Lees "nieuwste" met deze voorbehouden:
+- Het gaat om de nieuwste versie binnen het semver-bereik dat de ouders in de lock toestaan (alleen een lockupdate,
+  geen `Cargo.toml`), zoals §199 A4 het in de correctieronde formuleert. Buiten dat bereik bestonden nieuwere lijnen
+  (`zstd` 0.14, `zstd-safe` 8, `quinn-udp` 0.6, `rustls-webpki` 0.104.0-alpha; §199 A4).
+- "14 dagen oud" is gemeten met het veld `created_at` van de crates.io-API (`/api/v1/crates/<naam>/<versie>`) tegen
+  de peildatum 2026-11-27 12:08 UTC. Op 2026-11-28 opnieuw opgevraagd voor de acht gekozen versies: `created_at` is
+  gelijk aan de tijden in §199 en ook gelijk aan `updated_at`, en `yanked` is `false`.
+- `created_at` is het moment van uploaden naar crates.io. Het zegt niets over een upstream-tag of over beoordeling
+  door anderen.
+- Binnen het bereik waren er al nieuwere versies die de 14 dagen niet haalden: `zstd` 0.13.6 (`created_at`
+  2026-11-24T16:48:39Z), `zstd-safe` 7.4.2 (2026-11-24T16:48:27Z) en `zstd-sys` 2.2.0+zstd.1.6.0
+  (2026-11-24T16:15:57Z). "Nieuwste" betekent dus: de nieuwste die de 14-dagenregel haalt, niet de nieuwste die er
+  is.
+
+### Punt 7: tabellen
+
+De tabellen in deze sectie hebben korte cellen; details staan in de tekst eronder. De tabellen in §199 en eerder
+zijn niet aangepast.
+
+### Punt 8: `desktop/index.html`
+
+Wat het is: de HTML-ingangspagina van de Tauri-webview (45 regels). Vite gebruikt haar; `tauri.conf.json` heeft
+`devUrl` `http://localhost:1420` en `frontendDist` `../dist`. Ze laadt `/src/styles.css` en `/src/main.ts`, en bevat
+knoppen en invoervelden voor fase 0 (passkey registreren, execute). Er staat geen inline script, geen `fetch` en
+geen http(s)-URL in (`grep -n 'fetch\|http' desktop/index.html`: 0 treffers).
+
+Geraakt door de afhankelijkhedenronde: nee.
+- `git show --name-only --format= <commit>`: `4ca3bb0` alleen `desktop/src-tauri/Cargo.lock`, `e56d5a5` en `dcf474d`
+  alleen `STATUS.md`.
+- `git diff --name-only 581ae56 dcf474d`: alleen die twee bestanden.
+- Laatste wijziging aan het bestand: `336643f` (2026-08-19).
+
+Verband met §199 A3 (d): daar is gezocht in de `.ts`- en `.css`-bestanden onder `desktop/src` ("er staan geen
+`.html`-bestanden"). `desktop/index.html` staat één map hoger en viel buiten die zoektocht. Met de meting hierboven is
+dat aangevuld.
+
+Terzijde, niet gewijzigd: de paginatekst noemt nog `tauri-plugin-webauthn` en `authenticator-rs`, terwijl
+`desktop/src-tauri/Cargo.toml:39` zegt dat die zijn vervangen door `ctap-hid-fido2` (STATUS §75). In de lock staat
+geen `tauri-plugin-webauthn` of `authenticator`. De tekst is dus verouderd.
+
+### Controles van deze ronde
+
+| controle | resultaat |
+|---|---|
+| `git diff --stat` | alleen `STATUS.md`, 0 verwijderd |
+| `git diff -- '*.lock'` | leeg |
+| `git status --porcelain` na builds | leeg |
+
+Cargo- en npm-suites zijn niet gedraaid, omdat alleen `STATUS.md` verandert. De builds in de scratchmap dienden
+alleen als meetinstrument.
+
+### Niet vastgesteld
+
+- Hoe vaak misvormde of dubbele SCT-extensies bij echte servers voorkomen; het gedrag van de draaiende app.
+- Of het desktopprogramma als binary wordt verspreid, en dus of en wanneer de licentievoorwaarden voor binaire
+  vorm gelden.
+- Waarom de sha256 van `libsodium.a` tussen twee builds verschilt.
+- x86_64, macOS en Windows: niet gebouwd.
+
+### Open besluiten voor Michel
+
+1. **zstd-naamsvermelding.** Kiezen uit (a) tot en met (d) bij punt 2, of iets anders. Daarbij horen twee vragen:
+   moet de licentietekst ook in de app-bundel, en komt er een vaste licentiecontrole in CI?
+2. **TLS (rustls-webpki 0.103.17).** Het strengere parsen accepteren zoals het nu is (de Helius-keten is gemeten en
+   in orde), of daarnaast een vaste controle van de Helius-keten met de geleverde webpki-versie toevoegen (zoals het
+   proefprogramma uit punt 1). Teruggaan naar 0.103.14 brengt RUSTSEC-2026-0382 terug.
+3. **`desktop/index.html`.** De verouderde vermelding van `tauri-plugin-webauthn` in een aparte ronde bijwerken, of
+   laten staan.
+
+**Stand.** Eén commit op `afhankelijkheden-2026-11-vervolg`, niet gepusht. De beoordeling volgt in een verse sessie.
